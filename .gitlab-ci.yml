@@ -1,0 +1,91 @@
+---
+stages:
+  - test
+  - build
+  - post-test
+  - publish
+
+variables:
+  CONVEX_REF: 5e6375ebc155f8e54029880f9d47b3301e730333
+
+include:
+  - component: $CI_SERVER_FQDN/ci/security/bundle@1
+  - component: $CI_SERVER_FQDN/ci/golang/init-vet@2
+    inputs:
+      working_dirs: [router/usher, router/bigbrain]
+  - component: $CI_SERVER_FQDN/ci/golang/lint@2
+    inputs:
+      working_dirs: [router/usher, router/bigbrain]
+  - component: $CI_SERVER_FQDN/ci/golang/test@2
+    inputs:
+      working_dirs: [router/usher, router/bigbrain]
+  - component: $CI_SERVER_FQDN/ci/docker/lint@4
+    inputs:
+      job_name: hadolint (backend)
+      dockerfile_path: backend/Dockerfile.backend
+      ignore_rules: DL3008,DL3015
+  - component: $CI_SERVER_FQDN/ci/docker/lint@4
+    inputs:
+      job_name: hadolint (dashboard)
+      dockerfile_path: backend/Dockerfile.dashboard
+      ignore_rules: DL3008,DL3015
+  - component: $CI_SERVER_FQDN/ci/docker/lint@4
+    inputs:
+      job_name: hadolint (usher)
+      dockerfile_path: router/usher/Dockerfile
+      ignore_rules: DL3018
+  - component: $CI_SERVER_FQDN/ci/docker/lint@4
+    inputs:
+      job_name: hadolint (bigbrain)
+      dockerfile_path: router/bigbrain/Dockerfile
+      ignore_rules: DL3018
+  - component: $CI_SERVER_FQDN/ci/docker/build-and-scan@4
+    inputs:
+      name: backend
+      image: backend
+      tags: latest,$CI_COMMIT_SHA
+      scan_tag: $CI_COMMIT_SHA
+      dockerfile: backend/Dockerfile.backend
+      working_dir: backend
+      build_args: --build-arg CONVEX_REF=$CONVEX_REF
+      architectures: linux/amd64
+      rules_changes:
+        - backend/**/*
+        - .gitlab-ci.yml
+  - component: $CI_SERVER_FQDN/ci/docker/build-and-scan@4
+    inputs:
+      name: dashboard
+      image: dashboard
+      tags: latest,$CI_COMMIT_SHA
+      scan_tag: $CI_COMMIT_SHA
+      dockerfile: backend/Dockerfile.dashboard
+      working_dir: backend
+      build_args: --build-arg CONVEX_REF=$CONVEX_REF
+      architectures: linux/amd64
+      rules_changes:
+        - backend/**/*
+        - .gitlab-ci.yml
+  - component: $CI_SERVER_FQDN/ci/docker/build-and-scan@4
+    inputs:
+      name: usher
+      image: usher
+      tags: latest,$CI_COMMIT_SHA
+      scan_tag: $CI_COMMIT_SHA
+      dockerfile: router/usher/Dockerfile
+      working_dir: router/usher
+      architectures: linux/amd64,linux/arm64
+      rules_changes:
+        - router/usher/**/*
+        - .gitlab-ci.yml
+  - component: $CI_SERVER_FQDN/ci/docker/build-and-scan@4
+    inputs:
+      name: bigbrain
+      image: bigbrain
+      tags: latest,$CI_COMMIT_SHA
+      scan_tag: $CI_COMMIT_SHA
+      dockerfile: router/bigbrain/Dockerfile
+      working_dir: router/bigbrain
+      architectures: linux/amd64,linux/arm64
+      rules_changes:
+        - router/bigbrain/**/*
+        - .gitlab-ci.yml
