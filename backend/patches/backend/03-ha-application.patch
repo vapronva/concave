@@ -1,0 +1,492 @@
+diff --git a/crates/application/src/lib.rs b/crates/application/src/lib.rs
+index c07c0726c..8ac563e87 100644
+--- a/crates/application/src/lib.rs
++++ b/crates/application/src/lib.rs
+@@ -132,6 +132,7 @@ use common::{
+         env_var_total_size,
+         env_var_total_size_limit_met,
+         AllowedVisibility,
++        BackendRole,
+         ConvexOrigin,
+         ConvexSite,
+         DeploymentMetadata,
+@@ -589,7 +590,7 @@ pub struct Application<RT: Runtime> {
+     usage_event_logger: Arc<dyn UsageEventLogger>,
+     key_broker: KeyBroker,
+     deployment: DeploymentMetadata,
+-    workers: WorkerHandles,
++    workers: Arc<Mutex<Option<WorkerHandles>>>,
+     log_visibility: Arc<dyn LogVisibility<RT>>,
+     module_cache: ModuleCache<RT>,
+     system_env_var_names: HashSet<EnvVarName>,
+@@ -597,6 +598,11 @@ pub struct Application<RT: Runtime> {
+     log_manager_client: LogManagerClient,
+     audit_log_client: AuditLogClient,
+     oidc_http_client: CachedHttpClient,
++    searcher: Arc<dyn Searcher>,
++    segment_term_metadata_fetcher: Arc<dyn SegmentTermMetadataFetcher>,
++    export_provider: Arc<dyn ExportProvider<RT>>,
++    fetch_client: Arc<dyn FetchClient>,
++    promotion_log_manager: Arc<Mutex<Option<LogManagerClient>>>,
+ }
+ 
+ /// Create storage based on the storage type configuration
+@@ -668,7 +674,58 @@ impl<RT: Runtime> Application<RT> {
+         })
+     }
+ 
++    pub async fn initialize_storage_readonly(
++        runtime: RT,
++        database: &Database<RT>,
++    ) -> anyhow::Result<ApplicationStorage> {
++        let storage_type = {
++            let mut tx = database.begin_system().await?;
++            DatabaseGlobalsModel::new(&mut tx)
++                .database_globals()
++                .await?
++                .into_value()
++                .storage_type
++                .ok_or_else(|| {
++                    anyhow::anyhow!(
++                        "follower cannot start: database storage tag is not initialized (the \
++                         leader must initialize the database first)"
++                    )
++                })?
++        };
++        let files_storage =
++            create_storage(runtime.clone(), &storage_type, StorageUseCase::Files).await?;
++        let modules_storage =
++            create_storage(runtime.clone(), &storage_type, StorageUseCase::Modules).await?;
++        let search_storage = create_storage(
++            runtime.clone(),
++            &storage_type,
++            StorageUseCase::SearchIndexes,
++        )
++        .await?;
++        let exports_storage =
++            create_storage(runtime.clone(), &storage_type, StorageUseCase::Exports).await?;
++        let snapshot_imports_storage = create_storage(
++            runtime.clone(),
++            &storage_type,
++            StorageUseCase::SnapshotImports,
++        )
++        .await?;
++        database.set_search_storage(search_storage.clone());
++        tracing::info!(
++            "{:?} storage is configured (follower, read-only).",
++            storage_type
++        );
++        Ok(ApplicationStorage {
++            files_storage,
++            modules_storage,
++            search_storage,
++            exports_storage,
++            snapshot_imports_storage,
++        })
++    }
++
+     pub async fn new(
++        role: BackendRole,
+         runtime: RT,
+         database: Database<RT>,
+         file_storage: FileStorage<RT>,
+@@ -681,7 +738,7 @@ impl<RT: Runtime> Application<RT> {
+         convex_site: ConvexSite,
+         searcher: Arc<dyn Searcher>,
+         segment_term_metadata_fetcher: Arc<dyn SegmentTermMetadataFetcher>,
+-        persistence: Arc<dyn Persistence>,
++        persistence: Option<Arc<dyn Persistence>>,
+         node_actions: Actions<RT>,
+         log_visibility: Arc<dyn LogVisibility<RT>>,
+         app_auth: Arc<ApplicationAuth<RT>>,
+@@ -704,6 +761,146 @@ impl<RT: Runtime> Application<RT> {
+             CONVEX_SITE.clone() => convex_site.parse()?
+         };
+ 
++        let usage_counter = UsageCounter::new(usage_event_logger.clone());
++        let log_manager_client = if role.is_leader() {
++            let log_streaming_allowed = match &local_log_sink {
++                Some(path) => {
++                    add_local_log_sink_on_startup(database.clone(), path.clone()).await?;
++                    true
++                },
++                _ => {
++                    let mut tx = database.begin(Identity::system()).await?;
++                    let mut bi = BackendInfoModel::new(&mut tx);
++                    bi.is_log_streaming_allowed().await?
++                },
++            };
++            LogManager::start(
++                runtime.clone(),
++                database.clone(),
++                fetch_client.clone(),
++                deployment_name.clone(),
++                deployment_region.as_ref().map(|r| r.to_string()),
++                log_streaming_allowed,
++                usage_counter.clone(),
++            )
++            .await
++        } else {
++            tracing::info!(
++                "[backend-role] follower: using no-op LogManagerClient (log streaming disabled, \
++                 no DB writes)"
++            );
++            LogManagerClient::noop()
++        };
++        let (is_dev_deployment, firehose_stream_name) = {
++            let mut tx = database.begin(Identity::system()).await?;
++            let is_dev_deployment = if let Some(doc) = BackendInfoModel::new(&mut tx).get().await? {
++                doc.deployment_type == DeploymentType::Dev
++            } else {
++                false
++            };
++            let firehose_stream_name = AuditLogConfigModel::new(&mut tx)
++                .get_or_create()
++                .await?
++                .firehose_stream_name
++                .clone();
++            (is_dev_deployment, firehose_stream_name)
++        };
++        let audit_log_client = AuditLogClient::new(
++            log_manager_client.clone(),
++            is_dev_deployment,
++            firehose_stream_name,
++            &deployment.name,
++        )
++        .await?;
++        let function_log = FunctionExecutionLog::new(
++            runtime.clone(),
++            usage_counter.clone(),
++            Arc::new(log_manager_client.clone()),
++        );
++        {
++            let function_log = function_log.clone();
++            database.set_invalidation_callback(Arc::new(move |events| {
++                function_log.record_subscription_invalidations(events);
++            }))?;
++        }
++        let runner = Arc::new(ApplicationFunctionRunner::new(
++            runtime.clone(),
++            database.clone(),
++            key_broker.clone(),
++            function_runner.clone(),
++            node_actions,
++            file_storage.transactional_file_storage.clone(),
++            application_storage.modules_storage.clone(),
++            module_loader,
++            function_log.clone(),
++            audit_log_client.clone(),
++            default_system_env_vars.clone(),
++            cache,
++        ));
++        function_runner.set_action_callbacks(runner.clone());
++        let application = Self {
++            runtime: runtime.clone(),
++            database: database.clone(),
++            runner,
++            function_log,
++            file_storage,
++            application_storage,
++            usage_event_logger,
++            usage_counter,
++            key_broker,
++            deployment,
++            workers: Arc::new(Mutex::new(None)),
++            log_visibility,
++            module_cache,
++            system_env_var_names: default_system_env_vars.into_keys().collect(),
++            app_auth,
++            log_manager_client: log_manager_client.clone(),
++            audit_log_client,
++            oidc_http_client,
++            searcher,
++            segment_term_metadata_fetcher,
++            export_provider,
++            fetch_client: fetch_client.clone(),
++            promotion_log_manager: Arc::new(Mutex::new(None)),
++        };
++        if role.is_leader() {
++            let persistence = persistence
++                .clone()
++                .expect("leader requires a read-write Persistence handle");
++            application
++                .start_leader_workers(
++                    persistence,
++                    log_manager_client,
++                    lease_lost_shutdown,
++                    deleted_tablet_receiver,
++                )
++                .await?;
++        } else {
++            tracing::info!(
++                "[backend-role] follower mode: skipping all write-path workers (warm standby); \
++                 awaiting in-process promotion"
++            );
++            let _ = (lease_lost_shutdown, deleted_tablet_receiver, persistence);
++        }
++        Ok(application)
++    }
++
++    pub async fn start_leader_workers(
++        &self,
++        persistence: Arc<dyn Persistence>,
++        log_manager_client: LogManagerClient,
++        lease_lost_shutdown: ShutdownSignal,
++        deleted_tablet_receiver: tokio::sync::mpsc::Receiver<TabletId>,
++    ) -> anyhow::Result<()> {
++        let runtime = &self.runtime;
++        let database = &self.database;
++        let application_storage = &self.application_storage;
++        let usage_event_logger = &self.usage_event_logger;
++        let usage_counter = &self.usage_counter;
++        let function_log = &self.function_log;
++        let runner = &self.runner;
++        let file_storage = &self.file_storage;
++        let deployment_name = self.deployment.name.clone();
+         let mut index_worker = Arc::new(Mutex::new(None));
+         if *ENABLE_INDEX_BACKFILL {
+             let index_worker_fut = IndexWorker::new(
+@@ -728,8 +925,8 @@ impl<RT: Runtime> Application<RT> {
+             database.clone(),
+             persistence.reader(),
+             application_storage.search_storage.clone(),
+-            searcher,
+-            segment_term_metadata_fetcher,
++            self.searcher.clone(),
++            self.segment_term_metadata_fetcher.clone(),
+         );
+         let search_worker = Arc::new(Mutex::new(search_worker));
+         let search_and_vector_bootstrap_worker =
+@@ -755,74 +952,6 @@ impl<RT: Runtime> Application<RT> {
+             runtime.spawn("system_table_cleanup_worker", system_table_cleanup_worker),
+         ));
+ 
+-        // If local_log_sink is passed in, this is a local instance, so we enable log
+-        // streaming by default. Otherwise, it's hard to grant the
+-        // entitlement in testing and in load generator. If not local, we
+-        // read the entitlement from the database.
+-        let mut tx = database.begin(Identity::system()).await?;
+-        let mut bi = BackendInfoModel::new(&mut tx);
+-        let log_streaming_allowed = if let Some(path) = local_log_sink {
+-            add_local_log_sink_on_startup(database.clone(), path).await?;
+-            true
+-        } else {
+-            bi.is_log_streaming_allowed().await?
+-        };
+-
+-        let usage_counter = UsageCounter::new(usage_event_logger.clone());
+-        let log_manager_client = LogManager::start(
+-            runtime.clone(),
+-            database.clone(),
+-            fetch_client.clone(),
+-            deployment_name.clone(),
+-            deployment_region.as_ref().map(|r| r.to_string()),
+-            log_streaming_allowed,
+-            usage_counter.clone(),
+-        )
+-        .await;
+-
+-        let is_dev_deployment = if let Some(doc) = bi.get().await? {
+-            doc.deployment_type == DeploymentType::Dev
+-        } else {
+-            false
+-        };
+-        let audit_log_config = AuditLogConfigModel::new(&mut tx).get_or_create().await?;
+-        let audit_log_client = AuditLogClient::new(
+-            log_manager_client.clone(),
+-            is_dev_deployment,
+-            audit_log_config.firehose_stream_name.clone(),
+-            &deployment.name,
+-        )
+-        .await?;
+-
+-        let function_log = FunctionExecutionLog::new(
+-            runtime.clone(),
+-            usage_counter.clone(),
+-            Arc::new(log_manager_client.clone()),
+-        );
+-
+-        {
+-            let function_log = function_log.clone();
+-            database.set_invalidation_callback(Arc::new(move |events| {
+-                function_log.record_subscription_invalidations(events);
+-            }))?;
+-        }
+-
+-        let runner = Arc::new(ApplicationFunctionRunner::new(
+-            runtime.clone(),
+-            database.clone(),
+-            key_broker.clone(),
+-            function_runner.clone(),
+-            node_actions,
+-            file_storage.transactional_file_storage.clone(),
+-            application_storage.modules_storage.clone(),
+-            module_loader,
+-            function_log.clone(),
+-            audit_log_client.clone(),
+-            default_system_env_vars.clone(),
+-            cache,
+-        ));
+-        function_runner.set_action_callbacks(runner.clone());
+-
+         let scheduled_job_runner = ScheduledJobRunner::start(
+             runtime.clone(),
+             deployment_name.clone(),
+@@ -847,7 +976,7 @@ impl<RT: Runtime> Application<RT> {
+             database.clone(),
+             application_storage.exports_storage.clone(),
+             application_storage.files_storage.clone(),
+-            export_provider,
++            self.export_provider.clone(),
+             usage_counter.clone(),
+             deployment_name.clone(),
+         );
+@@ -884,7 +1013,7 @@ impl<RT: Runtime> Application<RT> {
+             deployment_name.clone(),
+         );
+ 
+-        let workers = WorkerHandles {
++        let handles = WorkerHandles {
+             usage_gauges_tracking_worker,
+             scheduled_job_runner,
+             cron_job_executor,
+@@ -899,33 +1028,86 @@ impl<RT: Runtime> Application<RT> {
+             system_table_cleanup_worker,
+             migration_worker,
+         };
++        *self.workers.lock() = Some(handles);
++        Ok(())
++    }
+ 
+-        Ok(Self {
+-            runtime,
+-            database,
+-            runner,
+-            function_log,
+-            file_storage,
+-            application_storage,
+-            usage_event_logger,
+-            usage_counter,
+-            key_broker,
+-            deployment,
+-            workers,
+-            log_visibility,
+-            module_cache,
+-            system_env_var_names: default_system_env_vars.into_keys().collect(),
+-            app_auth,
+-            log_manager_client,
+-            audit_log_client,
+-            oidc_http_client,
+-        })
++    pub async fn become_leader(
++        &self,
++        rw_persistence: Arc<dyn Persistence>,
++        retention_rate_limiter: Arc<common::runtime::RateLimiter<RT>>,
++        preempt_signal: ShutdownSignal,
++    ) -> anyhow::Result<()> {
++        tracing::info!("[promote] Application::become_leader: promoting Database");
++        let deleted_tablet_receiver = self
++            .database
++            .become_leader(
++                rw_persistence.clone(),
++                retention_rate_limiter,
++                preempt_signal.clone(),
++            )
++            .await?;
++        let log_streaming_allowed = {
++            let mut tx = self.database.begin(Identity::system()).await?;
++            let mut bi = BackendInfoModel::new(&mut tx);
++            bi.is_log_streaming_allowed().await?
++        };
++        let real_log_manager_client = LogManager::start(
++            self.runtime.clone(),
++            self.database.clone(),
++            self.fetch_client.clone(),
++            self.deployment.name.clone(),
++            self.deployment.region.as_ref().map(|r| r.to_string()),
++            log_streaming_allowed,
++            self.usage_counter.clone(),
++        )
++        .await;
++        let prev = self
++            .promotion_log_manager
++            .lock()
++            .replace(real_log_manager_client.clone());
++        if let Some(prev) = prev {
++            let _ = prev.shutdown().await;
++        }
++        tracing::info!("[promote] Application::become_leader: starting leader workers");
++        self.start_leader_workers(
++            rw_persistence,
++            real_log_manager_client,
++            preempt_signal,
++            deleted_tablet_receiver,
++        )
++        .await?;
++        tracing::info!("[promote] Application::become_leader complete");
++        Ok(())
++    }
++
++    pub async fn become_follower(
++        &self,
++        rw_persistence: Arc<dyn Persistence>,
++    ) -> anyhow::Result<()> {
++        tracing::info!("[demote] Application::become_follower: stopping leader workers");
++        let workers = self.workers.lock().take();
++        if let Some(workers) = workers {
++            workers.shutdown().await?;
++        }
++        let promo_log = self.promotion_log_manager.lock().take();
++        if let Some(promo_log) = promo_log {
++            let _ = promo_log.shutdown().await;
++        }
++        tracing::info!("[demote] Application::become_follower: demoting Database");
++        self.database.become_follower(rw_persistence).await?;
++        tracing::info!("[demote] Application::become_follower complete");
++        Ok(())
+     }
+ 
+     pub fn runtime(&self) -> RT {
+         self.runtime.clone()
+     }
+ 
++    pub fn database(&self) -> &Database<RT> {
++        &self.database
++    }
++
+     pub fn modules_storage(&self) -> &Arc<dyn Storage> {
+         &self.application_storage.modules_storage
+     }
+@@ -3675,7 +3857,10 @@ impl<RT: Runtime> Application<RT> {
+     }
+ 
+     pub async fn shutdown(&self) -> anyhow::Result<()> {
+-        self.workers.shutdown().await?;
++        let workers = self.workers.lock().clone();
++        if let Some(workers) = &workers {
++            workers.shutdown().await?;
++        }
+         self.log_manager_client.shutdown().await?;
+         self.runner.shutdown().await?;
+         self.database.shutdown().await?;
+diff --git a/crates/log_streaming/src/lib.rs b/crates/log_streaming/src/lib.rs
+index 2cf993c59..b555b7bd8 100644
+--- a/crates/log_streaming/src/lib.rs
++++ b/crates/log_streaming/src/lib.rs
+@@ -101,6 +101,16 @@ pub struct LogManagerClient {
+ }
+ 
+ impl LogManagerClient {
++    pub fn noop() -> Self {
++        let (event_sender, _rx) = mpsc::channel(1);
++        LogManagerClient {
++            handle: Arc::new(Mutex::new(None)),
++            event_sender,
++            active_sinks_count: Arc::new(AtomicUsize::new(0)),
++            entitlement_enabled: Arc::new(AtomicBool::new(false)),
++        }
++    }
++
+     fn send_logs_inner(&self, logs: Vec<LogEvent>) -> Result<(), SendLogBatchError> {
+         let mut dropped = 0;
+         let mut num_left = logs.len();

@@ -1,0 +1,77 @@
+FROM docker.io/library/node:24-trixie-slim AS build
+
+RUN sed --in-place 's!http://deb.debian.org/debian-security!http://mirror.selectel.ru/debian-security!g; s!http://deb.debian.org/debian!http://mirror.selectel.ru/debian!g' /etc/apt/sources.list.d/debian.sources && \
+      apt-get update && \
+      apt-get install --assume-yes ca-certificates && \
+      update-ca-certificates && \
+      sed --in-place 's!http://mirror.selectel.ru/debian!https://mirror.selectel.ru/debian!g' /etc/apt/sources.list.d/debian.sources && \
+      apt-get update && \
+      apt-get upgrade --assume-yes && \
+      apt-get install --assume-yes curl build-essential git python3 perl && \
+      apt-get clean && \
+      rm --recursive --force /var/lib/apt/lists/*
+
+WORKDIR /src
+
+ARG CONVEX_REF=5e6375ebc155f8e54029880f9d47b3301e730333
+
+RUN git init --quiet . && \
+    git remote add origin https://github.com/get-convex/convex-backend.git && \
+    git fetch --quiet --depth 1 origin "${CONVEX_REF}" && \
+    git checkout --quiet FETCH_HEAD
+
+COPY patches/backend /tmp/patches/backend
+COPY apply-patches.sh /tmp/apply-patches.sh
+
+RUN PATCHES_DIR=/tmp/patches/backend bash /tmp/apply-patches.sh /src
+
+RUN --mount=type=cache,target=/root/.npm npm install --global @microsoft/rush@5
+
+WORKDIR /src/npm-packages/dashboard-self-hosted
+
+ENV PUPPETEER_SKIP_DOWNLOAD=1 PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+
+RUN rush update
+
+ENV RUSH_BUILD_CACHE_ENABLED=0
+
+ENV NODE_ENV=production
+ARG NEXT_PUBLIC_LOAD_MONACO_INTERNALLY="true"
+ARG NEXT_PUBLIC_DISABLE_CONVEX_VERSION_CHECK=""
+ENV NEXT_PUBLIC_LOAD_MONACO_INTERNALLY=${NEXT_PUBLIC_LOAD_MONACO_INTERNALLY}
+ENV NEXT_PUBLIC_DISABLE_CONVEX_VERSION_CHECK=${NEXT_PUBLIC_DISABLE_CONVEX_VERSION_CHECK}
+
+RUN rush build --to dashboard-self-hosted
+
+RUN rush-pnpm deploy --legacy --filter=dashboard-self-hosted --prod /tmp/deploy
+
+FROM docker.io/library/node:24-trixie-slim
+
+LABEL org.opencontainers.image.source=https://github.com/get-convex/convex-backend
+
+RUN sed --in-place 's!http://deb.debian.org/debian-security!http://mirror.selectel.ru/debian-security!g; s!http://deb.debian.org/debian!http://mirror.selectel.ru/debian!g' /etc/apt/sources.list.d/debian.sources && \
+      apt-get update && \
+      apt-get install --assume-yes ca-certificates && \
+      update-ca-certificates && \
+      sed --in-place 's!http://mirror.selectel.ru/debian!https://mirror.selectel.ru/debian!g' /etc/apt/sources.list.d/debian.sources && \
+      apt-get update && \
+      apt-get upgrade --assume-yes && \
+      apt-get install --assume-yes curl && \
+      apt-get clean && \
+      rm --recursive --force /var/lib/apt/lists/*
+
+RUN groupadd --system --gid 1001 nodejs && useradd --system --uid 1001 --gid nodejs nextjs
+
+COPY --from=build --chown=nextjs:nodejs /tmp/deploy/ /app/
+
+WORKDIR /app
+
+RUN cp /app/.next/standalone/server.js .
+
+USER nextjs
+
+EXPOSE 6791
+
+ENV PORT=6791 HOSTNAME=0.0.0.0
+
+CMD ["node", "./server.js"]

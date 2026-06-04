@@ -1,0 +1,129 @@
+diff --git a/crates/local_backend/src/usage_forwarder.rs b/crates/local_backend/src/usage_forwarder.rs
+new file mode 100644
+index 000000000..4e83c0ad0
+--- /dev/null
++++ b/crates/local_backend/src/usage_forwarder.rs
+@@ -0,0 +1,123 @@
++use async_trait::async_trait;
++use events::usage::{
++    UsageEvent,
++    UsageEventLogger,
++};
++use reqwest::Client;
++use tokio::{
++    sync::{
++        mpsc,
++        oneshot,
++        Mutex,
++    },
++    time::{
++        timeout,
++        Duration,
++    },
++};
++
++const USAGE_FORWARDER_CHANNEL_CAPACITY: usize = 2048;
++
++#[derive(Debug)]
++pub struct HttpUsageForwarder {
++    tx: mpsc::Sender<Vec<UsageEvent>>,
++    shutdown_tx: Mutex<Option<oneshot::Sender<()>>>,
++    worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
++}
++
++async fn post_events(
++    client: &Client,
++    sink_url: &str,
++    token: Option<&str>,
++    deployment: &str,
++    events: Vec<UsageEvent>,
++) {
++    if events.is_empty() {
++        return;
++    }
++    let body = serde_json::json!({
++        "deployment": deployment,
++        "events": events,
++    });
++    let mut req = client.post(sink_url).json(&body);
++    if let Some(token) = token {
++        req = req.bearer_auth(token);
++    }
++    match req.send().await {
++        Ok(resp) if resp.status().is_success() => {},
++        Ok(resp) => tracing::warn!("usage sink {} returned {}", sink_url, resp.status()),
++        Err(e) => tracing::warn!("usage sink post failed: {e}"),
++    }
++}
++
++impl HttpUsageForwarder {
++    pub fn new(sink_url: String, deployment: String) -> Self {
++        let token = std::env::var("CONVEX_USAGE_SINK_TOKEN")
++            .ok()
++            .filter(|t| !t.is_empty());
++        let (tx, mut rx) = mpsc::channel::<Vec<UsageEvent>>(USAGE_FORWARDER_CHANNEL_CAPACITY);
++        let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
++        let client = Client::builder()
++            .timeout(Duration::from_secs(30))
++            .connect_timeout(Duration::from_secs(10))
++            .build()
++            .unwrap_or_else(|_| Client::new());
++        let worker = tokio::spawn(async move {
++            loop {
++                tokio::select! {
++                    Some(events) = rx.recv() => {
++                        post_events(&client, &sink_url, token.as_deref(), &deployment, events).await
++                    },
++                    _ = &mut shutdown_rx => {
++                        while let Ok(events) = rx.try_recv() {
++                            post_events(
++                                &client,
++                                &sink_url,
++                                token.as_deref(),
++                                &deployment,
++                                events,
++                            )
++                            .await;
++                        }
++                        break;
++                    },
++                    else => break,
++                }
++            }
++        });
++        Self {
++            tx,
++            shutdown_tx: Mutex::new(Some(shutdown_tx)),
++            worker: Mutex::new(Some(worker)),
++        }
++    }
++}
++
++#[async_trait]
++impl UsageEventLogger for HttpUsageForwarder {
++    async fn record_async(&self, events: Vec<UsageEvent>) {
++        let n = events.len();
++        if let Err(err) = self.tx.try_send(events) {
++            match err {
++                mpsc::error::TrySendError::Full(_) => tracing::warn!(
++                    "usage forwarder channel full (capacity {}); dropping {} events",
++                    USAGE_FORWARDER_CHANNEL_CAPACITY,
++                    n
++                ),
++                mpsc::error::TrySendError::Closed(_) => {
++                    tracing::warn!("usage forwarder channel closed; dropping {} events", n)
++                },
++            }
++        }
++    }
++
++    async fn shutdown(&self) -> anyhow::Result<()> {
++        if let Some(tx) = self.shutdown_tx.lock().await.take() {
++            let _ = tx.send(());
++        }
++        if let Some(handle) = self.worker.lock().await.take() {
++            let _ = timeout(Duration::from_secs(5), handle).await;
++        }
++        Ok(())
++    }
++}

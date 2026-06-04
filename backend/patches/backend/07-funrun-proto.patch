@@ -1,0 +1,170 @@
+diff --git a/crates/pb/protos/funrun.proto b/crates/pb/protos/funrun.proto
+new file mode 100644
+index 000000000..d8be7724c
+--- /dev/null
++++ b/crates/pb/protos/funrun.proto
+@@ -0,0 +1,150 @@
++syntax = "proto3";
++
++package funrun;
++
++import "common.proto";
++import "convex_identity.proto";
++import "convex_query_journal.proto";
++import "outcome.proto";
++import "usage.proto";
++
++service Funrun {
++  rpc RunFunction(RunFunctionRequest) returns (stream RunFunctionResponsePart);
++
++  rpc RunHttpAction(RunHttpActionRequest) returns (stream HttpActionResponsePart);
++}
++
++message RunFunctionRequest {
++  string instance_name = 1;
++
++  common.UdfType udf_type = 2;
++
++  convex_identity.UncheckedIdentity identity = 3;
++
++  common.RepeatableTimestamp ts = 4;
++
++  repeated common.DocumentUpdateWithPrevTs existing_writes = 5;
++
++  optional common.ValidatedPathAndArgs path_and_args = 6;
++  optional convex_query_journal.QueryJournal journal = 7;
++
++  repeated EnvVar default_system_env_vars = 8;
++
++  repeated IndexLastModified in_memory_index_last_modified = 9;
++
++  common.ExecutionContext context = 10;
++
++  optional string backend_callback_url = 11;
++  optional string callback_token = 12;
++  optional string auth_header = 13;
++}
++
++message EnvVar {
++  string name = 1;
++  string value = 2;
++}
++
++message IndexLastModified {
++  string index_id = 1;
++  uint64 last_modified_ts = 2;
++}
++
++message RunFunctionResponsePart {
++  oneof part {
++    outcome.LogLine log_line = 1;
++    RunFunctionResult result = 2;
++  }
++}
++
++message RunFunctionResult {
++  outcome.FunctionOutcome outcome = 1;
++  optional FunctionFinalTransaction final_transaction = 2;
++  usage.FunctionUsageStats usage_stats = 3;
++}
++
++message RunHttpActionRequest {
++  string instance_name = 1;
++
++  convex_identity.UncheckedIdentity identity = 2;
++
++  common.RepeatableTimestamp ts = 3;
++
++  repeated common.DocumentUpdateWithPrevTs existing_writes = 4;
++
++  repeated EnvVar default_system_env_vars = 5;
++
++  repeated IndexLastModified in_memory_index_last_modified = 6;
++
++  common.ExecutionContext context = 7;
++
++  optional string backend_callback_url = 8;
++  optional string callback_token = 9;
++  optional string auth_header = 10;
++
++  common.ValidatedHttpPath http_module_path = 11;
++  string routed_path = 12;
++  common.HttpActionRequestHead http_request_head = 13;
++  optional bytes http_request_body = 14;
++}
++
++message HttpActionResponsePart {
++  oneof part {
++    common.HttpActionResponse response = 1;
++    RunFunctionResult result = 2;
++  }
++}
++
++message FunctionFinalTransaction {
++  uint64 begin_timestamp = 1;
++  FunctionReads reads = 2;
++  repeated common.DocumentUpdateWithPrevTs writes = 3;
++  repeated RowsReadByTablet rows_read_by_tablet = 4;
++}
++
++message FunctionReads {
++  repeated IndexedReads indexed = 1;
++  uint64 num_intervals = 2;
++  ReadSize user_tx_size = 3;
++  ReadSize system_tx_size = 4;
++  reserved 5;
++  repeated SearchReads search = 6;
++}
++
++message IndexedReads {
++  string index_name = 1;
++  repeated common.FieldPath fields = 2;
++  repeated common.Interval intervals = 3;
++}
++
++message SearchReads {
++  string index_name = 1;
++  repeated TextQueryTermRead text_queries = 2;
++  repeated FilterConditionRead filter_conditions = 3;
++}
++
++message TextQueryTermRead {
++  common.FieldPath field_path = 1;
++  TextQueryTerm term = 2;
++}
++
++message TextQueryTerm {
++  oneof term {
++    string exact = 1;
++    string prefix = 2;
++  }
++}
++
++message FilterConditionRead {
++  common.FieldPath field_path = 1;
++  bytes value = 2;
++}
++
++message ReadSize {
++  uint64 total_document_size = 1;
++  uint64 total_document_count = 2;
++}
++
++message RowsReadByTablet {
++  string tablet_id = 1;
++  uint64 rows_read = 2;
++}
+diff --git a/crates/pb/src/lib.rs b/crates/pb/src/lib.rs
+index 0a2d279b4..30da5ac90 100644
+--- a/crates/pb/src/lib.rs
++++ b/crates/pb/src/lib.rs
+@@ -27,6 +27,9 @@ pub mod convex_query_journal {
+ pub mod errors {
+     include!(concat!(env!("OUT_DIR"), "/errors.rs"));
+ }
++pub mod funrun {
++    include!(concat!(env!("OUT_DIR"), "/funrun.rs"));
++}
+ pub mod outcome {
+     include!(concat!(env!("OUT_DIR"), "/outcome.rs"));
+ }

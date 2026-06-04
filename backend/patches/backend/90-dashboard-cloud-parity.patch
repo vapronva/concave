@@ -1,0 +1,747 @@
+diff --git a/npm-packages/dashboard-common/src/features/settings/components/backups/SnapshotExport.tsx b/npm-packages/dashboard-common/src/features/settings/components/backups/SnapshotExport.tsx
+new file mode 100644
+index 000000000..d47655e25
+--- /dev/null
++++ b/npm-packages/dashboard-common/src/features/settings/components/backups/SnapshotExport.tsx
+@@ -0,0 +1,117 @@
++import { DownloadIcon, EnvelopeClosedIcon } from "@radix-ui/react-icons";
++import { Link } from "@ui/Link";
++import { Button } from "@ui/Button";
++import { Spinner } from "@ui/Spinner";
++import { Callout } from "@ui/Callout";
++import { Sheet } from "@ui/Sheet";
++import { useGetZipExport } from "@common/lib/deploymentApi";
++import { Fragment, useContext } from "react";
++import { useQuery } from "convex/react";
++import udfs from "@common/udfs";
++import { DeploymentInfoContext } from "@common/lib/deploymentContext";
++import { CompletedExport } from "system-udfs/convex/_system/frontend/common";
++
++function LatestSnapshot({
++  existingExport,
++}: {
++  existingExport: CompletedExport;
++}) {
++  const getZipExport = useGetZipExport(existingExport.format);
++  const format = existingExport.format?.format;
++  if (format !== "zip") {
++    throw new Error(`unexpected export with format ${format}`);
++  }
++  const { useCurrentDeployment } = useContext(DeploymentInfoContext);
++  const deployment = useCurrentDeployment();
++  const filename = `snapshot_${
++    deployment!.name
++  }_${existingExport.start_ts.toString()}.${format}`;
++  return (
++    <div>
++      <h4 className="mb-2">Latest Snapshot</h4>
++      <p className="mb-4 text-sm">Download a snapshot of your tables.</p>
++      <div className="max-w-2xl rounded-md border">
++        <div className="rounded-t-md bg-background-primary px-4 py-2 text-sm sm:flex sm:justify-between sm:gap-4">
++          <div className="truncate">
++            Created{" "}
++            {new Date(
++              Number(existingExport.start_ts / BigInt(1000000)),
++            ).toLocaleString()}{" "}
++          </div>
++          <div className="truncate text-content-errorSecondary">
++            Expires{" "}
++            {new Date(
++              Number(existingExport.expiration_ts / BigInt(1000000)),
++            ).toLocaleString()}
++          </div>
++        </div>
++        <div className="flex flex-col">
++          <div className="flex w-full">
++            <div className="flex w-full gap-x-4 overflow-hidden rounded-b-md md:grid-cols-[minmax(auto,calc(100%-10rem))_10rem]">
++              <Fragment key={existingExport.zip_object_key}>
++                <div className="flex items-center truncate px-4 text-sm whitespace-nowrap">
++                  <div className="truncate">{filename}</div>
++                </div>
++                <div className="ml-auto flex items-center p-2 text-right text-sm font-medium">
++                  <Button
++                    size="sm"
++                    variant="primary"
++                    inline
++                    aria-label="download"
++                    href={getZipExport(existingExport._id)}
++                  >
++                    <DownloadIcon aria-label="Download" />
++                    <span className="hidden md:flex">Download</span>
++                  </Button>
++                </div>
++              </Fragment>
++            </div>
++          </div>
++        </div>
++      </div>
++    </div>
++  );
++}
++
++export function SnapshotExport() {
++  const existingExport = useQuery(udfs.latestExport.default);
++  return (
++    <Sheet>
++      {existingExport ? (
++        <div className="mt-4 text-content-primary">
++          {["requested", "in_progress"].some(
++            (s) => s === existingExport.state,
++          ) ? (
++            <div className="float-left flex items-center gap-2">
++              <Spinner /> Export in progress
++            </div>
++          ) : existingExport.state === "failed" ? (
++            <Callout variant="error">
++              <div>
++                Latest snapshot export failed. Please try again or contact us at{" "}
++                <Link href="mailto:support@convex.dev" className="items-center">
++                  <EnvelopeClosedIcon className="mr-0.5 inline" />
++                  support@convex.dev
++                </Link>
++              </div>
++            </Callout>
++          ) : existingExport.state === "completed" &&
++            Date.now() <
++              Number(existingExport.expiration_ts / BigInt(1000000)) ? (
++            <div className="flex flex-col gap-4">
++              <LatestSnapshot existingExport={existingExport} />
++            </div>
++          ) : (
++            <span className="text-content-secondary">
++              Latest snapshot export expired.
++            </span>
++          )}
++        </div>
++      ) : (
++        <span className="mt-4 text-content-secondary">
++          No snapshot export requested yet.
++        </span>
++      )}
++    </Sheet>
++  );
++}
+diff --git a/npm-packages/dashboard-common/src/features/settings/components/backups/SnapshotImport.tsx b/npm-packages/dashboard-common/src/features/settings/components/backups/SnapshotImport.tsx
+new file mode 100644
+index 000000000..1d6a0fefc
+--- /dev/null
++++ b/npm-packages/dashboard-common/src/features/settings/components/backups/SnapshotImport.tsx
+@@ -0,0 +1,420 @@
++import {
++  CheckCircledIcon,
++  CheckIcon,
++  ChevronDownIcon,
++  ChevronUpIcon,
++  CrossCircledIcon,
++} from "@radix-ui/react-icons";
++import { Spinner } from "@ui/Spinner";
++import { TimestampDistance } from "@common/elements/TimestampDistance";
++import { Tooltip } from "@ui/Tooltip";
++import { Button } from "@ui/Button";
++import { Sheet } from "@ui/Sheet";
++import { ConfirmationDialog } from "@ui/ConfirmationDialog";
++import { useQuery } from "convex/react";
++import udfs from "@common/udfs";
++import { Doc, Id } from "system-udfs/convex/_generated/dataModel";
++import { formatDistanceStrict } from "date-fns";
++import { Link } from "@ui/Link";
++import { DeploymentInfoContext } from "@common/lib/deploymentContext";
++import { snapshotImportFormat } from "system-udfs/convex/tableDefs/snapshotImport";
++import { Infer } from "convex/values";
++import { useCancelImport, useConfirmImport } from "@common/lib/deploymentApi";
++import {
++  Disclosure,
++  DisclosureButton,
++  DisclosurePanel,
++} from "@headlessui/react";
++import { useContext, useState } from "react";
++import { PuzzlePieceIcon } from "@common/elements/icons";
++
++function ConfirmImportButton({
++  snapshotImport,
++}: {
++  snapshotImport: Doc<"_snapshot_imports">;
++}) {
++  const [showDialog, setShowDialog] = useState(false);
++  const confirmImport = useConfirmImport();
++  return (
++    <>
++      {showDialog && (
++        <ConfirmationDialog
++          confirmText="Confirm"
++          dialogTitle="Confirm import"
++          variant="primary"
++          dialogBody={
++            <div>
++              <div>Are you sure you want to perform the following import?</div>
++              <ImportSummary
++                snapshotImportCheckpoints={snapshotImport.checkpoints}
++              />
++            </div>
++          }
++          onConfirm={() => confirmImport(snapshotImport._id)}
++          onClose={() => setShowDialog(false)}
++        />
++      )}
++      <Button onClick={() => setShowDialog(true)}>Confirm</Button>
++    </>
++  );
++}
++
++function CancelImportButton({
++  importId,
++}: {
++  importId: Id<"_snapshot_imports">;
++}) {
++  const [showDialog, setShowDialog] = useState(false);
++  const cancelImport = useCancelImport();
++  return (
++    <>
++      {showDialog && (
++        <ConfirmationDialog
++          confirmText="Confirm"
++          dialogTitle="Cancel import"
++          dialogBody="Are you sure you want to cancel this import?"
++          onConfirm={() => cancelImport(importId)}
++          onClose={() => setShowDialog(false)}
++        />
++      )}
++      <Button variant="danger" onClick={() => setShowDialog(true)}>
++        Cancel
++      </Button>
++    </>
++  );
++}
++
++function ImportStateBody({
++  snapshotImport,
++}: {
++  snapshotImport: Doc<"_snapshot_imports">;
++}) {
++  switch (snapshotImport.state.state) {
++    case "uploaded":
++      return (
++        <div className="flex items-center gap-2">
++          <Spinner className="ml-0" /> Uploading snapshot
++        </div>
++      );
++    case "waiting_for_confirmation":
++      return (
++        <div>
++          {(snapshotImport.checkpoints === null ||
++            snapshotImport.checkpoints === undefined) && (
++            <div className="font-mono whitespace-pre-wrap">
++              {snapshotImport.state.message_to_confirm}
++            </div>
++          )}
++          <div className="flex gap-2">
++            <ConfirmImportButton snapshotImport={snapshotImport} />
++            <CancelImportButton importId={snapshotImport._id} />
++          </div>
++        </div>
++      );
++    case "in_progress":
++      return (
++        <div>
++          <CancelImportButton importId={snapshotImport._id} />
++          <div className="flex flex-col">
++            {snapshotImport.state.checkpoint_messages.map((message, index) => (
++              <div key={index} className="flex items-center gap-2">
++                <CheckIcon /> {message}
++              </div>
++            ))}
++            <div className="flex items-center gap-2">
++              <Spinner className="ml-0" />{" "}
++              {snapshotImport.state.progress_message}
++            </div>
++          </div>
++        </div>
++      );
++    case "completed": {
++      const completedDate = new Date(
++        Number(snapshotImport.state.timestamp / BigInt(1_000_000)),
++      );
++      return (
++        <div>
++          <Tooltip tip={completedDate.toLocaleString()}>
++            <div className="flex items-center gap-1 border p-1 text-sm text-content-primary">
++              <CheckCircledIcon className="min-w-[1rem] text-util-success" />
++              {`Completed ${formatDistanceStrict(completedDate, new Date(), {
++                addSuffix: true,
++              })}`}
++            </div>
++          </Tooltip>
++        </div>
++      );
++    }
++    case "failed":
++      return (
++        <div className="flex w-fit items-center gap-1 rounded-sm border p-1 text-sm">
++          <CrossCircledIcon className="min-w-[1rem] text-content-errorSecondary" />
++          {snapshotImport.state.error_message}
++        </div>
++      );
++    default:
++      throw new Error(
++        `unexpected snapshot import state ${snapshotImport.state}`,
++      );
++  }
++}
++
++function ImportStatePill({
++  snapshotImportState,
++}: {
++  snapshotImportState: Doc<"_snapshot_imports">["state"]["state"];
++}) {
++  switch (snapshotImportState) {
++    case "uploaded":
++    case "waiting_for_confirmation":
++      return (
++        <span className="h-fit w-fit rounded-sm bg-blue-100 p-1 text-center text-xs text-blue-900 dark:bg-blue-900 dark:text-blue-100">
++          pending confirmation
++        </span>
++      );
++    case "in_progress":
++      return (
++        <span className="h-fit w-fit rounded-sm bg-blue-100 p-1 text-center text-xs text-blue-900 dark:bg-blue-900 dark:text-blue-100">
++          in progress
++        </span>
++      );
++    case "completed":
++      return (
++        <span className="h-fit w-14 rounded-sm bg-background-success p-1 text-center text-xs text-content-success">
++          success
++        </span>
++      );
++    case "failed":
++      return (
++        <span className="h-fit w-14 rounded-sm bg-background-error p-1 text-center text-xs text-content-error">
++          failure
++        </span>
++      );
++    default:
++      throw new Error(
++        `unexpected snapshot import state ${snapshotImportState}`,
++      );
++  }
++}
++
++function snapshotImportFormatToText(
++  format: Infer<typeof snapshotImportFormat>,
++) {
++  switch (format.format) {
++    case "csv":
++      return "CSV";
++    case "jsonl":
++      return "JSONL";
++    case "json_array":
++      return "JSON";
++    case "zip":
++      return "ZIP";
++    default: {
++      // eslint-disable-next-line @typescript-eslint/no-unused-vars
++      format satisfies never;
++      return "";
++    }
++  }
++}
++
++export function ImportSummary({
++  snapshotImportCheckpoints,
++}: {
++  snapshotImportCheckpoints:
++    | Doc<"_snapshot_imports">["checkpoints"]
++    | null
++    | undefined;
++}) {
++  if (
++    snapshotImportCheckpoints === null ||
++    snapshotImportCheckpoints === undefined
++  ) {
++    return null;
++  }
++  const checkpointsByComponent = snapshotImportCheckpoints.reduce(
++    (acc, checkpoint) => {
++      const componentPath = checkpoint.component_path ?? undefined;
++      if (!acc.has(componentPath)) {
++        acc.set(componentPath, []);
++      }
++      acc.get(componentPath)?.push(checkpoint);
++      return acc;
++    },
++    new Map<
++      string | undefined,
++      NonNullable<Doc<"_snapshot_imports">["checkpoints"]>
++    >(),
++  );
++  return (
++    <div className="flex flex-col gap-4">
++      {Array.from(checkpointsByComponent.entries()).map(
++        ([componentPath, checkpoints]) => (
++          <div key={componentPath}>
++            {componentPath ? (
++              <h5 className="mb-1 flex w-full items-center space-x-1">
++                <PuzzlePieceIcon className="text-content-secondary" />
++                <span>{componentPath}</span>
++              </h5>
++            ) : null}
++            <table className="mr-auto border-collapse border text-left text-xs">
++              <thead className="border">
++                <tr>
++                  <th className="border px-2 py-0.5 font-semibold">Table</th>
++                  <th className="border px-2 py-0.5 font-semibold">Created</th>
++                  <th className="border px-2 py-0.5 font-semibold">Deleted</th>
++                </tr>
++              </thead>
++              <tbody>
++                {checkpoints.map((checkpoint) => (
++                  <tr key={checkpoint.display_table_name}>
++                    <td className="border px-2 py-0.5 font-mono">
++                      <span>{checkpoint.display_table_name}</span>
++                    </td>
++                    <td className="border px-2 py-0.5 tabular-nums">
++                      {Number(
++                        checkpoint.total_num_rows_to_write,
++                      ).toLocaleString()}{" "}
++                      {checkpoint.display_table_name === "_storage"
++                        ? `file${Number(checkpoint.total_num_rows_to_write) === 1 ? "" : "s"}`
++                        : `document${Number(checkpoint.total_num_rows_to_write) === 1 ? "" : "s"}`}
++                    </td>
++                    <td className="border px-2 py-0.5 tabular-nums">
++                      {Number(
++                        checkpoint.existing_rows_to_delete,
++                      ).toLocaleString()}{" "}
++                      of{" "}
++                      {Number(
++                        checkpoint.existing_rows_in_table,
++                      ).toLocaleString()}{" "}
++                      {checkpoint.display_table_name === "_storage"
++                        ? "files"
++                        : "documents"}
++                    </td>
++                  </tr>
++                ))}
++              </tbody>
++            </table>
++          </div>
++        ),
++      )}
++    </div>
++  );
++}
++
++export function ImportState({
++  snapshotImport,
++}: {
++  snapshotImport: Doc<"_snapshot_imports"> & { memberName: string };
++}) {
++  const { TeamMemberLink } = useContext(DeploymentInfoContext);
++  return (
++    <Disclosure>
++      {({ open }) => (
++        <>
++          <div className="flex flex-wrap items-center justify-between gap-2">
++            <div className="flex gap-2">
++              <ImportStatePill
++                snapshotImportState={snapshotImport.state.state}
++              />
++              <div className="flex flex-wrap items-center gap-1">
++                <TeamMemberLink
++                  memberId={
++                    snapshotImport.member_id === null ||
++                    snapshotImport.member_id === undefined
++                      ? snapshotImport.member_id
++                      : Number(snapshotImport.member_id)
++                  }
++                  name={snapshotImport.memberName}
++                />
++                {`imported a snapshot from a ${snapshotImportFormatToText(snapshotImport.format)} file.`}
++              </div>
++            </div>
++            <div className="flex items-center gap-2">
++              <TimestampDistance
++                prefix="Started "
++                date={new Date(snapshotImport._creationTime)}
++              />
++              <Tooltip side="left" tip="View entry metadata" asChild>
++                <DisclosureButton
++                  as={Button}
++                  inline
++                  variant="neutral"
++                  size="xs"
++                  aria-label={open ? "Hide details" : "Show details"}
++                >
++                  {open ? <ChevronUpIcon /> : <ChevronDownIcon />}
++                </DisclosureButton>
++              </Tooltip>
++            </div>
++          </div>
++          <DisclosurePanel>
++            <div className="mt-2 flex flex-col gap-2">
++              <ImportStateBody snapshotImport={snapshotImport} />
++              <ImportSummary
++                snapshotImportCheckpoints={snapshotImport.checkpoints}
++              />
++            </div>
++          </DisclosurePanel>
++        </>
++      )}
++    </Disclosure>
++  );
++}
++
++const useSnapshotImports = () => {
++  const { useCurrentTeam, useTeamMembers } = useContext(DeploymentInfoContext);
++  const existingImports: Doc<"_snapshot_imports">[] | undefined =
++    useQuery(udfs.snapshotImport.list) ?? [];
++  const currentTeam = useCurrentTeam();
++  const teamMembers = useTeamMembers(currentTeam?.id) ?? [];
++  return existingImports
++    ?.filter((s) => s.requestor.type === "snapshotImport")
++    .map((s) => {
++      const member = teamMembers.find((m) => BigInt(m.id) === s.member_id);
++      const memberName = member?.name || member?.email || "Unknown member";
++      return {
++        ...s,
++        memberName,
++      };
++    });
++};
++
++export function SnapshotImport() {
++  const existingImports = useSnapshotImports();
++  return (
++    <Sheet>
++      <div className="flex flex-col gap-4">
++        <div className="flex flex-col gap-4">
++          <div>
++            <h3 className="mb-2">Snapshot Import and Restore</h3>
++            <p className="text-content-primary">
++              Import tables into your database from a snapshot.{" "}
++              <Link
++                target="_blank"
++                href="https://docs.convex.dev/database/import-export/import"
++              >
++                Learn more
++              </Link>
++            </p>
++          </div>
++        </div>
++        {existingImports && existingImports.length !== 0 && (
++          <div className="flex flex-col gap-4">
++            <h4>Recent Imports</h4>
++            {existingImports.map(
++              (
++                existingImport: Doc<"_snapshot_imports"> & {
++                  memberName: string;
++                },
++              ) => (
++                <div className="text-content-primary" key={existingImport._id}>
++                  <ImportState snapshotImport={existingImport} />
++                </div>
++              ),
++            )}
++          </div>
++        )}
++      </div>
++    </Sheet>
++  );
++}
+diff --git a/npm-packages/dashboard-common/src/features/settings/components/backups/SnapshotsView.tsx b/npm-packages/dashboard-common/src/features/settings/components/backups/SnapshotsView.tsx
+new file mode 100644
+index 000000000..8b1e10aef
+--- /dev/null
++++ b/npm-packages/dashboard-common/src/features/settings/components/backups/SnapshotsView.tsx
+@@ -0,0 +1,29 @@
++import { useContext } from "react";
++import { DeploymentSettingsLayout } from "@common/layouts/DeploymentSettingsLayout";
++import { NoPermissionMessage } from "@common/elements/NoPermissionMessage";
++import { SnapshotExport } from "@common/features/settings/components/backups/SnapshotExport";
++import { SnapshotImport } from "@common/features/settings/components/backups/SnapshotImport";
++import { DeploymentInfoContext } from "@common/lib/deploymentContext";
++
++export function SnapshotsView() {
++  const { useCurrentDeployment, useHasProjectAdminPermissions } = useContext(
++    DeploymentInfoContext,
++  );
++  const deployment = useCurrentDeployment();
++  const canView = useHasProjectAdminPermissions(deployment?.projectId);
++  return (
++    <DeploymentSettingsLayout page="snapshots">
++      {canView === false ? (
++        <NoPermissionMessage
++          message="You do not have permission to view snapshots."
++          missingPermission="deployment:backups:view"
++        />
++      ) : (
++        <div className="flex flex-col gap-4">
++          <SnapshotExport />
++          <SnapshotImport />
++        </div>
++      )}
++    </DeploymentSettingsLayout>
++  );
++}
+diff --git a/npm-packages/dashboard-common/src/layouts/SettingsSidebar.tsx b/npm-packages/dashboard-common/src/layouts/SettingsSidebar.tsx
+index e268b7bd5..fac7a33a0 100644
+--- a/npm-packages/dashboard-common/src/layouts/SettingsSidebar.tsx
++++ b/npm-packages/dashboard-common/src/layouts/SettingsSidebar.tsx
+@@ -162,7 +162,5 @@ function useAllowedPages() {
+     pages = pages.filter((d) => d !== "components");
+   }
+ 
+-  pages = pages.filter((d) => d !== "snapshots");
+-
+   return pages;
+ }
+diff --git a/npm-packages/dashboard-common/src/lib/deploymentApi.ts b/npm-packages/dashboard-common/src/lib/deploymentApi.ts
+index a3b43aab0..6706bb95e 100644
+--- a/npm-packages/dashboard-common/src/lib/deploymentApi.ts
++++ b/npm-packages/dashboard-common/src/lib/deploymentApi.ts
+@@ -1,14 +1,16 @@
+-import { useContext, useMemo } from "react";
++import { useCallback, useContext, useMemo } from "react";
+ import { Shape, shapeSchema } from "shapes";
+ import useSWR, { BareFetcher, Middleware } from "swr";
+ import { z } from "zod";
++import { CompletedExport } from "system-udfs/convex/_system/frontend/common";
++import { Id } from "system-udfs/convex/_generated/dataModel";
+ import { useNents } from "@common/lib/useNents";
+ import {
+   ConnectedDeploymentContext,
+   DeploymentInfoContext,
+ } from "@common/lib/deploymentContext";
+ import { deploymentFetch } from "@common/lib/fetching";
+-import { isUserTableName } from "@common/lib/utils";
++import { isUserTableName, toast } from "@common/lib/utils";
+ import { displayName } from "@common/lib/functions/generateFileTree";
+ 
+ export function useDeploymentUrl(): string {
+@@ -65,7 +67,6 @@ export function useTableShapes(): {
+   return {
+     tables: useMemo(() => {
+       if (!data) return undefined;
+-
+       const shapes = shapes2ResponseSchema.parse(data);
+       return new Map(
+         Object.entries(shapes)
+@@ -77,8 +78,6 @@ export function useTableShapes(): {
+   };
+ }
+ 
+-// componentId: undefined means use the current selected component.
+-// componentId: null means use the root component.
+ export function useFunctionUrl(udfPath: string, componentId?: string | null) {
+   const { deploymentsURI } = useContext(DeploymentInfoContext);
+ 
+@@ -103,3 +102,75 @@ export const deploymentAuthMiddleware: Middleware =
+ 
+     return useSWRNext(swrKey, fetcher, config);
+   };
++
++export function useGetZipExport(
++  format: CompletedExport["format"],
++): (snapshotId: Id<"_exports">) => string {
++  const deploymentUrl = useDeploymentUrl();
++  const adminKey = useAdminKey();
++  return (snapshotId: Id<"_exports">) => {
++    const params = new URLSearchParams({ adminKey });
++    if (format?.format === "zip") {
++      return `${deploymentUrl}/api/export/zip/${snapshotId}?${params}`;
++    }
++    throw new Error("expected zip");
++  };
++}
++
++export function useCancelImport(): (
++  id: Id<"_snapshot_imports">,
++) => Promise<void> {
++  const deploymentUrl = useDeploymentUrl();
++  const adminKey = useAdminKey();
++  const { reportHttpError } = useContext(DeploymentInfoContext);
++  return useCallback(
++    async (id: Id<"_snapshot_imports">) => {
++      const res = await fetch(`${deploymentUrl}/api/cancel_import`, {
++        method: "POST",
++        headers: {
++          Authorization: `Convex ${adminKey}`,
++          "Content-Type": "application/json",
++        },
++        body: JSON.stringify({ importId: id }),
++      });
++      if (res.status !== 200) {
++        const err = await res.json();
++        reportHttpError("POST", res.url, err);
++        toast("error", err.message);
++      }
++    },
++    [deploymentUrl, adminKey, reportHttpError],
++  );
++}
++
++export function useConfirmImport(): (
++  id: Id<"_snapshot_imports">,
++) => Promise<void> {
++  const deploymentUrl = useDeploymentUrl();
++  const adminKey = useAdminKey();
++  const { reportHttpError } = useContext(DeploymentInfoContext);
++  return useCallback(
++    async (importId: Id<"_snapshot_imports">) => {
++      const url = `${deploymentUrl}/api/perform_import`;
++      const res = await fetch(url, {
++        method: "POST",
++        headers: {
++          Authorization: `Convex ${adminKey}`,
++          "Content-Type": "application/json",
++        },
++        body: JSON.stringify({ importId }),
++      });
++      if (res.status !== 200) {
++        const err = await res.json();
++        reportHttpError("POST", res.url, err);
++        toast("error", err.message);
++      }
++    },
++    [deploymentUrl, adminKey, reportHttpError],
++  );
++}
++
++export function useLogDeploymentEvent() {
++  const { useLogDeploymentEvent: hook } = useContext(DeploymentInfoContext);
++  return hook();
++}
+diff --git a/npm-packages/dashboard-self-hosted/src/pages/settings/snapshots.tsx b/npm-packages/dashboard-self-hosted/src/pages/settings/snapshots.tsx
+new file mode 100644
+index 000000000..054b1a708
+--- /dev/null
++++ b/npm-packages/dashboard-self-hosted/src/pages/settings/snapshots.tsx
+@@ -0,0 +1,3 @@
++import { SnapshotsView } from "@common/features/settings/components/backups/SnapshotsView";
++
++export default SnapshotsView;
+diff --git a/npm-packages/demo_browser_tests/package.json b/npm-packages/demo_browser_tests/package.json
+index 325a49a8d..6b057855d 100644
+--- a/npm-packages/demo_browser_tests/package.json
++++ b/npm-packages/demo_browser_tests/package.json
+@@ -10,7 +10,7 @@
+     "commander": "^14.0.3"
+   },
+   "scripts": {
+-    "postinstall": "puppeteer browsers install chrome",
++    "postinstall": "puppeteer browsers install chrome || true",
+     "build": "tsc",
+     "test-relational-data-modeling": "node ./dist/relational-data-modeling.js",
+     "test-users-and-auth": "node ./dist/users-and-auth.js",
+diff --git a/npm-packages/rush.json b/npm-packages/rush.json
+index c9506fcc2..fe57ab10d 100644
+--- a/npm-packages/rush.json
++++ b/npm-packages/rush.json
+@@ -15,7 +15,7 @@
+    * path segment in the "$schema" field for all your Rush config files.  This will ensure
+    * correct error-underlining and tab-completion for editors such as VS Code.
+    */
+-  "rushVersion": "5.173.0",
++  "rushVersion": "5.175.1",
+   /**
+    * The next field selects which package manager should be installed and determines its version.
+    * Rush installs its own local copy of the package manager to ensure that your build process

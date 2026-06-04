@@ -1,0 +1,2106 @@
+diff --git a/crates/funrun_server/Cargo.toml b/crates/funrun_server/Cargo.toml
+new file mode 100644
+index 000000000..3212a9cb3
+--- /dev/null
++++ b/crates/funrun_server/Cargo.toml
+@@ -0,0 +1,48 @@
++[package]
++name = "funrun_server"
++version = "0.1.0"
++edition = "2024"
++license = "LicenseRef-FSL-1.1-Apache-2.0"
++description = "convex-funrun: gRPC compute tier that runs user functions off the leader."
++
++[[bin]]
++name = "convex-funrun"
++path = "src/main.rs"
++
++[dependencies]
++anyhow = { workspace = true }
++async-trait = { workspace = true }
++application = { workspace = true }
++bytes = { workspace = true }
++clusters = { workspace = true }
++common = { workspace = true }
++database = { workspace = true }
++db_connection = { workspace = true }
++errors = { workspace = true }
++function_runner = { workspace = true }
++futures = { workspace = true }
++http = { workspace = true }
++indexing = { workspace = true }
++keybroker = { workspace = true }
++model = { workspace = true }
++pb = { workspace = true }
++prost = { workspace = true }
++reqwest = { workspace = true }
++runtime = { workspace = true }
++search = { workspace = true }
++serde = { workspace = true }
++serde_json = { workspace = true }
++storage = { workspace = true }
++sync_types = { workspace = true }
++tokio = { workspace = true }
++tokio-stream = { workspace = true }
++tonic = { workspace = true }
++tracing = { workspace = true }
++tracing-subscriber = { workspace = true, features = ["env-filter"] }
++udf = { workspace = true }
++usage_tracking = { workspace = true }
++value = { workspace = true }
++vector = { workspace = true }
++
++[lints]
++workspace = true
+diff --git a/crates/funrun_server/src/callbacks.rs b/crates/funrun_server/src/callbacks.rs
+new file mode 100644
+index 000000000..445628ee4
+--- /dev/null
++++ b/crates/funrun_server/src/callbacks.rs
+@@ -0,0 +1,489 @@
++use anyhow::Context;
++use async_trait::async_trait;
++use common::{
++    bootstrap_model::components::handles::FunctionHandle,
++    components::{
++        CanonicalizedComponentFunctionPath,
++        ComponentId,
++        ComponentPath,
++        SerializedComponentFunctionPath,
++    },
++    execution_context::ExecutionContext,
++    runtime::UnixTimestamp,
++    types::ConvexOrigin,
++};
++use keybroker::Identity;
++use model::file_storage::{
++    types::FileStorageEntry,
++    FileStorageId,
++};
++use prost::Message;
++use serde::{
++    Deserialize,
++    Serialize,
++};
++use serde_json::{
++    value::RawValue,
++    Value as JsonValue,
++};
++use sync_types::types::SerializedArgs;
++use udf::{
++    ActionCallbacks,
++    FunctionResult,
++};
++use usage_tracking::FunctionUsageStats;
++use value::{
++    ConvexValue,
++    DeveloperDocumentId,
++    JsonPackedValue,
++};
++use vector::PublicVectorSearchQueryResult;
++
++const CALLBACK_TOKEN_HEADER: &str = "Convex-Action-Callback-Token";
++const REQUEST_ID_HEADER: &str = "Convex-Request-Id";
++const EXECUTION_ID_HEADER: &str = "Convex-Execution-Id";
++const ROOT_REQUEST_HEADER: &str = "Convex-Root-Request";
++const ACTION_FUNCTION_NAME_HEADER: &str = "Convex-Action-Function-Name";
++
++pub struct HttpActionCallbacks {
++    client: reqwest::Client,
++    backend_url: ConvexOrigin,
++    callback_token: String,
++    auth_header: Option<String>,
++    context: ExecutionContext,
++    action_name: Option<String>,
++}
++
++impl HttpActionCallbacks {
++    pub fn new(
++        backend_url: ConvexOrigin,
++        callback_token: String,
++        auth_header: Option<String>,
++        context: ExecutionContext,
++        action_name: Option<String>,
++    ) -> Self {
++        let client = reqwest::Client::builder()
++            .redirect(reqwest::redirect::Policy::none())
++            .build()
++            .expect("failed to build funrun action callback reqwest client");
++        Self {
++            client,
++            backend_url,
++            callback_token,
++            auth_header,
++            context,
++            action_name,
++        }
++    }
++
++    fn url(&self, path: &str) -> String {
++        format!(
++            "{}{}",
++            self.backend_url.as_str().trim_end_matches('/'),
++            path
++        )
++    }
++
++    fn request(&self, path: &str) -> reqwest::RequestBuilder {
++        let mut req = self
++            .client
++            .post(self.url(path))
++            .header(CALLBACK_TOKEN_HEADER, &self.callback_token)
++            .header(REQUEST_ID_HEADER, self.context.request_id.to_string())
++            .header(EXECUTION_ID_HEADER, self.context.execution_id.to_string())
++            .header(ROOT_REQUEST_HEADER, self.context.is_root().to_string());
++        if let Some(auth) = &self.auth_header {
++            req = req.header(http::header::AUTHORIZATION, auth);
++        }
++        req
++    }
++
++    async fn run_function(
++        &self,
++        path: &str,
++        function_path: CanonicalizedComponentFunctionPath,
++        args: SerializedArgs,
++    ) -> anyhow::Result<FunctionResult> {
++        let args_raw: Box<RawValue> = RawValue::from_string(args.get().to_owned())?;
++        let body = RunFunctionBody {
++            path: Some(function_path.udf_path.to_string()),
++            reference: None,
++            function_handle: None,
++            args: args_raw,
++        };
++        let response = self
++            .request(path)
++            .json(&body)
++            .send()
++            .await
++            .with_context(|| format!("funrun action callback to {path} failed"))?;
++        let status = response.status();
++        let text = response.text().await?;
++        if !status.is_success() && status.as_u16() != STATUS_CODE_UDF_FAILED {
++            anyhow::bail!("funrun callback {path} returned {status}: {text}");
++        }
++        let parsed: RunFunctionResponse = serde_json::from_str(&text)
++            .with_context(|| format!("funrun callback {path} returned unparseable body: {text}"))?;
++        let result = match parsed {
++            RunFunctionResponse::Success { value } => {
++                let convex_value = ConvexValue::try_from(value)
++                    .context("funrun callback success value was not a valid Convex value")?;
++                Ok(JsonPackedValue::pack(convex_value))
++            },
++            RunFunctionResponse::Error {
++                error_message,
++                error_data,
++            } => Err(build_js_error(error_message, error_data)),
++        };
++        Ok(FunctionResult { result })
++    }
++}
++
++const STATUS_CODE_UDF_FAILED: u16 = 560;
++
++fn build_js_error(message: String, data: Option<JsonValue>) -> common::errors::JsError {
++    match data.and_then(|d| ConvexValue::try_from(d).ok()) {
++        Some(custom) => common::errors::JsError::convex_error(message, custom),
++        None => common::errors::JsError::from_message(message),
++    }
++}
++
++#[derive(Serialize)]
++#[serde(rename_all = "camelCase")]
++struct RunFunctionBody {
++    #[serde(skip_serializing_if = "Option::is_none")]
++    path: Option<String>,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    reference: Option<String>,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    function_handle: Option<String>,
++    args: Box<RawValue>,
++}
++
++#[derive(Deserialize)]
++#[serde(tag = "status", rename_all = "camelCase")]
++enum RunFunctionResponse {
++    #[serde(rename_all = "camelCase")]
++    Success { value: JsonValue },
++    #[serde(rename_all = "camelCase")]
++    Error {
++        error_message: String,
++        #[serde(default)]
++        error_data: Option<JsonValue>,
++    },
++}
++
++#[derive(Serialize)]
++#[serde(rename_all = "camelCase")]
++struct ScheduleJobBody {
++    udf_path: Option<String>,
++    reference: Option<String>,
++    function_handle: Option<String>,
++    udf_args: Box<RawValue>,
++    scheduled_ts: f64,
++}
++
++#[derive(Deserialize)]
++#[serde(rename_all = "camelCase")]
++struct ScheduleJobResponse {
++    job_id: String,
++}
++
++#[derive(Serialize)]
++#[serde(rename_all = "camelCase")]
++struct CancelJobBody {
++    id: String,
++}
++
++#[derive(Serialize)]
++#[serde(rename_all = "camelCase")]
++struct CreateFunctionHandleBody {
++    udf_path: Option<String>,
++    reference: Option<String>,
++}
++
++#[derive(Deserialize)]
++#[serde(rename_all = "camelCase")]
++struct CreateFunctionHandleResponse {
++    handle: String,
++}
++
++#[derive(Serialize)]
++#[serde(rename_all = "camelCase")]
++struct StorageIdBody {
++    storage_id: String,
++}
++
++#[derive(Deserialize)]
++#[serde(rename_all = "camelCase")]
++struct StorageGetUrlResponse {
++    url: Option<String>,
++}
++
++#[derive(Deserialize)]
++#[serde(rename_all = "camelCase")]
++struct StorageGetFileEntryResponse {
++    component_path: String,
++    entry_proto: Vec<u8>,
++}
++
++#[derive(Serialize)]
++#[serde(rename_all = "camelCase")]
++struct StorageStoreFileEntryBody {
++    entry_proto: Vec<u8>,
++}
++
++#[derive(Deserialize)]
++#[serde(rename_all = "camelCase")]
++struct StorageStoreFileEntryResponse {
++    component_path: String,
++    document_id: String,
++}
++
++#[derive(Serialize)]
++#[serde(rename_all = "camelCase")]
++struct VectorSearchBody {
++    query: JsonValue,
++}
++
++#[derive(Deserialize)]
++#[serde(rename_all = "camelCase")]
++struct VectorSearchResponse {
++    results: Vec<VectorSearchResultJson>,
++}
++
++#[derive(Deserialize)]
++#[serde(rename_all = "camelCase")]
++struct VectorSearchResultJson {
++    #[serde(rename = "_id")]
++    id: String,
++    #[serde(rename = "_score")]
++    score: f32,
++}
++
++#[derive(Serialize)]
++#[serde(rename_all = "camelCase")]
++struct LookupFunctionHandleBody {
++    handle: String,
++}
++
++#[async_trait]
++impl ActionCallbacks for HttpActionCallbacks {
++    async fn execute_query(
++        &self,
++        _identity: Identity,
++        path: CanonicalizedComponentFunctionPath,
++        args: SerializedArgs,
++        _context: ExecutionContext,
++    ) -> anyhow::Result<FunctionResult> {
++        self.run_function("/api/actions/query", path, args).await
++    }
++
++    async fn execute_mutation(
++        &self,
++        _identity: Identity,
++        path: CanonicalizedComponentFunctionPath,
++        args: SerializedArgs,
++        _context: ExecutionContext,
++    ) -> anyhow::Result<FunctionResult> {
++        self.run_function("/api/actions/mutation", path, args).await
++    }
++
++    async fn execute_action(
++        &self,
++        _identity: Identity,
++        path: CanonicalizedComponentFunctionPath,
++        args: SerializedArgs,
++        _context: ExecutionContext,
++    ) -> anyhow::Result<FunctionResult> {
++        self.run_function("/api/actions/action", path, args).await
++    }
++
++    async fn schedule_job(
++        &self,
++        _identity: Identity,
++        _scheduling_component: ComponentId,
++        scheduled_path: CanonicalizedComponentFunctionPath,
++        udf_args: SerializedArgs,
++        scheduled_ts: UnixTimestamp,
++        _context: ExecutionContext,
++    ) -> anyhow::Result<DeveloperDocumentId> {
++        let udf_args: Box<RawValue> = RawValue::from_string(udf_args.get().to_owned())?;
++        let body = ScheduleJobBody {
++            udf_path: Some(scheduled_path.udf_path.to_string()),
++            reference: None,
++            function_handle: None,
++            udf_args,
++            scheduled_ts: scheduled_ts.as_secs_f64(),
++        };
++        let response = self
++            .request("/api/actions/schedule_job")
++            .json(&body)
++            .send()
++            .await?
++            .error_for_status()?;
++        let parsed: ScheduleJobResponse = response.json().await?;
++        parsed.job_id.parse().context("invalid scheduled job id")
++    }
++
++    async fn cancel_job(
++        &self,
++        _identity: Identity,
++        virtual_id: DeveloperDocumentId,
++    ) -> anyhow::Result<()> {
++        self.request("/api/actions/cancel_job")
++            .json(&CancelJobBody {
++                id: virtual_id.to_string(),
++            })
++            .send()
++            .await?
++            .error_for_status()?;
++        Ok(())
++    }
++
++    async fn create_function_handle(
++        &self,
++        _identity: Identity,
++        path: CanonicalizedComponentFunctionPath,
++    ) -> anyhow::Result<FunctionHandle> {
++        let body = CreateFunctionHandleBody {
++            udf_path: Some(path.udf_path.to_string()),
++            reference: None,
++        };
++        let response = self
++            .request("/api/actions/create_function_handle")
++            .json(&body)
++            .send()
++            .await?
++            .error_for_status()?;
++        let parsed: CreateFunctionHandleResponse = response.json().await?;
++        parsed.handle.parse().context("invalid function handle")
++    }
++
++    async fn storage_get_url(
++        &self,
++        _identity: Identity,
++        _component: ComponentId,
++        storage_id: FileStorageId,
++    ) -> anyhow::Result<Option<String>> {
++        let response = self
++            .request("/api/actions/storage_get_url")
++            .json(&StorageIdBody {
++                storage_id: storage_id.to_string(),
++            })
++            .send()
++            .await?
++            .error_for_status()?;
++        let parsed: StorageGetUrlResponse = response.json().await?;
++        Ok(parsed.url)
++    }
++
++    async fn storage_delete(
++        &self,
++        _identity: Identity,
++        _component: ComponentId,
++        storage_id: FileStorageId,
++    ) -> anyhow::Result<()> {
++        self.request("/api/actions/storage_delete")
++            .json(&StorageIdBody {
++                storage_id: storage_id.to_string(),
++            })
++            .send()
++            .await?
++            .error_for_status()?;
++        Ok(())
++    }
++
++    async fn storage_get_file_entry(
++        &self,
++        _identity: Identity,
++        _component: ComponentId,
++        storage_id: FileStorageId,
++    ) -> anyhow::Result<Option<(ComponentPath, FileStorageEntry)>> {
++        let response = self
++            .request("/api/actions/storage_get_file_entry")
++            .json(&StorageIdBody {
++                storage_id: storage_id.to_string(),
++            })
++            .send()
++            .await?
++            .error_for_status()?;
++        let parsed: Option<StorageGetFileEntryResponse> = response.json().await?;
++        match parsed {
++            None => Ok(None),
++            Some(StorageGetFileEntryResponse {
++                component_path,
++                entry_proto,
++            }) => {
++                let component_path: ComponentPath = component_path.parse()?;
++                let entry_proto = pb::storage::FileStorageEntry::decode(&entry_proto[..])?;
++                let entry = FileStorageEntry::try_from(entry_proto)?;
++                Ok(Some((component_path, entry)))
++            },
++        }
++    }
++
++    async fn storage_store_file_entry(
++        &self,
++        _identity: Identity,
++        _component: ComponentId,
++        entry: FileStorageEntry,
++    ) -> anyhow::Result<(ComponentPath, DeveloperDocumentId)> {
++        let entry_proto: pb::storage::FileStorageEntry = entry.into();
++        let response = self
++            .request("/api/actions/storage_store_file_entry")
++            .json(&StorageStoreFileEntryBody {
++                entry_proto: entry_proto.encode_to_vec(),
++            })
++            .send()
++            .await?
++            .error_for_status()?;
++        let parsed: StorageStoreFileEntryResponse = response.json().await?;
++        let component_path: ComponentPath = parsed.component_path.parse()?;
++        let document_id: DeveloperDocumentId = parsed.document_id.parse()?;
++        Ok((component_path, document_id))
++    }
++
++    async fn vector_search(
++        &self,
++        _identity: Identity,
++        query: JsonValue,
++    ) -> anyhow::Result<(Vec<PublicVectorSearchQueryResult>, FunctionUsageStats)> {
++        let mut req = self
++            .request("/api/actions/vector_search")
++            .json(&VectorSearchBody { query });
++        if let Some(action_name) = &self.action_name {
++            req = req.header(ACTION_FUNCTION_NAME_HEADER, action_name);
++        }
++        let response = req.send().await?.error_for_status()?;
++        let parsed: VectorSearchResponse = response.json().await?;
++        let results = parsed
++            .results
++            .into_iter()
++            .map(|VectorSearchResultJson { id, score }| {
++                anyhow::Ok(PublicVectorSearchQueryResult {
++                    id: id.parse()?,
++                    score,
++                })
++            })
++            .collect::<anyhow::Result<Vec<_>>>()?;
++        Ok((results, FunctionUsageStats::default()))
++    }
++
++    async fn lookup_function_handle(
++        &self,
++        _identity: Identity,
++        handle: FunctionHandle,
++    ) -> anyhow::Result<CanonicalizedComponentFunctionPath> {
++        let response = self
++            .request("/api/actions/lookup_function_handle")
++            .json(&LookupFunctionHandleBody {
++                handle: String::from(handle),
++            })
++            .send()
++            .await?
++            .error_for_status()?;
++        let parsed: SerializedComponentFunctionPath = response.json().await?;
++        CanonicalizedComponentFunctionPath::try_from(parsed)
++    }
++}
+diff --git a/crates/funrun_server/src/config.rs b/crates/funrun_server/src/config.rs
+new file mode 100644
+index 000000000..2b75a3a62
+--- /dev/null
++++ b/crates/funrun_server/src/config.rs
+@@ -0,0 +1,283 @@
++use std::net::SocketAddr;
++
++use clusters::DbDriverTag;
++use common::types::PersistenceVersion;
++use keybroker::DeploymentSecret;
++
++#[derive(Clone)]
++pub struct FunrunTlsConfig {
++    pub cert_pem: Vec<u8>,
++    pub key_pem: Vec<u8>,
++    pub ca_pem: Vec<u8>,
++}
++
++impl FunrunTlsConfig {
++    pub fn from_env() -> anyhow::Result<Option<Self>> {
++        let cert = std::env::var_os("CONVEX_FUNRUN_TLS_CERT");
++        let key = std::env::var_os("CONVEX_FUNRUN_TLS_KEY");
++        let ca = std::env::var_os("CONVEX_FUNRUN_TLS_CA");
++        match (cert, key, ca) {
++            (None, None, None) => Ok(None),
++            (Some(cert), Some(key), Some(ca)) => {
++                let cert_pem = std::fs::read(&cert)
++                    .map_err(|e| anyhow::anyhow!("reading CONVEX_FUNRUN_TLS_CERT {cert:?}: {e}"))?;
++                let key_pem = std::fs::read(&key)
++                    .map_err(|e| anyhow::anyhow!("reading CONVEX_FUNRUN_TLS_KEY {key:?}: {e}"))?;
++                let ca_pem = std::fs::read(&ca)
++                    .map_err(|e| anyhow::anyhow!("reading CONVEX_FUNRUN_TLS_CA {ca:?}: {e}"))?;
++                Ok(Some(Self {
++                    cert_pem,
++                    key_pem,
++                    ca_pem,
++                }))
++            },
++            _ => anyhow::bail!(
++                "funrun mTLS misconfigured: set ALL of CONVEX_FUNRUN_TLS_CERT, \
++                 CONVEX_FUNRUN_TLS_KEY, CONVEX_FUNRUN_TLS_CA (file paths) to enable mutual TLS, \
++                 or NONE of them for plaintext"
++            ),
++        }
++    }
++}
++
++#[derive(Clone)]
++pub struct FunrunInstanceConfig {
++    pub instance_name: String,
++    pub instance_secret: DeploymentSecret,
++    pub db_spec: String,
++    pub bucket_prefix: Option<String>,
++}
++
++impl std::fmt::Debug for FunrunInstanceConfig {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.debug_struct("FunrunInstanceConfig")
++            .field("instance_name", &self.instance_name)
++            .field("instance_secret", &"<redacted>")
++            .field("db_spec", &"<redacted>")
++            .field("bucket_prefix", &self.bucket_prefix)
++            .finish()
++    }
++}
++
++#[derive(Clone)]
++pub struct FunrunConfig {
++    pub listen: SocketAddr,
++    pub instances: Vec<FunrunInstanceConfig>,
++    pub db: DbDriverTag,
++    pub require_ssl: bool,
++    pub tls: Option<FunrunTlsConfig>,
++}
++
++impl FunrunConfig {
++    pub fn from_env() -> anyhow::Result<Self> {
++        let listen = std::env::var("FUNRUN_LISTEN")
++            .unwrap_or_else(|_| "0.0.0.0:8090".to_string())
++            .parse()
++            .map_err(|e| anyhow::anyhow!("Invalid FUNRUN_LISTEN: {e}"))?;
++        let db = match std::env::var("FUNRUN_DB").ok() {
++            Some(s) => s
++                .parse::<DbDriverTag>()
++                .map_err(|e| anyhow::anyhow!("Invalid FUNRUN_DB {s}: {e}"))?,
++            None => DbDriverTag::Postgres(PersistenceVersion::V5),
++        };
++        let require_ssl = std::env::var("FUNRUN_DO_NOT_REQUIRE_SSL")
++            .map(|v| v != "true" && v != "1")
++            .unwrap_or(true);
++        let instances = match std::env::var("FUNRUN_INSTANCES") {
++            Ok(spec) if !spec.trim().is_empty() => parse_instances(&spec)?,
++            _ => vec![Self::single_instance_from_env()?],
++        };
++        let tls = FunrunTlsConfig::from_env()?;
++        Ok(Self {
++            listen,
++            instances,
++            db,
++            require_ssl,
++            tls,
++        })
++    }
++
++    fn single_instance_from_env() -> anyhow::Result<FunrunInstanceConfig> {
++        let instance_name = std::env::var("FUNRUN_INSTANCE_NAME")
++            .or_else(|_| std::env::var("INSTANCE_NAME"))
++            .map_err(|_| {
++                anyhow::anyhow!(
++                    "set FUNRUN_INSTANCES (multi-tenant) or FUNRUN_INSTANCE_NAME (or \
++                     INSTANCE_NAME) for a single deployment"
++                )
++            })?;
++        let instance_secret = std::env::var("FUNRUN_INSTANCE_SECRET")
++            .or_else(|_| std::env::var("INSTANCE_SECRET"))
++            .map_err(|_| {
++                anyhow::anyhow!("FUNRUN_INSTANCE_SECRET (or INSTANCE_SECRET) must be set")
++            })?;
++        let instance_secret = DeploymentSecret::try_from(instance_secret.as_str())?;
++        let db_spec = std::env::var("FUNRUN_DATABASE_URL")
++            .or_else(|_| std::env::var("POSTGRES_URL"))
++            .or_else(|_| std::env::var("DATABASE_URL"))
++            .map_err(|_| {
++                anyhow::anyhow!("FUNRUN_DATABASE_URL (or POSTGRES_URL/DATABASE_URL) must be set")
++            })?;
++        Ok(FunrunInstanceConfig {
++            instance_name,
++            instance_secret,
++            db_spec,
++            bucket_prefix: None,
++        })
++    }
++}
++
++fn parse_instances(spec: &str) -> anyhow::Result<Vec<FunrunInstanceConfig>> {
++    let mut instances = Vec::new();
++    for raw in spec.split(';') {
++        let entry = raw.trim();
++        if entry.is_empty() {
++            continue;
++        }
++        let (name, value) = entry.split_once('=').ok_or_else(|| {
++            anyhow::anyhow!(
++                "invalid FUNRUN_INSTANCES entry {entry:?}: expected \
++                 `<name>=<db_url>|<secret>[|<prefix>]`"
++            )
++        })?;
++        let name = name.trim();
++        anyhow::ensure!(
++            !name.is_empty(),
++            "invalid FUNRUN_INSTANCES entry {entry:?}: empty instance name"
++        );
++        let mut fields = value.split('|');
++        let db_spec = fields
++            .next()
++            .map(str::trim)
++            .filter(|s| !s.is_empty())
++            .ok_or_else(|| {
++                anyhow::anyhow!("FUNRUN_INSTANCES entry for {name:?} is missing the db_url")
++            })?
++            .to_owned();
++        let secret = fields
++            .next()
++            .map(str::trim)
++            .filter(|s| !s.is_empty())
++            .ok_or_else(|| {
++                anyhow::anyhow!(
++                    "FUNRUN_INSTANCES entry for {name:?} is missing the instance secret"
++                )
++            })?;
++        let instance_secret = DeploymentSecret::try_from(secret).map_err(|e| {
++            anyhow::anyhow!("FUNRUN_INSTANCES entry for {name:?} has an invalid secret: {e}")
++        })?;
++        let bucket_prefix = fields
++            .next()
++            .map(str::trim)
++            .filter(|s| !s.is_empty())
++            .map(str::to_owned);
++        anyhow::ensure!(
++            fields.next().is_none(),
++            "FUNRUN_INSTANCES entry for {name:?} has too many `|`-fields (expected \
++             db_url|secret[|prefix])"
++        );
++        anyhow::ensure!(
++            !instances
++                .iter()
++                .any(|i: &FunrunInstanceConfig| i.instance_name == name),
++            "FUNRUN_INSTANCES lists instance {name:?} more than once"
++        );
++        instances.push(FunrunInstanceConfig {
++            instance_name: name.to_owned(),
++            instance_secret,
++            db_spec,
++            bucket_prefix,
++        });
++    }
++    anyhow::ensure!(
++        !instances.is_empty(),
++        "FUNRUN_INSTANCES was set but contained no instances"
++    );
++    Ok(instances)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    const SECRET_A: &str = "0000000000000000000000000000000000000000000000000000000000000001";
++    const SECRET_B: &str = "0000000000000000000000000000000000000000000000000000000000000002";
++
++    #[test]
++    fn parse_single_entry() {
++        let parsed = parse_instances(&format!("inst-a=postgres://u:p@h/a|{SECRET_A}")).unwrap();
++        assert_eq!(parsed.len(), 1);
++        assert_eq!(parsed[0].instance_name, "inst-a");
++        assert_eq!(parsed[0].db_spec, "postgres://u:p@h/a");
++        assert_eq!(
++            parsed[0].instance_secret,
++            DeploymentSecret::try_from(SECRET_A).unwrap()
++        );
++        assert_eq!(parsed[0].bucket_prefix, None);
++    }
++
++    #[test]
++    fn parse_multi_with_prefix_and_whitespace() {
++        let spec = format!(
++            "  inst-a = postgres://u:p@h/a | {SECRET_A} ;\n  \
++             inst-b=postgres://u:p@h/b|{SECRET_B}|b-prefix/ ;"
++        );
++        let parsed = parse_instances(&spec).unwrap();
++        assert_eq!(parsed.len(), 2);
++        assert_eq!(parsed[0].instance_name, "inst-a");
++        assert_eq!(parsed[0].db_spec, "postgres://u:p@h/a");
++        assert_eq!(parsed[0].bucket_prefix, None);
++        assert_eq!(parsed[1].instance_name, "inst-b");
++        assert_eq!(parsed[1].db_spec, "postgres://u:p@h/b");
++        assert_eq!(parsed[1].bucket_prefix.as_deref(), Some("b-prefix/"));
++    }
++
++    #[test]
++    fn db_url_may_contain_equals() {
++        let parsed =
++            parse_instances(&format!("inst-a=postgres://h/a?sslmode=require|{SECRET_A}")).unwrap();
++        assert_eq!(parsed[0].db_spec, "postgres://h/a?sslmode=require");
++    }
++
++    #[test]
++    fn missing_secret_errors() {
++        let err = parse_instances("inst-a=postgres://u:p@h/a").unwrap_err();
++        assert!(
++            err.to_string().contains("missing the instance secret"),
++            "{err}"
++        );
++    }
++
++    #[test]
++    fn bad_secret_errors() {
++        let err = parse_instances("inst-a=postgres://u:p@h/a|not-hex").unwrap_err();
++        assert!(err.to_string().contains("invalid secret"), "{err}");
++    }
++
++    #[test]
++    fn missing_equals_errors() {
++        let err = parse_instances("garbage-no-equals").unwrap_err();
++        assert!(
++            err.to_string().contains("invalid FUNRUN_INSTANCES entry"),
++            "{err}"
++        );
++    }
++
++    #[test]
++    fn too_many_fields_errors() {
++        let err = parse_instances(&format!("inst-a=db|{SECRET_A}|prefix|extra")).unwrap_err();
++        assert!(err.to_string().contains("too many"), "{err}");
++    }
++
++    #[test]
++    fn duplicate_name_errors() {
++        let err = parse_instances(&format!("dup=db1|{SECRET_A};dup=db2|{SECRET_B}")).unwrap_err();
++        assert!(err.to_string().contains("more than once"), "{err}");
++    }
++
++    #[test]
++    fn empty_after_trim_errors() {
++        let err = parse_instances("   ;  ; ").unwrap_err();
++        assert!(err.to_string().contains("no instances"), "{err}");
++    }
++}
+diff --git a/crates/funrun_server/src/main.rs b/crates/funrun_server/src/main.rs
+new file mode 100644
+index 000000000..e637eb824
+--- /dev/null
++++ b/crates/funrun_server/src/main.rs
+@@ -0,0 +1,75 @@
++use std::sync::Arc;
++
++use anyhow::Context;
++use runtime::prod::ProdRuntime;
++
++mod callbacks;
++mod config;
++mod service;
++mod snapshot;
++
++use config::FunrunConfig;
++use service::FunrunService;
++use snapshot::InstanceRegistry;
++
++const MAX_GRPC_MESSAGE_BYTES: usize = udf::HTTP_ACTION_BODY_LIMIT + (1 << 20);
++
++fn main() -> anyhow::Result<()> {
++    tracing_subscriber::fmt()
++        .with_env_filter(
++            tracing_subscriber::EnvFilter::try_from_default_env()
++                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
++        )
++        .init();
++    let config = FunrunConfig::from_env()?;
++    let tokio = ProdRuntime::init_tokio()?;
++    let runtime = ProdRuntime::new(&tokio);
++    let runtime_ = runtime.clone();
++    runtime.block_on(
++        "convex-funrun",
++        async move { serve(runtime_, config).await },
++    )
++}
++
++async fn serve(runtime: ProdRuntime, config: FunrunConfig) -> anyhow::Result<()> {
++    let instance_names = config
++        .instances
++        .iter()
++        .map(|i| i.instance_name.as_str())
++        .collect::<Vec<_>>()
++        .join(", ");
++    tracing::info!(
++        "[convex-funrun] starting for {} instance(s) [{}] on {}",
++        config.instances.len(),
++        instance_names,
++        config.listen,
++    );
++    let registry = Arc::new(InstanceRegistry::new(runtime.clone(), &config)?);
++    let service = FunrunService::new(runtime.clone(), registry)?;
++    let server = pb::funrun::funrun_server::FunrunServer::new(service)
++        .max_decoding_message_size(MAX_GRPC_MESSAGE_BYTES)
++        .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES);
++    let mut builder = tonic::transport::Server::builder();
++    if let Some(tls) = &config.tls {
++        let identity = tonic::transport::Identity::from_pem(&tls.cert_pem, &tls.key_pem);
++        let tls_config = tonic::transport::ServerTlsConfig::new()
++            .identity(identity)
++            .client_ca_root(tonic::transport::Certificate::from_pem(&tls.ca_pem));
++        builder = builder
++            .tls_config(tls_config)
++            .context("invalid funrun TLS configuration")?;
++        tracing::info!("[convex-funrun] mutual TLS enabled (requiring client certs)");
++    } else {
++        tracing::warn!(
++            "[convex-funrun] TLS not configured (CONVEX_FUNRUN_TLS_* unset); serving PLAINTEXT \
++             gRPC -- use only for local/dev"
++        );
++    }
++    tracing::info!("[convex-funrun] listening on {}", config.listen);
++    builder
++        .add_service(server)
++        .serve(config.listen)
++        .await
++        .context("convex-funrun gRPC server exited")?;
++    Ok(())
++}
+diff --git a/crates/funrun_server/src/service.rs b/crates/funrun_server/src/service.rs
+new file mode 100644
+index 000000000..757003fb5
+--- /dev/null
++++ b/crates/funrun_server/src/service.rs
+@@ -0,0 +1,571 @@
++use std::{
++    collections::BTreeMap,
++    pin::Pin,
++    str::FromStr,
++    sync::Arc,
++    task::{
++        Context,
++        Poll,
++    },
++};
++
++use anyhow::Context as _;
++use common::{
++    execution_context::ExecutionContext,
++    http::RoutedHttpPath,
++    log_lines::LogLine,
++    runtime::{
++        Runtime,
++        SpawnHandle,
++    },
++    types::{
++        ConvexOrigin,
++        DeploymentClass,
++        DeploymentMetadata,
++        IndexId,
++        RepeatableTimestamp,
++        UdfType,
++    },
++};
++use errors::ErrorMetadata;
++use function_runner::{
++    server::{
++        validate_run_function_result,
++        DeploymentStorage,
++        FunctionMetadata,
++        FunctionRunnerCore,
++        HttpActionMetadata,
++        RunRequestArgs,
++    },
++    FunctionWrites,
++};
++use futures::{
++    select_biased,
++    FutureExt,
++    Stream,
++    StreamExt,
++};
++use keybroker::{
++    verify_funrun_auth_header,
++    Identity,
++    FUNRUN_AUTH_METADATA_KEY,
++};
++use model::environment_variables::types::{
++    EnvVarName,
++    EnvVarValue,
++};
++use pb::error_metadata::ErrorMetadataStatusExt;
++use sync_types::Timestamp;
++use tokio::sync::mpsc;
++use tokio_stream::wrappers::{
++    ReceiverStream,
++    UnboundedReceiverStream,
++};
++use tonic::{
++    Request,
++    Response,
++    Status,
++};
++use udf::{
++    validation::{
++        ValidatedHttpPath,
++        ValidatedPathAndArgs,
++    },
++    HttpActionRequest,
++    HttpActionRequestHead,
++    HttpActionResponsePart,
++    HttpActionResponseStreamer,
++};
++
++use crate::{
++    callbacks::HttpActionCallbacks,
++    snapshot::{
++        InstanceRegistry,
++        InstanceState,
++    },
++};
++
++const RESPONSE_STREAM_BUFFER: usize = 256;
++
++pub struct FunrunService<RT: Runtime> {
++    rt: RT,
++    registry: Arc<InstanceRegistry<RT>>,
++    fetch_client: Arc<dyn common::http::fetch::FetchClient>,
++}
++
++impl<RT: Runtime> FunrunService<RT> {
++    pub fn new(rt: RT, registry: Arc<InstanceRegistry<RT>>) -> anyhow::Result<Self> {
++        let fetch_client = Arc::new(common::http::fetch::ProxiedFetchClient::new(
++            None,
++            "convex-funrun".to_string(),
++            reqwest::redirect::Policy::none(),
++        ));
++        Ok(Self {
++            rt,
++            registry,
++            fetch_client,
++        })
++    }
++
++    async fn resolve_and_authenticate(
++        &self,
++        instance_name: &str,
++        metadata: &tonic::metadata::MetadataMap,
++    ) -> Result<Arc<InstanceState<RT>>, Status> {
++        let config = self
++            .registry
++            .instance_config(instance_name)
++            .map_err(|e| Status::not_found(format!("funrun: {e:#}")))?;
++        let presented = metadata
++            .get(FUNRUN_AUTH_METADATA_KEY)
++            .and_then(|v| v.to_str().ok())
++            .unwrap_or_default();
++        let unix_seconds = self.rt.unix_timestamp().as_secs();
++        if !verify_funrun_auth_header(
++            presented,
++            &config.instance_secret,
++            &config.instance_name,
++            unix_seconds,
++        ) {
++            return Err(Status::unauthenticated(
++                "funrun: missing or invalid deployment authorization",
++            ));
++        }
++        self.registry
++            .get_or_create(instance_name)
++            .await
++            .map_err(|e| Status::not_found(format!("funrun: {e:#}")))
++    }
++
++    async fn run(
++        instance: Arc<InstanceState<RT>>,
++        fetch_client: Arc<dyn common::http::fetch::FetchClient>,
++        req: pb::funrun::RunFunctionRequest,
++        part_tx: &mpsc::Sender<Result<pb::funrun::RunFunctionResponsePart, Status>>,
++    ) -> anyhow::Result<pb::funrun::RunFunctionResult> {
++        let pb::funrun::RunFunctionRequest {
++            instance_name: _,
++            udf_type,
++            identity,
++            ts,
++            existing_writes,
++            path_and_args,
++            journal,
++            default_system_env_vars,
++            in_memory_index_last_modified,
++            context,
++            backend_callback_url,
++            callback_token,
++            auth_header,
++        } = req;
++        let udf_type =
++            UdfType::from(pb::common::UdfType::try_from(udf_type).context("invalid udf_type")?);
++        let identity = Identity::from_proto_unchecked(identity.context("missing identity")?)?;
++        let ts: RepeatableTimestamp = ts.context("missing ts")?.try_into()?;
++        let context: ExecutionContext = context.context("missing context")?.try_into()?;
++        let existing_writes = FunctionWrites {
++            updates: existing_writes
++                .into_iter()
++                .map(common::document::DocumentUpdateWithPrevTs::try_from)
++                .collect::<anyhow::Result<Vec<_>>>()?,
++        };
++        let default_system_env_vars: BTreeMap<EnvVarName, EnvVarValue> = default_system_env_vars
++            .into_iter()
++            .map(|pb::funrun::EnvVar { name, value }| {
++                anyhow::Ok((EnvVarName::from_str(&name)?, EnvVarValue::from_str(&value)?))
++            })
++            .collect::<anyhow::Result<_>>()?;
++        let in_memory_index_last_modified: BTreeMap<IndexId, Timestamp> =
++            in_memory_index_last_modified
++                .into_iter()
++                .map(
++                    |pb::funrun::IndexLastModified {
++                         index_id,
++                         last_modified_ts,
++                     }| {
++                        anyhow::Ok((
++                            IndexId::from_str(&index_id)?,
++                            Timestamp::try_from(last_modified_ts)?,
++                        ))
++                    },
++                )
++                .collect::<anyhow::Result<_>>()?;
++        let function_metadata = match path_and_args {
++            Some(path_and_args) => Some(FunctionMetadata {
++                path_and_args: ValidatedPathAndArgs::from_proto(path_and_args)?,
++                journal: journal
++                    .context("missing journal for query/mutation")?
++                    .try_into()?,
++            }),
++            None => None,
++        };
++        let action_name = function_metadata
++            .as_ref()
++            .map(|m| m.path_and_args.path().udf_path.to_string());
++        let snapshot = instance.snapshot_inputs(ts).await?;
++        let backend_url =
++            ConvexOrigin::from(backend_callback_url.context("missing backend_callback_url")?);
++        let action_callbacks = Arc::new(HttpActionCallbacks::new(
++            backend_url.clone(),
++            callback_token.unwrap_or_default(),
++            auth_header,
++            context.clone(),
++            action_name,
++        ));
++        let deployment = DeploymentMetadata {
++            name: instance.instance_name.clone(),
++            region: None,
++            class: DeploymentClass::S16,
++        };
++        let (log_line_sender, log_line_receiver) = mpsc::unbounded_channel::<LogLine>();
++        let run_request_args = RunRequestArgs {
++            key_broker: instance.key_broker.clone(),
++            index_reader: snapshot.index_reader,
++            convex_origin: backend_url,
++            bootstrap_metadata: snapshot.bootstrap_metadata,
++            table_count_snapshot: snapshot.table_count_snapshot,
++            text_index_snapshot: snapshot.text_index_snapshot,
++            action_callbacks,
++            fetch_client,
++            log_line_sender: Some(log_line_sender),
++            function_started_sender: None,
++            udf_type,
++            identity,
++            existing_writes,
++            default_system_env_vars,
++            in_memory_index_last_modified,
++            context,
++            subfunctions_in_same_isolate: *common::knobs::SUBFUNCTIONS_IN_SAME_ISOLATE,
++            deployment,
++        };
++        let result = Self::drive_and_stream_log_lines(
++            &instance.core,
++            run_request_args,
++            function_metadata,
++            log_line_receiver,
++            part_tx,
++        )
++        .await;
++        validate_run_function_result(udf_type, *ts, instance.retention_validator.clone()).await?;
++        let (final_transaction, outcome, usage_stats) = result?;
++        Ok(pb::funrun::RunFunctionResult {
++            outcome: Some(outcome.try_into()?),
++            final_transaction: final_transaction
++                .map(pb::funrun::FunctionFinalTransaction::try_from)
++                .transpose()?,
++            usage_stats: Some(usage_stats.into()),
++        })
++    }
++
++    async fn run_http(
++        instance: Arc<InstanceState<RT>>,
++        fetch_client: Arc<dyn common::http::fetch::FetchClient>,
++        req: pb::funrun::RunHttpActionRequest,
++        part_tx: &mpsc::Sender<Result<pb::funrun::HttpActionResponsePart, Status>>,
++    ) -> anyhow::Result<pb::funrun::RunFunctionResult> {
++        let pb::funrun::RunHttpActionRequest {
++            instance_name: _,
++            identity,
++            ts,
++            existing_writes,
++            default_system_env_vars,
++            in_memory_index_last_modified,
++            context,
++            backend_callback_url,
++            callback_token,
++            auth_header,
++            http_module_path,
++            routed_path,
++            http_request_head,
++            http_request_body,
++        } = req;
++        let identity = Identity::from_proto_unchecked(identity.context("missing identity")?)?;
++        let ts: RepeatableTimestamp = ts.context("missing ts")?.try_into()?;
++        let context: ExecutionContext = context.context("missing context")?.try_into()?;
++        let existing_writes = FunctionWrites {
++            updates: existing_writes
++                .into_iter()
++                .map(common::document::DocumentUpdateWithPrevTs::try_from)
++                .collect::<anyhow::Result<Vec<_>>>()?,
++        };
++        let default_system_env_vars: BTreeMap<EnvVarName, EnvVarValue> = default_system_env_vars
++            .into_iter()
++            .map(|pb::funrun::EnvVar { name, value }| {
++                anyhow::Ok((EnvVarName::from_str(&name)?, EnvVarValue::from_str(&value)?))
++            })
++            .collect::<anyhow::Result<_>>()?;
++        let in_memory_index_last_modified: BTreeMap<IndexId, Timestamp> =
++            in_memory_index_last_modified
++                .into_iter()
++                .map(
++                    |pb::funrun::IndexLastModified {
++                         index_id,
++                         last_modified_ts,
++                     }| {
++                        anyhow::Ok((
++                            IndexId::from_str(&index_id)?,
++                            Timestamp::try_from(last_modified_ts)?,
++                        ))
++                    },
++                )
++                .collect::<anyhow::Result<_>>()?;
++        let http_module_path =
++            ValidatedHttpPath::from_proto(http_module_path.context("missing http_module_path")?)?;
++        let routed_path = RoutedHttpPath(routed_path);
++        let head = HttpActionRequestHead::try_from(
++            http_request_head.context("missing http_request_head")?,
++        )?;
++        let body: Option<futures::stream::BoxStream<'static, anyhow::Result<bytes::Bytes>>> =
++            http_request_body.map(|bytes| {
++                futures::stream::once(async move { Ok(bytes::Bytes::from(bytes)) }).boxed()
++            });
++        let http_request = HttpActionRequest { head, body };
++        let action_name = Some(http_module_path.path().udf_path.to_string());
++        let snapshot = instance.snapshot_inputs(ts).await?;
++        let backend_url =
++            ConvexOrigin::from(backend_callback_url.context("missing backend_callback_url")?);
++        let action_callbacks = Arc::new(HttpActionCallbacks::new(
++            backend_url.clone(),
++            callback_token.unwrap_or_default(),
++            auth_header,
++            context.clone(),
++            action_name,
++        ));
++        let deployment = DeploymentMetadata {
++            name: instance.instance_name.clone(),
++            region: None,
++            class: DeploymentClass::S16,
++        };
++        let (log_line_sender, mut log_line_receiver) = mpsc::unbounded_channel::<LogLine>();
++        let mut drain_logs = instance.rt.spawn("funrun_http_log_drain", async move {
++            while log_line_receiver.recv().await.is_some() {}
++        });
++        let run_request_args = RunRequestArgs {
++            key_broker: instance.key_broker.clone(),
++            index_reader: snapshot.index_reader,
++            convex_origin: backend_url,
++            bootstrap_metadata: snapshot.bootstrap_metadata,
++            table_count_snapshot: snapshot.table_count_snapshot,
++            text_index_snapshot: snapshot.text_index_snapshot,
++            action_callbacks,
++            fetch_client,
++            log_line_sender: Some(log_line_sender),
++            function_started_sender: None,
++            udf_type: UdfType::HttpAction,
++            identity,
++            existing_writes,
++            default_system_env_vars,
++            in_memory_index_last_modified,
++            context,
++            subfunctions_in_same_isolate: *common::knobs::SUBFUNCTIONS_IN_SAME_ISOLATE,
++            deployment,
++        };
++        let (inner_response_sender, inner_response_receiver) = mpsc::unbounded_channel();
++        let http_action_metadata = HttpActionMetadata {
++            http_response_streamer: HttpActionResponseStreamer::new(inner_response_sender),
++            http_module_path,
++            routed_path,
++            http_request,
++        };
++        let mut inner_response_stream =
++            UnboundedReceiverStream::new(inner_response_receiver).fuse();
++        let mut run_fut = Box::pin(instance.core.run_function_no_retention_check(
++            run_request_args,
++            None,
++            Some(http_action_metadata),
++        ))
++        .fuse();
++        let result = loop {
++            select_biased! {
++                result = &mut run_fut => {
++                    while let Some(part) = inner_response_stream.next().await {
++                        if forward_http_part(part_tx, part).await.is_err() {
++                            anyhow::bail!(ErrorMetadata::client_disconnect());
++                        }
++                    }
++                    break result;
++                },
++                _ = part_tx.closed().fuse() => {
++                    drop(run_fut);
++                    anyhow::bail!(ErrorMetadata::client_disconnect());
++                },
++                part = inner_response_stream.select_next_some() => {
++                    let _ = forward_http_part(part_tx, part).await;
++                },
++            }
++        };
++        drain_logs.shutdown();
++        validate_run_function_result(
++            UdfType::HttpAction,
++            *ts,
++            instance.retention_validator.clone(),
++        )
++        .await?;
++        let (_final_transaction, outcome, usage_stats) = result?;
++        Ok(pb::funrun::RunFunctionResult {
++            outcome: Some(outcome.try_into()?),
++            final_transaction: None,
++            usage_stats: Some(usage_stats.into()),
++        })
++    }
++
++    async fn drive_and_stream_log_lines(
++        core: &FunctionRunnerCore<RT, DeploymentStorage>,
++        run_request_args: RunRequestArgs,
++        function_metadata: Option<FunctionMetadata>,
++        log_line_receiver: mpsc::UnboundedReceiver<LogLine>,
++        part_tx: &mpsc::Sender<Result<pb::funrun::RunFunctionResponsePart, Status>>,
++    ) -> anyhow::Result<(
++        Option<function_runner::FunctionFinalTransaction>,
++        udf::FunctionOutcome,
++        usage_tracking::FunctionUsageStats,
++    )> {
++        let mut run_fut = Box::pin(core.run_function_no_retention_check(
++            run_request_args,
++            function_metadata,
++            None,
++        ))
++        .fuse();
++        let mut log_lines =
++            tokio_stream::wrappers::UnboundedReceiverStream::new(log_line_receiver).fuse();
++        loop {
++            select_biased! {
++                result = &mut run_fut => {
++                    while let Some(log_line) = log_lines.next().await {
++                        forward_log_line(part_tx, log_line).await;
++                    }
++                    return result;
++                },
++                maybe_line = log_lines.select_next_some() => {
++                    forward_log_line(part_tx, maybe_line).await;
++                },
++            }
++        }
++    }
++}
++
++async fn forward_log_line(
++    part_tx: &mpsc::Sender<Result<pb::funrun::RunFunctionResponsePart, Status>>,
++    log_line: LogLine,
++) {
++    let part = pb::funrun::RunFunctionResponsePart {
++        part: Some(pb::funrun::run_function_response_part::Part::LogLine(
++            log_line.into(),
++        )),
++    };
++    let _ = part_tx.send(Ok(part)).await;
++}
++
++async fn forward_http_part(
++    part_tx: &mpsc::Sender<Result<pb::funrun::HttpActionResponsePart, Status>>,
++    part: HttpActionResponsePart,
++) -> Result<(), ()> {
++    let message_type = match part {
++        HttpActionResponsePart::Head(head) => {
++            pb::common::http_action_response::MessageType::Head(head.into())
++        },
++        HttpActionResponsePart::BodyChunk(bytes) => {
++            pb::common::http_action_response::MessageType::Body(bytes.to_vec())
++        },
++    };
++    let wire = pb::funrun::HttpActionResponsePart {
++        part: Some(pb::funrun::http_action_response_part::Part::Response(
++            pb::common::HttpActionResponse {
++                message_type: Some(message_type),
++            },
++        )),
++    };
++    part_tx.send(Ok(wire)).await.map_err(|_| ())
++}
++
++pub struct RunFunctionStream {
++    inner: ReceiverStream<Result<pb::funrun::RunFunctionResponsePart, Status>>,
++    _handle: Box<dyn SpawnHandle>,
++}
++
++impl Stream for RunFunctionStream {
++    type Item = Result<pb::funrun::RunFunctionResponsePart, Status>;
++
++    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
++        Pin::new(&mut self.inner).poll_next(cx)
++    }
++}
++
++pub struct HttpActionResponseStream {
++    inner: ReceiverStream<Result<pb::funrun::HttpActionResponsePart, Status>>,
++    _handle: Box<dyn SpawnHandle>,
++}
++
++impl Stream for HttpActionResponseStream {
++    type Item = Result<pb::funrun::HttpActionResponsePart, Status>;
++
++    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
++        Pin::new(&mut self.inner).poll_next(cx)
++    }
++}
++
++#[tonic::async_trait]
++impl<RT: Runtime> pb::funrun::funrun_server::Funrun for FunrunService<RT> {
++    type RunFunctionStream = RunFunctionStream;
++    type RunHttpActionStream = HttpActionResponseStream;
++
++    async fn run_function(
++        &self,
++        request: Request<pb::funrun::RunFunctionRequest>,
++    ) -> Result<Response<Self::RunFunctionStream>, Status> {
++        let metadata = request.metadata().clone();
++        let req = request.into_inner();
++        let instance = self
++            .resolve_and_authenticate(&req.instance_name, &metadata)
++            .await?;
++        let (part_tx, part_rx) = mpsc::channel(RESPONSE_STREAM_BUFFER);
++        let fetch_client = self.fetch_client.clone();
++        let handle = self.rt.spawn("funrun_run_function", async move {
++            match Self::run(instance, fetch_client, req, &part_tx).await {
++                Ok(result) => {
++                    let part = pb::funrun::RunFunctionResponsePart {
++                        part: Some(pb::funrun::run_function_response_part::Part::Result(result)),
++                    };
++                    let _ = part_tx.send(Ok(part)).await;
++                },
++                Err(e) => {
++                    let _ = part_tx.send(Err(Status::from_anyhow(e))).await;
++                },
++            }
++        });
++        Ok(Response::new(RunFunctionStream {
++            inner: ReceiverStream::new(part_rx),
++            _handle: handle,
++        }))
++    }
++
++    async fn run_http_action(
++        &self,
++        request: Request<pb::funrun::RunHttpActionRequest>,
++    ) -> Result<Response<Self::RunHttpActionStream>, Status> {
++        let metadata = request.metadata().clone();
++        let req = request.into_inner();
++        let instance = self
++            .resolve_and_authenticate(&req.instance_name, &metadata)
++            .await?;
++        let (part_tx, part_rx) = mpsc::channel(RESPONSE_STREAM_BUFFER);
++        let fetch_client = self.fetch_client.clone();
++        let handle = self.rt.spawn("funrun_run_http_action", async move {
++            match Self::run_http(instance, fetch_client, req, &part_tx).await {
++                Ok(result) => {
++                    let part = pb::funrun::HttpActionResponsePart {
++                        part: Some(pb::funrun::http_action_response_part::Part::Result(result)),
++                    };
++                    let _ = part_tx.send(Ok(part)).await;
++                },
++                Err(e) => {
++                    let _ = part_tx.send(Err(Status::from_anyhow(e))).await;
++                },
++            }
++        });
++        Ok(Response::new(HttpActionResponseStream {
++            inner: ReceiverStream::new(part_rx),
++            _handle: handle,
++        }))
++    }
++}
+diff --git a/crates/funrun_server/src/snapshot.rs b/crates/funrun_server/src/snapshot.rs
+new file mode 100644
+index 000000000..13ea82bc7
+--- /dev/null
++++ b/crates/funrun_server/src/snapshot.rs
+@@ -0,0 +1,604 @@
++use std::{
++    collections::HashMap,
++    sync::{
++        Arc,
++        Mutex,
++        OnceLock,
++    },
++};
++
++use anyhow::Context;
++use application::create_storage;
++use common::{
++    persistence::{
++        new_static_repeatable_recent,
++        PersistenceReader,
++        RepeatablePersistence,
++        RetentionValidator,
++    },
++    runtime::Runtime,
++    types::RepeatableTimestamp,
++};
++use database::{
++    BootstrapMetadata,
++    Database,
++    DatabaseSnapshot,
++    FollowerRetentionManager,
++    TableCountSnapshot,
++    TextIndexManagerSnapshot,
++    TransactionTextSnapshot,
++};
++use function_runner::server::{
++    DeploymentStorage,
++    FunctionRunnerCore,
++    SharedIsolateResources,
++};
++use indexing::{
++    backend_in_memory_indexes::IndexReader,
++    index_cache::IndexCache,
++};
++use keybroker::{
++    DeploymentSecret,
++    FunctionRunnerKeyBroker,
++};
++use model::{
++    database_globals::{
++        types::StorageType,
++        DatabaseGlobalsModel,
++    },
++    virtual_system_mapping,
++};
++use search::searcher::InProcessSearcher;
++use storage::Storage;
++use tokio::sync::OnceCell;
++use usage_tracking::FunctionUsageTracker;
++
++use crate::config::{
++    FunrunConfig,
++    FunrunInstanceConfig,
++};
++
++fn max_percent_per_client(num_tenants: usize, configured: usize) -> usize {
++    if configured > 0 {
++        return configured.clamp(1, 100);
++    }
++    let tenants = num_tenants.max(1);
++    (100 / tenants).max(10)
++}
++
++pub struct InstanceRegistry<RT: Runtime> {
++    rt: RT,
++    db: clusters::DbDriverTag,
++    require_ssl: bool,
++    instances: HashMap<String, Arc<FunrunInstanceConfig>>,
++    shared_isolate: SharedIsolateResources<RT>,
++    states: Mutex<HashMap<String, Arc<OnceCell<Arc<InstanceState<RT>>>>>>,
++}
++
++impl<RT: Runtime> InstanceRegistry<RT> {
++    pub fn new(rt: RT, config: &FunrunConfig) -> anyhow::Result<Self> {
++        let instances: HashMap<String, Arc<FunrunInstanceConfig>> = config
++            .instances
++            .iter()
++            .map(|i| (i.instance_name.clone(), Arc::new(i.clone())))
++            .collect();
++        let cap = max_percent_per_client(
++            instances.len(),
++            *common::knobs::FUNRUN_MAX_PERCENT_PER_CLIENT,
++        );
++        let shared_isolate = SharedIsolateResources::new(rt.clone(), cap)?;
++        tracing::info!(
++            "[convex-funrun] shared isolate pool: {} workers, per-tenant cap {}% ({} tenant(s))",
++            shared_isolate.max_isolate_workers(),
++            cap,
++            instances.len(),
++        );
++        Ok(Self {
++            rt,
++            db: config.db,
++            require_ssl: config.require_ssl,
++            instances,
++            shared_isolate,
++            states: Mutex::new(HashMap::new()),
++        })
++    }
++
++    pub fn instance_config(
++        &self,
++        instance_name: &str,
++    ) -> anyhow::Result<Arc<FunrunInstanceConfig>> {
++        lookup_instance_config(&self.instances, instance_name)
++    }
++
++    pub async fn get_or_create(
++        &self,
++        instance_name: &str,
++    ) -> anyhow::Result<Arc<InstanceState<RT>>> {
++        let config = lookup_instance_config(&self.instances, instance_name)?;
++        let (rt, db, require_ssl) = (self.rt.clone(), self.db, self.require_ssl);
++        let shared_isolate = self.shared_isolate.clone();
++        get_or_init_cell(&self.states, instance_name, || async move {
++            InstanceState::load(rt, &config, db, require_ssl, shared_isolate)
++                .await
++                .map(Arc::new)
++        })
++        .await
++    }
++
++    #[cfg(test)]
++    pub fn shared_pool_id(&self) -> usize {
++        self.shared_isolate.shared_pool_id()
++    }
++}
++
++fn lookup_instance_config(
++    instances: &HashMap<String, Arc<FunrunInstanceConfig>>,
++    instance_name: &str,
++) -> anyhow::Result<Arc<FunrunInstanceConfig>> {
++    instances.get(instance_name).cloned().with_context(|| {
++        format!(
++            "funrun pod is not configured for instance {instance_name:?} (set it in \
++             FUNRUN_INSTANCES)"
++        )
++    })
++}
++
++async fn get_or_init_cell<T, Fut>(
++    cells: &Mutex<HashMap<String, Arc<OnceCell<Arc<T>>>>>,
++    key: &str,
++    build: impl FnOnce() -> Fut,
++) -> anyhow::Result<Arc<T>>
++where
++    Fut: std::future::Future<Output = anyhow::Result<Arc<T>>>,
++{
++    let cell = {
++        let mut guard = cells.lock().expect("InstanceRegistry lock poisoned");
++        guard
++            .entry(key.to_owned())
++            .or_insert_with(|| Arc::new(OnceCell::new()))
++            .clone()
++    };
++    let value = cell.get_or_try_init(build).await?;
++    Ok(value.clone())
++}
++
++#[derive(Clone)]
++pub struct InstanceState<RT: Runtime> {
++    pub rt: RT,
++    pub instance_name: String,
++    pub instance_secret: DeploymentSecret,
++    pub key_broker: FunctionRunnerKeyBroker,
++    pub reader: Arc<dyn PersistenceReader>,
++    pub retention_validator: Arc<dyn RetentionValidator>,
++    pub searcher: Arc<dyn search::Searcher>,
++    pub search_storage: Arc<dyn Storage>,
++    pub core: FunctionRunnerCore<RT, DeploymentStorage>,
++    pub database: Database<RT>,
++}
++
++impl<RT: Runtime> InstanceState<RT> {
++    pub async fn load(
++        rt: RT,
++        config: &FunrunInstanceConfig,
++        db: clusters::DbDriverTag,
++        require_ssl: bool,
++        shared_isolate: SharedIsolateResources<RT>,
++    ) -> anyhow::Result<Self> {
++        let reader = db_connection::connect_persistence_reader(
++            db,
++            &config.db_spec,
++            require_ssl,
++            false,
++            &config.instance_name,
++            rt.clone(),
++        )
++        .await?;
++        let retention_validator: Arc<dyn RetentionValidator> =
++            Arc::new(FollowerRetentionManager::new(rt.clone(), reader.clone()).await?);
++        let key_broker =
++            keybroker::KeyBroker::new(&config.instance_name, config.instance_secret.clone())?
++                .function_runner_keybroker();
++        let mut storage_type = Self::read_storage_type(&rt, &reader, &retention_validator).await?;
++        if let Some(prefix) = &config.bucket_prefix {
++            match &mut storage_type {
++                StorageType::S3 { s3_prefix } => {
++                    tracing::info!(
++                        "[convex-funrun] instance {}: overriding S3 prefix {:?} -> {:?}",
++                        config.instance_name,
++                        s3_prefix,
++                        prefix,
++                    );
++                    *s3_prefix = prefix.clone();
++                },
++                StorageType::Local { .. } => {
++                    tracing::warn!(
++                        "[convex-funrun] instance {}: bucket_prefix override ignored for Local \
++                         storage",
++                        config.instance_name,
++                    );
++                },
++            }
++        }
++        let files_storage =
++            create_storage(rt.clone(), &storage_type, storage::StorageUseCase::Files).await?;
++        let modules_storage =
++            create_storage(rt.clone(), &storage_type, storage::StorageUseCase::Modules).await?;
++        let search_storage = create_storage(
++            rt.clone(),
++            &storage_type,
++            storage::StorageUseCase::SearchIndexes,
++        )
++        .await?;
++        let searcher: Arc<dyn search::Searcher> = Arc::new(InProcessSearcher::new(rt.clone())?);
++        let core = FunctionRunnerCore::new_with_isolate_client(
++            rt.clone(),
++            DeploymentStorage {
++                files_storage,
++                modules_storage,
++            },
++            shared_isolate,
++        );
++        let database = Database::load_follower(
++            reader.clone(),
++            rt.clone(),
++            searcher.clone(),
++            virtual_system_mapping().clone(),
++            IndexCache::new(*common::knobs::FUNRUN_INDEX_CACHE_SIZE).new_handle(),
++        )
++        .await?;
++        database.set_search_storage(search_storage.clone());
++        tracing::info!(
++            "[convex-funrun] loaded instance {} ({:?} storage); warm follower snapshot at {}",
++            config.instance_name,
++            storage_type,
++            database.now_ts_for_reads(),
++        );
++        Ok(Self {
++            rt,
++            instance_name: config.instance_name.clone(),
++            instance_secret: config.instance_secret.clone(),
++            key_broker,
++            reader,
++            retention_validator,
++            searcher,
++            search_storage,
++            core,
++            database,
++        })
++    }
++
++    async fn read_storage_type(
++        rt: &RT,
++        reader: &Arc<dyn PersistenceReader>,
++        retention_validator: &Arc<dyn RetentionValidator>,
++    ) -> anyhow::Result<StorageType> {
++        let ts = new_static_repeatable_recent(reader.as_ref()).await?;
++        let snapshot = DatabaseSnapshot::load(
++            rt.clone(),
++            reader.clone(),
++            ts,
++            retention_validator.clone(),
++            virtual_system_mapping().clone(),
++        )
++        .await?;
++        let text_index_snapshot: Arc<dyn TransactionTextSnapshot> =
++            Arc::new(TextIndexManagerSnapshot::new(
++                snapshot.snapshot.index_registry.clone(),
++                snapshot.snapshot.text_indexes.clone(),
++                Arc::new(InProcessSearcher::new(rt.clone())?),
++                Arc::new(OnceLock::new()),
++            ));
++        let mut tx = snapshot.begin_tx(
++            keybroker::Identity::system(),
++            text_index_snapshot,
++            FunctionUsageTracker::new(),
++            virtual_system_mapping().clone(),
++        )?;
++        DatabaseGlobalsModel::new(&mut tx)
++            .database_globals()
++            .await?
++            .into_value()
++            .storage_type
++            .context(
++                "funrun cannot start: database storage tag is not initialized (the leader must \
++                 initialize the database first)",
++            )
++    }
++
++    pub async fn snapshot_inputs(&self, ts: RepeatableTimestamp) -> anyhow::Result<SnapshotInputs> {
++        let repeatable_persistence =
++            RepeatablePersistence::new(self.reader.clone(), ts, self.retention_validator.clone());
++        let index_reader: Arc<dyn IndexReader> =
++            Arc::new(repeatable_persistence.read_snapshot(ts)?);
++        match self.database.snapshot(ts) {
++            Ok(snapshot) => {
++                let bootstrap_metadata = self.database.bootstrap_metadata.clone();
++                let table_count_snapshot: Arc<dyn TableCountSnapshot> =
++                    match snapshot.table_summaries.clone() {
++                        Some(summaries) => Arc::new(Some(summaries)),
++                        None => Arc::new(self.bootstrap_table_summaries(ts).await?),
++                    };
++                let search_storage_cell = Arc::new(OnceLock::new());
++                let _ = search_storage_cell.set(self.search_storage.clone());
++                let text_index_snapshot: Arc<dyn TransactionTextSnapshot> =
++                    Arc::new(TextIndexManagerSnapshot::new(
++                        snapshot.index_registry,
++                        snapshot.text_indexes,
++                        self.searcher.clone(),
++                        search_storage_cell,
++                    ));
++                Ok(SnapshotInputs {
++                    index_reader,
++                    bootstrap_metadata,
++                    table_count_snapshot,
++                    text_index_snapshot,
++                })
++            },
++            Err(warm_err) => {
++                tracing::debug!(
++                    "[convex-funrun] warm snapshot miss at ts {} ({warm_err:#}); cold-loading",
++                    *ts
++                );
++                self.cold_snapshot_inputs(ts, index_reader).await
++            },
++        }
++    }
++
++    async fn bootstrap_table_summaries(
++        &self,
++        ts: RepeatableTimestamp,
++    ) -> anyhow::Result<Option<database::TableSummaries>> {
++        let (table_summary_snapshot, _num_rows) = database::table_summary::bootstrap(
++            self.rt.clone(),
++            self.reader.clone(),
++            self.retention_validator.clone(),
++            ts,
++            database::table_summary::BootstrapKind::FromCheckpoint,
++        )
++        .await?;
++        let snapshot = self.database.snapshot(ts)?;
++        let summaries = database::TableSummaries::new(
++            table_summary_snapshot,
++            snapshot.table_registry.table_mapping(),
++            &snapshot.virtual_system_mapping,
++        )?;
++        Ok(Some(summaries))
++    }
++
++    async fn cold_snapshot_inputs(
++        &self,
++        ts: RepeatableTimestamp,
++        index_reader: Arc<dyn IndexReader>,
++    ) -> anyhow::Result<SnapshotInputs> {
++        let mut snapshot = DatabaseSnapshot::load(
++            self.rt.clone(),
++            self.reader.clone(),
++            ts,
++            self.retention_validator.clone(),
++            virtual_system_mapping().clone(),
++        )
++        .await?;
++        snapshot.load_table_summaries().await?;
++        let bootstrap_metadata = snapshot.bootstrap_metadata.clone();
++        let table_count_snapshot: Arc<dyn TableCountSnapshot> =
++            Arc::new(snapshot.snapshot.table_summaries);
++        let search_storage_cell = Arc::new(OnceLock::new());
++        let _ = search_storage_cell.set(self.search_storage.clone());
++        let text_index_snapshot: Arc<dyn TransactionTextSnapshot> =
++            Arc::new(TextIndexManagerSnapshot::new(
++                snapshot.snapshot.index_registry,
++                snapshot.snapshot.text_indexes,
++                self.searcher.clone(),
++                search_storage_cell,
++            ));
++        Ok(SnapshotInputs {
++            index_reader,
++            bootstrap_metadata,
++            table_count_snapshot,
++            text_index_snapshot,
++        })
++    }
++}
++
++pub struct SnapshotInputs {
++    pub index_reader: Arc<dyn IndexReader>,
++    pub bootstrap_metadata: BootstrapMetadata,
++    pub table_count_snapshot: Arc<dyn TableCountSnapshot>,
++    pub text_index_snapshot: Arc<dyn TransactionTextSnapshot>,
++}
++
++#[cfg(test)]
++mod tests {
++    use std::sync::{
++        atomic::{
++            AtomicUsize,
++            Ordering,
++        },
++        Arc,
++        Mutex,
++    };
++
++    use common::types::PersistenceVersion;
++    use keybroker::DeploymentSecret;
++    use runtime::prod::ProdRuntime;
++
++    use super::{
++        get_or_init_cell,
++        lookup_instance_config,
++        max_percent_per_client,
++        InstanceRegistry,
++    };
++    use crate::config::{
++        FunrunConfig,
++        FunrunInstanceConfig,
++    };
++
++    fn config(names: &[&str]) -> FunrunConfig {
++        FunrunConfig {
++            listen: "0.0.0.0:0".parse().unwrap(),
++            instances: names
++                .iter()
++                .map(|n| FunrunInstanceConfig {
++                    instance_name: (*n).to_owned(),
++                    instance_secret: DeploymentSecret::try_from(SECRET).unwrap(),
++                    db_spec: "postgres://localhost/x".to_owned(),
++                    bucket_prefix: None,
++                })
++                .collect(),
++            db: clusters::DbDriverTag::Postgres(PersistenceVersion::V5),
++            require_ssl: false,
++            tls: None,
++        }
++    }
++
++    const SECRET: &str = "0000000000000000000000000000000000000000000000000000000000000001";
++
++    fn fleet(names: &[&str]) -> std::collections::HashMap<String, Arc<FunrunInstanceConfig>> {
++        names
++            .iter()
++            .map(|n| {
++                (
++                    (*n).to_owned(),
++                    Arc::new(FunrunInstanceConfig {
++                        instance_name: (*n).to_owned(),
++                        instance_secret: DeploymentSecret::try_from(SECRET).unwrap(),
++                        db_spec: "postgres://localhost/x".to_owned(),
++                        bucket_prefix: None,
++                    }),
++                )
++            })
++            .collect()
++    }
++
++    #[test]
++    fn unknown_instance_errors_cleanly() {
++        let instances = fleet(&["known"]);
++        assert_eq!(
++            lookup_instance_config(&instances, "known")
++                .unwrap()
++                .instance_name,
++            "known"
++        );
++        let err = match lookup_instance_config(&instances, "nope") {
++            Ok(_) => panic!("expected an error for an unknown instance"),
++            Err(e) => e,
++        };
++        assert!(
++            err.to_string().contains("not configured for instance"),
++            "{err}"
++        );
++        assert!(err.to_string().contains("nope"), "{err}");
++    }
++
++    #[tokio::test]
++    async fn same_key_returns_cached_arc_and_builds_once() {
++        let cells = Mutex::new(std::collections::HashMap::new());
++        let builds = AtomicUsize::new(0);
++        let first = get_or_init_cell(&cells, "a", || async {
++            builds.fetch_add(1, Ordering::SeqCst);
++            Ok(Arc::new(42u32))
++        })
++        .await
++        .unwrap();
++        let second = get_or_init_cell(&cells, "a", || async {
++            builds.fetch_add(1, Ordering::SeqCst);
++            Ok(Arc::new(42u32))
++        })
++        .await
++        .unwrap();
++        assert!(Arc::ptr_eq(&first, &second));
++        assert_eq!(builds.load(Ordering::SeqCst), 1);
++    }
++
++    #[tokio::test]
++    async fn concurrent_first_requests_build_exactly_once() {
++        let cells = Mutex::new(std::collections::HashMap::new());
++        let builds = AtomicUsize::new(0);
++        let futs = (0..16).map(|_| {
++            let cells = &cells;
++            let builds = &builds;
++            async move {
++                get_or_init_cell(cells, "same", || async {
++                    builds.fetch_add(1, Ordering::SeqCst);
++                    tokio::task::yield_now().await;
++                    Ok(Arc::new("v".to_owned()))
++                })
++                .await
++                .unwrap()
++            }
++        });
++        let results = futures::future::join_all(futs).await;
++        assert_eq!(builds.load(Ordering::SeqCst), 1);
++        for r in &results {
++            assert!(Arc::ptr_eq(r, &results[0]));
++        }
++    }
++
++    #[tokio::test]
++    async fn distinct_keys_build_independently() {
++        let cells = Mutex::new(std::collections::HashMap::new());
++        let a = get_or_init_cell(&cells, "a", || async { Ok(Arc::new(1u32)) })
++            .await
++            .unwrap();
++        let b = get_or_init_cell(&cells, "b", || async { Ok(Arc::new(2u32)) })
++            .await
++            .unwrap();
++        assert_eq!(*a, 1);
++        assert_eq!(*b, 2);
++        assert!(!Arc::ptr_eq(&a, &b));
++    }
++
++    #[tokio::test]
++    async fn build_error_leaves_cell_empty_for_retry() {
++        let cells = Mutex::new(std::collections::HashMap::new());
++        let err = get_or_init_cell::<u32, _>(&cells, "k", || async {
++            anyhow::bail!("transient load failure")
++        })
++        .await
++        .unwrap_err();
++        assert!(err.to_string().contains("transient load failure"), "{err}");
++        let ok = get_or_init_cell(&cells, "k", || async { Ok(Arc::new(7u32)) })
++            .await
++            .unwrap();
++        assert_eq!(*ok, 7);
++    }
++
++    #[test]
++    fn single_tenant_cap_is_full_pool() {
++        assert_eq!(max_percent_per_client(1, 0), 100);
++    }
++
++    #[test]
++    fn auto_cap_splits_fleet_evenly_with_floor() {
++        assert_eq!(max_percent_per_client(2, 0), 50);
++        assert_eq!(max_percent_per_client(4, 0), 25);
++        assert_eq!(max_percent_per_client(10, 0), 10);
++        assert_eq!(max_percent_per_client(20, 0), 10);
++        assert_eq!(max_percent_per_client(100, 0), 10);
++        assert_eq!(max_percent_per_client(0, 0), 100);
++    }
++
++    #[test]
++    fn explicit_override_is_honored_and_clamped() {
++        assert_eq!(max_percent_per_client(4, 50), 50);
++        assert_eq!(max_percent_per_client(1, 25), 25);
++        assert_eq!(max_percent_per_client(4, 150), 100);
++        assert_eq!(max_percent_per_client(4, 1), 1);
++    }
++
++    #[test]
++    fn registry_builds_exactly_one_shared_pool() -> anyhow::Result<()> {
++        let tokio = ProdRuntime::init_tokio()?;
++        let rt = ProdRuntime::new(&tokio);
++        rt.block_on("test", async {
++            let reg = InstanceRegistry::new(rt.clone(), &config(&["a", "b", "c"]))?;
++            let pool_id = reg.shared_pool_id();
++            assert_eq!(reg.shared_pool_id(), pool_id);
++            let reg2 = InstanceRegistry::new(rt.clone(), &config(&["solo"]))?;
++            assert_ne!(reg2.shared_pool_id(), pool_id);
++            reg.shared_isolate.shutdown().await?;
++            reg2.shared_isolate.shutdown().await?;
++            anyhow::Ok(())
++        })
++    }
++}

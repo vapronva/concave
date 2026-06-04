@@ -1,0 +1,605 @@
+diff --git a/.nvmrc b/.nvmrc
+index db49bb14d..b832e4001 100644
+--- a/.nvmrc
++++ b/.nvmrc
+@@ -1 +1 @@
+-22.22.2
++24.16.0
+diff --git a/Cargo.lock b/Cargo.lock
+index d546aa51b..acd7d01ba 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -356,7 +356,7 @@ dependencies = [
+  "governor",
+  "headers",
+  "hex",
+- "http 1.3.1",
++ "http 1.4.1",
+  "http_client",
+  "humansize",
+  "indexing",
+@@ -639,7 +639,7 @@ dependencies = [
+  "derive_more",
+  "errors",
+  "futures",
+- "http 1.3.1",
++ "http 1.4.1",
+  "keybroker",
+  "metrics",
+  "mime",
+@@ -681,7 +681,7 @@ dependencies = [
+  "bytes",
+  "fastrand",
+  "hex",
+- "http 1.3.1",
++ "http 1.4.1",
+  "ring",
+  "time",
+  "tokio",
+@@ -745,7 +745,7 @@ dependencies = [
+  "bytes-utils",
+  "fastrand",
+  "http 0.2.12",
+- "http 1.3.1",
++ "http 1.4.1",
+  "http-body 0.4.6",
+  "http-body 1.0.1",
+  "percent-encoding",
+@@ -801,7 +801,7 @@ dependencies = [
+  "hex",
+  "hmac",
+  "http 0.2.12",
+- "http 1.3.1",
++ "http 1.4.1",
+  "http-body 1.0.1",
+  "lru 0.16.4",
+  "percent-encoding",
+@@ -830,7 +830,7 @@ dependencies = [
+  "bytes",
+  "fastrand",
+  "http 0.2.12",
+- "http 1.3.1",
++ "http 1.4.1",
+  "regex-lite",
+  "tracing",
+ ]
+@@ -854,7 +854,7 @@ dependencies = [
+  "bytes",
+  "fastrand",
+  "http 0.2.12",
+- "http 1.3.1",
++ "http 1.4.1",
+  "regex-lite",
+  "tracing",
+ ]
+@@ -879,7 +879,7 @@ dependencies = [
+  "aws-types",
+  "fastrand",
+  "http 0.2.12",
+- "http 1.3.1",
++ "http 1.4.1",
+  "regex-lite",
+  "tracing",
+ ]
+@@ -901,7 +901,7 @@ dependencies = [
+  "hex",
+  "hmac",
+  "http 0.2.12",
+- "http 1.3.1",
++ "http 1.4.1",
+  "p256",
+  "percent-encoding",
+  "ring",
+@@ -934,7 +934,7 @@ dependencies = [
+  "bytes",
+  "crc-fast",
+  "hex",
+- "http 1.3.1",
++ "http 1.4.1",
+  "http-body 1.0.1",
+  "http-body-util",
+  "md-5",
+@@ -968,7 +968,7 @@ dependencies = [
+  "futures-core",
+  "futures-util",
+  "http 0.2.12",
+- "http 1.3.1",
++ "http 1.4.1",
+  "http-body 0.4.6",
+  "percent-encoding",
+  "pin-project-lite",
+@@ -989,7 +989,7 @@ dependencies = [
+  "bytes-utils",
+  "futures-core",
+  "futures-util",
+- "http 1.3.1",
++ "http 1.4.1",
+  "http-body 1.0.1",
+  "http-body-util",
+  "percent-encoding",
+@@ -1008,7 +1008,7 @@ dependencies = [
+  "aws-smithy-runtime-api",
+  "aws-smithy-types",
+  "h2",
+- "http 1.3.1",
++ "http 1.4.1",
+  "hyper",
+  "hyper-rustls",
+  "hyper-util",
+@@ -1074,7 +1074,7 @@ dependencies = [
+  "bytes",
+  "fastrand",
+  "http 0.2.12",
+- "http 1.3.1",
++ "http 1.4.1",
+  "http-body 0.4.6",
+  "http-body 1.0.1",
+  "http-body-util",
+@@ -1094,7 +1094,7 @@ dependencies = [
+  "aws-smithy-types",
+  "bytes",
+  "http 0.2.12",
+- "http 1.3.1",
++ "http 1.4.1",
+  "pin-project-lite",
+  "tokio",
+  "tracing",
+@@ -1112,7 +1112,7 @@ dependencies = [
+  "bytes-utils",
+  "futures-core",
+  "http 0.2.12",
+- "http 1.3.1",
++ "http 1.4.1",
+  "http-body 0.4.6",
+  "http-body 1.0.1",
+  "http-body-util",
+@@ -1214,7 +1214,7 @@ dependencies = [
+  "bytes",
+  "form_urlencoded",
+  "futures-util",
+- "http 1.3.1",
++ "http 1.4.1",
+  "http-body 1.0.1",
+  "http-body-util",
+  "hyper",
+@@ -1248,7 +1248,7 @@ checksum = "08c78f31d7b1291f7ee735c1c6780ccde7785daae9a9206026862dab7d8792d1"
+ dependencies = [
+  "bytes",
+  "futures-core",
+- "http 1.3.1",
++ "http 1.4.1",
+  "http-body 1.0.1",
+  "http-body-util",
+  "mime",
+@@ -1271,7 +1271,7 @@ dependencies = [
+  "cookie",
+  "futures-util",
+  "headers",
+- "http 1.3.1",
++ "http 1.4.1",
+  "http-body 1.0.1",
+  "http-body-util",
+  "mime",
+@@ -2145,7 +2145,7 @@ dependencies = [
+  "governor",
+  "headers",
+  "hex",
+- "http 1.3.1",
++ "http 1.4.1",
+  "http-body-util",
+  "humansize",
+  "hyper",
+@@ -3392,7 +3392,7 @@ version = "0.1.0"
+ dependencies = [
+  "anyhow",
+  "cmd_util",
+- "http 1.3.1",
++ "http 1.4.1",
+  "metrics",
+  "prometheus",
+  "proptest",
+@@ -3885,6 +3885,7 @@ dependencies = [
+  "anyhow",
+  "async-trait",
+  "async_lru",
++ "authentication",
+  "common",
+  "convex_sync_types",
+  "database",
+@@ -3899,19 +3900,63 @@ dependencies = [
+  "model",
+  "moka",
+  "parking_lot",
++ "pb",
+  "prometheus",
+  "proptest",
+  "proptest-derive",
++ "prost 0.14.3",
+  "rand 0.9.4",
+  "runtime",
++ "search",
+  "storage",
+  "tokio",
+  "tokio-stream",
++ "tonic",
++ "tracing",
+  "udf",
+  "usage_tracking",
+  "value",
+ ]
+ 
++[[package]]
++name = "funrun_server"
++version = "0.1.0"
++dependencies = [
++ "anyhow",
++ "application",
++ "async-trait",
++ "bytes",
++ "clusters",
++ "common",
++ "convex_sync_types",
++ "database",
++ "db_connection",
++ "errors",
++ "function_runner",
++ "futures",
++ "http 1.4.1",
++ "indexing",
++ "keybroker",
++ "model",
++ "pb",
++ "prost 0.14.3",
++ "reqwest",
++ "runtime",
++ "search",
++ "serde",
++ "serde_json",
++ "storage",
++ "tokio",
++ "tokio-stream",
++ "tonic",
++ "tracing",
++ "tracing-subscriber",
++ "udf",
++ "usage_tracking",
++ "value",
++ "vector",
++]
++
+ [[package]]
+ name = "funty"
+ version = "2.0.0"
+@@ -4258,7 +4303,7 @@ dependencies = [
+  "fnv",
+  "futures-core",
+  "futures-sink",
+- "http 1.3.1",
++ "http 1.4.1",
+  "indexmap 2.11.4",
+  "slab",
+  "tokio",
+@@ -4380,7 +4425,7 @@ dependencies = [
+  "base64 0.21.7",
+  "bytes",
+  "headers-core",
+- "http 1.3.1",
++ "http 1.4.1",
+  "httpdate",
+  "mime",
+  "sha1",
+@@ -4392,7 +4437,7 @@ version = "0.3.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "54b4a22553d4242c49fddb9ba998a99962b5cc6f22cb5a3482bec22522403ce4"
+ dependencies = [
+- "http 1.3.1",
++ "http 1.4.1",
+ ]
+ 
+ [[package]]
+@@ -4483,12 +4528,11 @@ dependencies = [
+ 
+ [[package]]
+ name = "http"
+-version = "1.3.1"
++version = "1.4.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "f4a85d31aea989eead29a3aaf9e1115a180df8282431156e533de47660892565"
++checksum = "8be7462df143984c4598a256ef469b251d7d7f9e271135073e78fc535414f3d0"
+ dependencies = [
+  "bytes",
+- "fnv",
+  "itoa",
+ ]
+ 
+@@ -4510,7 +4554,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "1efedce1fb8e6913f23e0c92de8e62cd5b772a67e7b3946df930a62566c93184"
+ dependencies = [
+  "bytes",
+- "http 1.3.1",
++ "http 1.4.1",
+ ]
+ 
+ [[package]]
+@@ -4521,7 +4565,7 @@ checksum = "b021d93e26becf5dc7e1b75b1bed1fd93124b374ceb73f43d4d4eafec896a64a"
+ dependencies = [
+  "bytes",
+  "futures-core",
+- "http 1.3.1",
++ "http 1.4.1",
+  "http-body 1.0.1",
+  "pin-project-lite",
+ ]
+@@ -4535,7 +4579,7 @@ dependencies = [
+  "async-trait",
+  "bincode",
+  "cacache",
+- "http 1.3.1",
++ "http 1.4.1",
+  "http-cache-semantics",
+  "httpdate",
+  "moka",
+@@ -4551,7 +4595,7 @@ checksum = "e076afd9d376f09073b515ce95071b29393687d98ed521948edb899195595ddf"
+ dependencies = [
+  "anyhow",
+  "async-trait",
+- "http 1.3.1",
++ "http 1.4.1",
+  "http-cache",
+  "http-cache-semantics",
+  "reqwest",
+@@ -4566,7 +4610,7 @@ version = "2.1.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "92baf25cf0b8c9246baecf3a444546360a97b569168fdf92563ee6a47829920c"
+ dependencies = [
+- "http 1.3.1",
++ "http 1.4.1",
+  "http-serde",
+  "serde",
+  "time",
+@@ -4578,7 +4622,7 @@ version = "2.1.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "0f056c8559e3757392c8d091e796416e4649d8e49e88b8d76df6c002f05027fd"
+ dependencies = [
+- "http 1.3.1",
++ "http 1.4.1",
+  "serde",
+ ]
+ 
+@@ -4634,7 +4678,7 @@ dependencies = [
+  "futures-channel",
+  "futures-core",
+  "h2",
+- "http 1.3.1",
++ "http 1.4.1",
+  "http-body 1.0.1",
+  "httparse",
+  "httpdate",
+@@ -4653,7 +4697,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "5ee4be2c948921a1a5320b629c4193916ed787a7f7f293fd3f7f5a6c9de74155"
+ dependencies = [
+  "futures-util",
+- "http 1.3.1",
++ "http 1.4.1",
+  "hyper",
+  "hyper-util",
+  "rustls",
+@@ -4704,7 +4748,7 @@ dependencies = [
+  "futures-channel",
+  "futures-core",
+  "futures-util",
+- "http 1.3.1",
++ "http 1.4.1",
+  "http-body 1.0.1",
+  "hyper",
+  "ipnet",
+@@ -5215,7 +5259,7 @@ dependencies = [
+  "file_storage",
+  "futures",
+  "headers",
+- "http 1.3.1",
++ "http 1.4.1",
+  "http-body-util",
+  "humansize",
+  "hyper",
+@@ -5665,6 +5709,7 @@ dependencies = [
+  "anyhow",
+  "application",
+  "async-broadcast",
++ "async-trait",
+  "authentication",
+  "axum",
+  "axum-extra",
+@@ -5689,7 +5734,7 @@ dependencies = [
+  "futures",
+  "futures-async-stream",
+  "governor",
+- "http 1.3.1",
++ "http 1.4.1",
+  "http-body-util",
+  "http_client",
+  "hyper-util",
+@@ -5702,7 +5747,9 @@ dependencies = [
+  "model",
+  "node_executor",
+  "parking_lot",
++ "pb",
+  "proptest",
++ "prost 0.14.3",
+  "reqwest",
+  "runtime",
+  "search",
+@@ -5784,7 +5831,7 @@ dependencies = [
+  "errors",
+  "futures",
+  "hex",
+- "http 1.3.1",
++ "http 1.4.1",
+  "keybroker",
+  "maplit",
+  "metrics",
+@@ -6236,7 +6283,7 @@ dependencies = [
+  "bytes",
+  "encoding_rs",
+  "futures-util",
+- "http 1.3.1",
++ "http 1.4.1",
+  "httparse",
+  "memchr",
+  "mime",
+@@ -6657,7 +6704,7 @@ dependencies = [
+  "base64 0.22.1",
+  "chrono",
+  "getrandom 0.2.15",
+- "http 1.3.1",
++ "http 1.4.1",
+  "rand 0.8.6",
+  "reqwest",
+  "serde",
+@@ -6716,7 +6763,7 @@ dependencies = [
+  "base64 0.21.7",
+  "chrono",
+  "dyn-clone",
+- "http 1.3.1",
++ "http 1.4.1",
+  "itertools 0.10.5",
+  "log",
+  "oauth2",
+@@ -6956,7 +7003,7 @@ dependencies = [
+  "cmd_util",
+  "convex_sync_types",
+  "errors",
+- "http 1.3.1",
++ "http 1.4.1",
+  "pb_build",
+  "pb_extras",
+  "proptest",
+@@ -7495,7 +7542,7 @@ name = "proptest-http"
+ version = "0.1.0"
+ source = "git+https://github.com/nipunn1313/proptest-http?rev=0e658bd4f6dbb73bdd3be66f0d2c34c00cc3a446#0e658bd4f6dbb73bdd3be66f0d2c34c00cc3a446"
+ dependencies = [
+- "http 1.3.1",
++ "http 1.4.1",
+  "proptest",
+ ]
+ 
+@@ -8025,7 +8072,7 @@ dependencies = [
+  "futures-core",
+  "futures-util",
+  "h2",
+- "http 1.3.1",
++ "http 1.4.1",
+  "http-body 1.0.1",
+  "http-body-util",
+  "hyper",
+@@ -8064,7 +8111,7 @@ checksum = "64e8975513bd9a7a43aad01030e79b3498e05db14e9d945df6483e8cf9b8c4c4"
+ dependencies = [
+  "anyhow",
+  "async-trait",
+- "http 1.3.1",
++ "http 1.4.1",
+  "reqwest",
+  "serde",
+  "thiserror 1.0.59",
+@@ -8762,7 +8809,7 @@ version = "0.46.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "7eec9885bceb8ba374858d015bb6fa39dbb341d94ca088bc8f13bee2e64e2c68"
+ dependencies = [
+- "http 1.3.1",
++ "http 1.4.1",
+  "pin-project",
+  "sentry-core",
+  "tower-layer",
+@@ -10364,7 +10411,7 @@ dependencies = [
+  "bytes",
+  "flate2",
+  "h2",
+- "http 1.3.1",
++ "http 1.4.1",
+  "http-body 1.0.1",
+  "http-body-util",
+  "hyper",
+@@ -10476,7 +10523,7 @@ dependencies = [
+  "axum-core",
+  "cookie",
+  "futures-util",
+- "http 1.3.1",
++ "http 1.4.1",
+  "parking_lot",
+  "pin-project-lite",
+  "tower-layer",
+@@ -10494,7 +10541,7 @@ dependencies = [
+  "bytes",
+  "futures-core",
+  "futures-util",
+- "http 1.3.1",
++ "http 1.4.1",
+  "http-body 1.0.1",
+  "http-body-util",
+  "iri-string",
+@@ -10642,7 +10689,7 @@ dependencies = [
+  "data-encoding",
+  "flate2",
+  "headers",
+- "http 1.3.1",
++ "http 1.4.1",
+  "httparse",
+  "log",
+  "native-tls",
+@@ -10687,7 +10734,7 @@ dependencies = [
+  "fastrace",
+  "futures",
+  "headers",
+- "http 1.3.1",
++ "http 1.4.1",
+  "humansize",
+  "keybroker",
+  "metrics",
+@@ -10842,7 +10889,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "d81f9efa9df032be5934a46a068815a10a042b494b6a58cb0a1a97bb5467ed6f"
+ dependencies = [
+  "base64 0.22.1",
+- "http 1.3.1",
++ "http 1.4.1",
+  "httparse",
+  "log",
+ ]
+@@ -12032,7 +12079,7 @@ dependencies = [
+  "async-trait",
+  "common",
+  "errors",
+- "http 1.3.1",
++ "http 1.4.1",
+  "oauth2",
+  "parking_lot",
+  "serde",
+diff --git a/crates/local_backend/Cargo.toml b/crates/local_backend/Cargo.toml
+index aa6c9021e..bfe24e0be 100644
+--- a/crates/local_backend/Cargo.toml
++++ b/crates/local_backend/Cargo.toml
+@@ -41,6 +41,7 @@ testing = [
+ anyhow = { workspace = true }
+ application = { workspace = true }
+ async-broadcast = { workspace = true }
++async-trait = { workspace = true }
+ authentication = { workspace = true }
+ axum = { workspace = true }
+ axum-extra = { workspace = true }
+@@ -75,6 +76,8 @@ metrics = { workspace = true }
+ model = { workspace = true }
+ node_executor = { workspace = true }
+ parking_lot = { workspace = true }
++pb = { workspace = true }
++prost = { workspace = true }
+ reqwest = { workspace = true }
+ runtime = { workspace = true }
+ search = { workspace = true }
+diff --git a/rust-toolchain b/rust-toolchain
+index 2a8b1190d..bee93f276 100644
+--- a/rust-toolchain
++++ b/rust-toolchain
+@@ -1,2 +1,3 @@
+ [toolchain]
+-channel = "nightly-2026-02-18"
++channel = "nightly-2026-06-04"
++components = ["rustfmt", "clippy"]

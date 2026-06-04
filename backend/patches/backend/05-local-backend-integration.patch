@@ -1,0 +1,594 @@
+diff --git a/crates/local_backend/src/deployment_info.rs b/crates/local_backend/src/deployment_info.rs
+index cf0937e6a..e0cbc2f64 100644
+--- a/crates/local_backend/src/deployment_info.rs
++++ b/crates/local_backend/src/deployment_info.rs
+@@ -33,6 +33,7 @@ pub enum DeploymentInfoResponse {
+     #[serde(rename_all = "camelCase")]
+     Cloud {
+         team_id: TeamId,
++        team_slug: Option<String>,
+         project_id: ProjectId,
+         project_name: Option<String>,
+         project_slug: Option<String>,
+@@ -76,6 +77,9 @@ pub async fn get_deployment_info(
+             let backend_info = &**doc;
+             DeploymentInfoResponse::Cloud {
+                 team_id: backend_info.team,
++                team_slug: std::env::var("CONVEX_TEAM_SLUG")
++                    .ok()
++                    .filter(|s| !s.is_empty()),
+                 project_id: backend_info.project,
+                 project_name: backend_info.project_name.clone(),
+                 project_slug: backend_info.project_slug.clone(),
+diff --git a/crates/local_backend/src/lib.rs b/crates/local_backend/src/lib.rs
+index 4633f83f5..9e2e397b6 100644
+--- a/crates/local_backend/src/lib.rs
++++ b/crates/local_backend/src/lib.rs
+@@ -33,7 +33,10 @@ use common::{
+         INDEX_CACHE_SIZE,
+         UDF_CACHE_MAX_SIZE,
+     },
+-    persistence::Persistence,
++    persistence::{
++        Persistence,
++        PersistenceReader,
++    },
+     runtime::{
+         new_rate_limiter,
+         Runtime,
+@@ -49,6 +52,10 @@ use common::{
+ };
+ use config::LocalConfig;
+ use database::Database;
++use db_connection::{
++    connect_persistence,
++    ConnectPersistenceFlags,
++};
+ use events::usage::NoOpUsageEventLogger;
+ use exports::interface::InProcessExportProvider;
+ use file_storage::{
+@@ -94,6 +101,7 @@ pub mod deployment_info;
+ pub mod deployment_state;
+ pub mod environment_variables;
+ pub mod http_actions;
++pub mod leadership;
+ pub mod log_sinks;
+ pub mod logs;
+ pub mod node_action_callbacks;
+@@ -109,6 +117,7 @@ pub mod storage;
+ pub mod streaming_export;
+ pub mod streaming_import;
+ pub mod subs;
++pub mod usage_forwarder;
+ pub const MAX_CONCURRENT_REQUESTS: usize = 128;
+ 
+ #[derive(Clone)]
+@@ -119,6 +128,10 @@ pub struct LocalAppState {
+     pub site_origin: ConvexSite,
+     // Name of the instance. (e.g. crazy-giraffe-123)
+     pub instance_name: String,
++    pub role: Arc<crate::leadership::RoleState>,
++    pub promote_ctx: Option<Arc<crate::leadership::PromoteContext>>,
++    pub leader_handle: crate::leadership::LeaderHandle,
++    pub control_plane_token: Option<Arc<String>>,
+     pub application: Application<ProdRuntime>,
+     pub zombify_rx: async_broadcast::Receiver<()>,
+ }
+@@ -143,10 +156,31 @@ pub struct RouterState {
+ #[derive(Serialize)]
+ pub struct EmptyResponse {}
+ 
++pub enum RolePersistence {
++    Leader(Arc<dyn Persistence>),
++    Follower(Arc<dyn PersistenceReader>),
++}
++
++impl RolePersistence {
++    pub fn reader(&self) -> Arc<dyn PersistenceReader> {
++        match self {
++            RolePersistence::Leader(p) => p.reader(),
++            RolePersistence::Follower(r) => r.clone(),
++        }
++    }
++
++    pub fn as_persistence(&self) -> Option<Arc<dyn Persistence>> {
++        match self {
++            RolePersistence::Leader(p) => Some(p.clone()),
++            RolePersistence::Follower(_) => None,
++        }
++    }
++}
++
+ pub async fn make_app(
+     runtime: ProdRuntime,
+     config: LocalConfig,
+-    persistence: Arc<dyn Persistence>,
++    persistence: RolePersistence,
+     zombify_rx: async_broadcast::Receiver<()>,
+     preempt_tx: ShutdownSignal,
+ ) -> anyhow::Result<LocalAppState> {
+@@ -156,29 +190,104 @@ pub async fn make_app(
+     // TODO(CX-6572) Separate `SegmentMetadataFetcher` from `SearcherImpl`
+     let segment_metadata_fetcher: Arc<dyn SegmentTermMetadataFetcher> = in_process_searcher;
+     let (deleted_tablet_sender, deleted_tablet_receiver) = tokio::sync::mpsc::channel(100);
+-    let usage_event_logger = Arc::new(NoOpUsageEventLogger);
+-    let database = Database::load(
+-        persistence.clone(),
+-        runtime.clone(),
+-        searcher.clone(),
+-        preempt_tx.clone(),
+-        virtual_system_mapping().clone(),
+-        IndexCache::new(*INDEX_CACHE_SIZE).new_handle(),
+-        Arc::new(new_rate_limiter(
++    let usage_event_logger: Arc<dyn events::usage::UsageEventLogger> =
++        match std::env::var("CONVEX_USAGE_SINK_URL") {
++            Ok(url) if !url.is_empty() => {
++                tracing::info!("[concave] forwarding usage events to {url}");
++                Arc::new(crate::usage_forwarder::HttpUsageForwarder::new(
++                    url,
++                    config.name(),
++                ))
++            },
++            _ => Arc::new(NoOpUsageEventLogger),
++        };
++    let database = match &persistence {
++        RolePersistence::Leader(persistence) => {
++            Database::load(
++                persistence.clone(),
++                runtime.clone(),
++                searcher.clone(),
++                preempt_tx.clone(),
++                virtual_system_mapping().clone(),
++                IndexCache::new(*INDEX_CACHE_SIZE).new_handle(),
++                Arc::new(new_rate_limiter(
++                    runtime.clone(),
++                    Quota::per_second(*DOCUMENT_RETENTION_RATE_LIMIT),
++                )),
++                deleted_tablet_sender,
++            )
++            .await?
++        },
++        RolePersistence::Follower(reader) => {
++            tracing::info!("[backend-role] starting in FOLLOWER mode (read-only, no lease)");
++            drop(deleted_tablet_sender);
++            Database::load_follower(
++                reader.clone(),
++                runtime.clone(),
++                searcher.clone(),
++                virtual_system_mapping().clone(),
++                IndexCache::new(*INDEX_CACHE_SIZE).new_handle(),
++            )
++            .await?
++        },
++    };
++    if config.role.is_leader() {
++        initialize_application_system_tables(&database).await?;
++    }
++    if config.role.is_leader()
++        && let Ok(deployment_type) = std::env::var("CONVEX_DEPLOYMENT_TYPE")
++    {
++        use common::types::{
++            DeploymentId,
++            ProjectId,
++            TeamId,
++            DEFAULT_PROVISION_CONCURRENCY,
++        };
++        use model::backend_info::{
++            types::BackendInfoPersisted,
++            BackendInfoModel,
++        };
++        let env_u64 = |k: &str| -> anyhow::Result<u64> {
++            std::env::var(k)
++                .map_err(|_| anyhow::anyhow!("{k} must be set when CONVEX_DEPLOYMENT_TYPE is set"))?
++                .parse()
++                .map_err(|e| anyhow::anyhow!("{k} must be a u64: {e}"))
++        };
++        let backend_info = BackendInfoPersisted {
++            team: TeamId(env_u64("CONVEX_TEAM_ID")?),
++            project: ProjectId(env_u64("CONVEX_PROJECT_ID")?),
++            deployment: DeploymentId(env_u64("CONVEX_DEPLOYMENT_ID")?),
++            deployment_type: deployment_type
++                .parse()
++                .map_err(|e| anyhow::anyhow!("invalid CONVEX_DEPLOYMENT_TYPE: {e}"))?,
++            deployment_ref: std::env::var("CONVEX_DEPLOYMENT_REF").ok(),
++            project_name: std::env::var("CONVEX_PROJECT_NAME").ok(),
++            project_slug: std::env::var("CONVEX_PROJECT_SLUG").ok(),
++            streaming_export_enabled: true,
++            provision_concurrency: DEFAULT_PROVISION_CONCURRENCY,
++            log_streaming_enabled: true,
++            audit_log_retention_days: 0,
++            send_logs_to_client: None,
++            custom_audit_logs_in_log_streams_config_enabled: None,
++        };
++        let mut tx = database.begin(keybroker::Identity::system()).await?;
++        BackendInfoModel::new(&mut tx).set(backend_info).await?;
++        database
++            .commit_with_write_source(tx, "concave_prod_build_set_backend_info")
++            .await?;
++        tracing::info!("[concave] _backend_info stamped from env (deployment_type set)");
++    }
++    let application_storage = if config.role.is_leader() {
++        Application::initialize_storage(
+             runtime.clone(),
+-            Quota::per_second(*DOCUMENT_RETENTION_RATE_LIMIT),
+-        )),
+-        deleted_tablet_sender,
+-    )
+-    .await?;
+-    initialize_application_system_tables(&database).await?;
+-    let application_storage = Application::initialize_storage(
+-        runtime.clone(),
+-        &database,
+-        config.storage_tag_initializer(),
+-        config.name(),
+-    )
+-    .await?;
++            &database,
++            config.storage_tag_initializer(),
++            config.name(),
++        )
++        .await?
++    } else {
++        Application::initialize_storage_readonly(runtime.clone(), &database).await?
++    };
+ 
+     let file_storage = FileStorage {
+         transactional_file_storage: TransactionalFileStorage::new(
+@@ -221,21 +330,41 @@ pub async fn make_app(
+         reqwest::redirect::Policy::default(),
+     );
+     let function_runner: Arc<dyn FunctionRunner<ProdRuntime>> =
+-        Arc::new(InProcessFunctionRunner::new(
+-            deployment,
+-            key_broker.function_runner_keybroker(),
+-            config.convex_origin_url()?,
+-            runtime.clone(),
+-            persistence.reader(),
+-            DeploymentStorage {
+-                files_storage: application_storage.files_storage.clone(),
+-                modules_storage: application_storage.modules_storage.clone(),
++        match std::env::var("CONVEX_FUNRUN_ADDR") {
++            Ok(funrun_addr) if !funrun_addr.is_empty() => {
++                tracing::info!(
++                    "[funrun] offloading UDF execution to remote funrun fleet at {funrun_addr}"
++                );
++                Arc::new(function_runner::remote::RemoteFunctionRunner::new(
++                    funrun_addr,
++                    deployment,
++                    key_broker.clone(),
++                    config.secret()?,
++                    config.convex_origin_url()?,
++                    runtime.clone(),
++                    DeploymentStorage {
++                        files_storage: application_storage.files_storage.clone(),
++                        modules_storage: application_storage.modules_storage.clone(),
++                    },
++                )?)
+             },
+-            database.clone(),
+-            fetch_client.clone(),
+-        )?);
++            _ => Arc::new(InProcessFunctionRunner::new(
++                deployment,
++                key_broker.function_runner_keybroker(),
++                config.convex_origin_url()?,
++                runtime.clone(),
++                persistence.reader(),
++                DeploymentStorage {
++                    files_storage: application_storage.files_storage.clone(),
++                    modules_storage: application_storage.modules_storage.clone(),
++                },
++                database.clone(),
++                fetch_client.clone(),
++            )?),
++        };
+ 
+     let application = Application::new(
++        config.role,
+         runtime.clone(),
+         database.clone(),
+         file_storage.clone(),
+@@ -252,7 +381,7 @@ pub async fn make_app(
+         config.convex_site_url()?,
+         searcher.clone(),
+         segment_metadata_fetcher,
+-        persistence,
++        persistence.as_persistence(),
+         actions,
+         Arc::new(RedactLogsToClient::new(config.redact_logs_to_client)),
+         Arc::new(ApplicationAuth::new(
+@@ -273,7 +402,7 @@ pub async fn make_app(
+     let origin = config.convex_origin_url()?;
+     let instance_name = config.name();
+ 
+-    if !config.disable_beacon {
++    if !config.disable_beacon && config.role.is_leader() {
+         let beacon_future = beacon::start_beacon(
+             runtime.clone(),
+             database.clone(),
+@@ -283,14 +412,80 @@ pub async fn make_app(
+         runtime.spawn_background("beacon_worker", beacon_future);
+     }
+ 
++    let role = Arc::new(crate::leadership::RoleState::new(config.role));
++    let promote_ctx = {
++        let factory_db = config.db;
++        let factory_db_spec = config.db_spec.clone();
++        let factory_require_ssl = !config.do_not_require_ssl;
++        let factory_name = config.name();
++        let factory_runtime = runtime.clone();
++        let factory_preempt = preempt_tx.clone();
++        let persistence_factory: crate::leadership::PersistenceFactory = Arc::new(move || {
++            let db = factory_db;
++            let db_spec = factory_db_spec.clone();
++            let name = factory_name.clone();
++            let runtime = factory_runtime.clone();
++            let preempt = factory_preempt.clone();
++            Box::pin(async move {
++                connect_persistence(
++                    db,
++                    &db_spec,
++                    ConnectPersistenceFlags {
++                        require_ssl: factory_require_ssl,
++                        allow_read_only: false,
++                        skip_index_creation: true,
++                    },
++                    &name,
++                    runtime,
++                    preempt,
++                )
++                .await
++            })
++        });
++        Some(Arc::new(crate::leadership::PromoteContext {
++            persistence_factory,
++            preempt_signal: preempt_tx.clone(),
++            retention_rate_limiter: Arc::new(new_rate_limiter(
++                runtime.clone(),
++                Quota::per_second(*DOCUMENT_RETENTION_RATE_LIMIT),
++            )),
++        }))
++    };
++    let leader_handle = match persistence.as_persistence() {
++        Some(rw_persistence) => {
++            crate::leadership::LeaderHandle::for_leader(rw_persistence, preempt_tx.clone())
++        },
++        None => crate::leadership::LeaderHandle::for_follower(preempt_tx.clone()),
++    };
++    let control_plane_token = std::env::var("CONVEX_CONTROL_PLANE_TOKEN")
++        .ok()
++        .filter(|t| !t.is_empty())
++        .map(Arc::new);
++    if control_plane_token.is_some() {
++        tracing::info!(
++            "[backend-role] CONVEX_CONTROL_PLANE_TOKEN set; /instance/promote and \
++             /instance/demote require the X-Convex-Control-Plane-Token header"
++        );
++    }
+     let app_state = LocalAppState {
+         origin,
+         site_origin: config.convex_site_url()?,
+         instance_name,
++        role,
++        promote_ctx,
++        leader_handle: leader_handle.clone(),
++        control_plane_token,
+         application,
+         zombify_rx,
+     };
+ 
++    if let Some(rw_persistence) = leader_handle.rw_persistence() {
++        crate::leadership::install_lease_lost_handler(&app_state, rw_persistence.clone());
++        app_state
++            .application
++            .database()
++            .spawn_lease_watch(rw_persistence, preempt_tx.clone());
++    }
+     Ok(app_state)
+ }
+ 
+diff --git a/crates/local_backend/src/main.rs b/crates/local_backend/src/main.rs
+index 4217d331d..54fa0d6d0 100644
+--- a/crates/local_backend/src/main.rs
++++ b/crates/local_backend/src/main.rs
+@@ -17,6 +17,7 @@ use common::{
+ };
+ use db_connection::{
+     connect_persistence,
++    connect_persistence_reader,
+     ConnectPersistenceFlags,
+ };
+ use futures::{
+@@ -37,10 +38,11 @@ use local_backend::{
+         LocalConfig,
+         Subcommand,
+     },
++    leadership::follower_router,
+     make_app,
+     proxy::dev_site_proxy,
+-    router::router,
+     HttpActionRouteMapper,
++    RolePersistence,
+     MAX_CONCURRENT_REQUESTS,
+ };
+ use runtime::prod::ProdRuntime;
+@@ -142,19 +144,35 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
+     let preempt_signal = ShutdownSignal::new(preempt_tx);
+     // Use to signal to the http service to stop.
+     let (shutdown_tx, shutdown_rx) = async_broadcast::broadcast(1);
+-    let persistence = connect_persistence(
+-        config.db,
+-        &config.db_spec,
+-        ConnectPersistenceFlags {
+-            require_ssl: !config.do_not_require_ssl,
+-            allow_read_only: false,
+-            skip_index_creation: false,
+-        },
+-        &config.name(),
+-        runtime.clone(),
+-        preempt_signal.clone(),
+-    )
+-    .await?;
++    let persistence = if config.role.is_leader() {
++        RolePersistence::Leader(
++            connect_persistence(
++                config.db,
++                &config.db_spec,
++                ConnectPersistenceFlags {
++                    require_ssl: !config.do_not_require_ssl,
++                    allow_read_only: false,
++                    skip_index_creation: false,
++                },
++                &config.name(),
++                runtime.clone(),
++                preempt_signal.clone(),
++            )
++            .await?,
++        )
++    } else {
++        RolePersistence::Follower(
++            connect_persistence_reader(
++                config.db,
++                &config.db_spec,
++                !config.do_not_require_ssl,
++                false,
++                &config.name(),
++                runtime.clone(),
++            )
++            .await?,
++        )
++    };
+     let st = make_app(
+         runtime.clone(),
+         config.clone(),
+@@ -163,7 +181,7 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
+         preempt_signal.clone(),
+     )
+     .await?;
+-    let router = router(st.clone());
++    let router = follower_router(st.clone());
+     let mut shutdown_rx_ = shutdown_rx.clone();
+     let http_service = ConvexHttpService::new(
+         router,
+diff --git a/crates/local_backend/src/node_action_callbacks.rs b/crates/local_backend/src/node_action_callbacks.rs
+index 22d9c58bb..fedaf44e5 100644
+--- a/crates/local_backend/src/node_action_callbacks.rs
++++ b/crates/local_backend/src/node_action_callbacks.rs
+@@ -10,10 +10,12 @@ use axum::{
+     RequestPartsExt,
+ };
+ use common::{
++    bootstrap_model::components::handles::FunctionHandle,
+     components::{
+         ComponentFunctionPath,
+         ComponentId,
+         PublicFunctionPath,
++        SerializedComponentFunctionPath,
+     },
+     execution_context::{
+         ClientIp,
+@@ -49,6 +51,8 @@ use fastrace::future::FutureExt;
+ use http::HeaderMap;
+ use isolate::UdfArgsJson;
+ use keybroker::Identity;
++use model::file_storage::types::FileStorageEntry;
++use prost::Message;
+ use serde::{
+     Deserialize,
+     Serialize,
+@@ -538,6 +542,95 @@ pub async fn storage_delete(
+     Ok(Json(json!(null)))
+ }
+ 
++#[derive(Serialize, Deserialize)]
++#[serde(rename_all = "camelCase")]
++pub struct StorageGetFileEntryResponse {
++    component_path: String,
++    entry_proto: Vec<u8>,
++}
++
++pub async fn storage_get_file_entry(
++    MtState(st): MtState<LocalAppState>,
++    ExtractActionIdentity {
++        identity,
++        component_id,
++    }: ExtractActionIdentity,
++    Json(req): Json<GetParams>,
++) -> Result<impl IntoResponse, HttpResponseError> {
++    let storage_id = req.storage_id.parse()?;
++    let entry = st
++        .application
++        .runner()
++        .storage_get_file_entry(identity, component_id, storage_id)
++        .await?
++        .map(|(component_path, entry)| {
++            let entry_proto: pb::storage::FileStorageEntry = entry.into();
++            StorageGetFileEntryResponse {
++                component_path: String::from(component_path),
++                entry_proto: entry_proto.encode_to_vec(),
++            }
++        });
++    Ok(Json(entry))
++}
++
++#[derive(Serialize, Deserialize)]
++#[serde(rename_all = "camelCase")]
++pub struct StorageStoreFileEntryRequest {
++    entry_proto: Vec<u8>,
++}
++
++#[derive(Serialize, Deserialize)]
++#[serde(rename_all = "camelCase")]
++pub struct StorageStoreFileEntryResponse {
++    component_path: String,
++    document_id: String,
++}
++
++pub async fn storage_store_file_entry(
++    MtState(st): MtState<LocalAppState>,
++    ExtractActionIdentity {
++        identity,
++        component_id,
++    }: ExtractActionIdentity,
++    Json(req): Json<StorageStoreFileEntryRequest>,
++) -> Result<impl IntoResponse, HttpResponseError> {
++    let entry_proto =
++        pb::storage::FileStorageEntry::decode(&req.entry_proto[..]).map_err(anyhow::Error::from)?;
++    let entry = FileStorageEntry::try_from(entry_proto)?;
++    let (component_path, document_id) = st
++        .application
++        .runner()
++        .storage_store_file_entry(identity, component_id, entry)
++        .await?;
++    Ok(Json(StorageStoreFileEntryResponse {
++        component_path: String::from(component_path),
++        document_id: document_id.to_string(),
++    }))
++}
++
++#[derive(Deserialize)]
++#[serde(rename_all = "camelCase")]
++pub struct LookupFunctionHandleRequest {
++    handle: String,
++}
++
++pub async fn lookup_function_handle(
++    MtState(st): MtState<LocalAppState>,
++    ExtractActionIdentity {
++        identity,
++        component_id: _,
++    }: ExtractActionIdentity,
++    Json(req): Json<LookupFunctionHandleRequest>,
++) -> Result<impl IntoResponse, HttpResponseError> {
++    let handle: FunctionHandle = req.handle.parse()?;
++    let path = st
++        .application
++        .lookup_function_handle(identity, handle)
++        .await?;
++    let serialized = SerializedComponentFunctionPath::try_from(path)?;
++    Ok(Json(serialized))
++}
++
+ #[derive(Deserialize)]
+ pub struct AuditLogParams {
+     #[allow(dead_code)]

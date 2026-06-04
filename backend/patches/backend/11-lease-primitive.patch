@@ -1,0 +1,203 @@
+diff --git a/crates/common/src/persistence.rs b/crates/common/src/persistence.rs
+index 9da2989bb..01a025a39 100644
+--- a/crates/common/src/persistence.rs
++++ b/crates/common/src/persistence.rs
+@@ -292,6 +292,18 @@ pub trait Persistence: Sync + Send + 'static {
+     async fn finish_loading(&self) -> anyhow::Result<()> {
+         Ok(())
+     }
++
++    fn lease_ts(&self) -> Option<u64> {
++        None
++    }
++
++    async fn lease_held(&self) -> anyhow::Result<bool> {
++        Ok(true)
++    }
++
++    async fn release_lease(&self) -> anyhow::Result<bool> {
++        Ok(false)
++    }
+ }
+ 
+ #[derive(Debug, Clone, Copy)]
+diff --git a/crates/postgres/src/lib.rs b/crates/postgres/src/lib.rs
+index cce12606d..52522ef12 100644
+--- a/crates/postgres/src/lib.rs
++++ b/crates/postgres/src/lib.rs
+@@ -481,6 +481,18 @@ impl Persistence for PostgresPersistence {
+         })
+     }
+ 
++    fn lease_ts(&self) -> Option<u64> {
++        Some(self.lease.lease_ts() as u64)
++    }
++
++    async fn lease_held(&self) -> anyhow::Result<bool> {
++        self.lease.lease_held().await
++    }
++
++    async fn release_lease(&self) -> anyhow::Result<bool> {
++        self.lease.release().await
++    }
++
+     #[fastrace::trace]
+     async fn write<'a>(
+         &self,
+@@ -1805,6 +1817,65 @@ impl Lease {
+         })
+     }
+ 
++    fn lease_ts(&self) -> i64 {
++        self.lease_ts
++    }
++
++    async fn lease_held(&self) -> anyhow::Result<bool> {
++        let lease_ts = self.lease_ts;
++        let mut client = self
++            .pool
++            .get_connection("lease_held", &self.schema, &self.instance_name)
++            .await?;
++        let multitenant = self.multitenant;
++        let instance_name = self.instance_name.clone();
++        let row = client
++            .with_retry(async move |client| {
++                let mut params = vec![&lease_ts as &(dyn ToSql + Sync)];
++                if multitenant {
++                    params.push(&instance_name.raw as &(dyn ToSql + Sync));
++                }
++                client
++                    .query_opt(sql::advisory_lease_check(multitenant), params.as_slice())
++                    .await
++            })
++            .await?;
++        Ok(row.is_some())
++    }
++
++    async fn release(&self) -> anyhow::Result<bool> {
++        let held_ts = self.lease_ts;
++        let release_ts = held_ts.saturating_sub(1);
++        let mut client = self
++            .pool
++            .get_connection("lease_release", &self.schema, &self.instance_name)
++            .await?;
++        let multitenant = self.multitenant;
++        let instance_name = self.instance_name.clone();
++        let rows_modified = client
++            .with_retry(async move |client| {
++                let stmt = client
++                    .prepare_cached(sql::lease_release(multitenant))
++                    .await?;
++                let mut params = vec![
++                    &release_ts as &(dyn ToSql + Sync),
++                    &held_ts as &(dyn ToSql + Sync),
++                ];
++                if multitenant {
++                    params.push(&instance_name.raw as &(dyn ToSql + Sync));
++                }
++                client.execute(&stmt, params.as_slice()).await
++            })
++            .await?;
++        if rows_modified == 1 {
++            tracing::info!("lease released (ts {held_ts} -> {release_ts}); peer may take over");
++            Ok(true)
++        } else {
++            tracing::info!("lease release no-op: already lost (held ts {held_ts})");
++            Ok(false)
++        }
++    }
++
+     /// Execute the transaction function f atomically ensuring that the lease is
+     /// still held, otherwise return `LeaseLostError`.
+     ///
+diff --git a/crates/postgres/src/sql.rs b/crates/postgres/src/sql.rs
+index 5fc5d0a2e..9ae0837ee 100644
+--- a/crates/postgres/src/sql.rs
++++ b/crates/postgres/src/sql.rs
+@@ -771,6 +771,17 @@ pub const fn lease_acquire(multitenant: bool) -> &'static str {
+     )
+ }
+ 
++pub const fn lease_release(multitenant: bool) -> &'static str {
++    tableify!(
++        multitenant,
++        formatcp!(
++            "UPDATE @db_name.leases SET ts=$1 WHERE {column}={value} AND ts=$2",
++            column = if multitenant { "instance_name" } else { "id" },
++            value = if multitenant { "$3" } else { "1" }
++        )
++    )
++}
++
+ #[derive(PartialEq, Eq, Hash, Copy, Clone)]
+ pub(crate) enum BoundType {
+     Unbounded,
+@@ -1100,3 +1111,42 @@ pub const fn import_indexes_batch(multitenant: bool) -> &'static str {
+         )
+     )
+ }
++
++#[cfg(test)]
++mod lease_sql_tests {
++    use super::{
++        advisory_lease_check,
++        lease_acquire,
++        lease_release,
++    };
++
++    #[test]
++    fn lease_release_is_a_guarded_lower_of_ts_single_tenant() {
++        assert_eq!(
++            lease_release(false),
++            "UPDATE @db_name.leases SET ts=$1 WHERE id=1 AND ts=$2",
++        );
++    }
++
++    #[test]
++    fn lease_release_is_instance_scoped_multitenant() {
++        assert_eq!(
++            lease_release(true),
++            "UPDATE @db_name.leases SET ts=$1 WHERE instance_name=$3 AND ts=$2",
++        );
++    }
++
++    #[test]
++    fn advisory_check_is_non_locking_and_release_does_not_widen_acquire() {
++        assert_eq!(
++            advisory_lease_check(false),
++            "SELECT 1 FROM @db_name.leases WHERE id=1 AND ts=$1",
++        );
++        assert!(!advisory_lease_check(false).contains("FOR SHARE"));
++        assert!(!advisory_lease_check(false).contains("FOR UPDATE"));
++        assert_eq!(
++            lease_acquire(false),
++            "UPDATE @db_name.leases SET ts=$1 WHERE id=1 AND ts<$1",
++        );
++    }
++}
+diff --git a/crates/sqlite/src/lib.rs b/crates/sqlite/src/lib.rs
+index 59a5c5c8d..f9b1deb87 100644
+--- a/crates/sqlite/src/lib.rs
++++ b/crates/sqlite/src/lib.rs
+@@ -726,3 +726,21 @@ WHERE
+     ts = $3
+ ORDER BY ts ASC, table_id ASC, id ASC
+ "#;
++
++#[cfg(test)]
++mod lease_default_tests {
++    use common::persistence::Persistence;
++    use tempfile::TempDir;
++
++    use super::SqlitePersistence;
++
++    #[tokio::test]
++    async fn non_lease_persistence_uses_safe_defaults() {
++        let tmp = TempDir::new().unwrap();
++        let path = tmp.path().join("lease_defaults.sqlite3");
++        let p = SqlitePersistence::new(path.to_str().unwrap()).unwrap();
++        assert_eq!(p.lease_ts(), None);
++        assert!(p.lease_held().await.unwrap());
++        assert!(!p.release_lease().await.unwrap());
++    }
++}
