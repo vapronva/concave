@@ -41,6 +41,9 @@ spec:
             - name: CONVEX_FUNRUN_ADDR
               value: {{ include "convex.funrunAddr" . | quote }}
             {{- end }}
+            {{- if .Values.insights.enabled }}
+            {{- include "convex.usageSinkEnv" . | nindent 12 }}
+            {{- end }}
           volumeMounts:
             {{- include "convex.dataVolumeMount" . | nindent 12 }}
           readinessProbe:

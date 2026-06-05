@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"git.horse/vapronva/concave/router/bigbrain/insights"
 	"git.horse/vapronva/concave/router/bigbrain/registry"
 	"git.horse/vapronva/concave/router/bigbrain/server"
 )
@@ -21,7 +22,7 @@ type leaderResponse struct {
 func newTestServer(t *testing.T) (*registry.Registry, http.Handler) {
 	t.Helper()
 	reg := registry.New()
-	return reg, server.New(reg, nil).Handler()
+	return reg, server.New(reg, insights.New(10), "usage-secret", nil).Handler()
 }
 
 func TestServer_Healthz(t *testing.T) {
@@ -114,6 +115,98 @@ func TestServer_LeaderStreamInitialEvent(t *testing.T) {
 	body := rr.Body.String()
 	if !strings.Contains(body, "event: leader") || !strings.Contains(body, "http://10.0.0.1:3210") {
 		t.Fatalf("stream did not emit initial leader event, got: %q", body)
+	}
+}
+
+func TestServer_UsageIngestRequiresToken(t *testing.T) {
+	t.Parallel()
+	_, h := newTestServer(t)
+	body := `{"deployment":"dev","events":[]}`
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/internal/usage", strings.NewReader(body))
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("missing token: want 401, got %d", rr.Code)
+	}
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/internal/usage", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer usage-secret")
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("valid token: want 200, got %d (%s)", rr.Code, rr.Body.String())
+	}
+}
+
+func TestServer_UsageIngestThenQuery(t *testing.T) {
+	t.Parallel()
+	reg, h := newTestServer(t)
+	reg.EnsureDeployment("dev", "convex-dev")
+	ingest := `{"deployment":"dev","events":[` +
+		`{"FunctionCall":{"is_occ":true,"udf_id":"mod:occFn","id":"o1","request_id":"q1",` +
+		`"component_path":"-root-component-","occ_table_name":"docs","status":"retried"}},` +
+		`{"InsightReadLimit":{"udf_id":"mod:readFn","id":"r1","request_id":"q2",` +
+		`"component_path":"-root-component-","calls":[` +
+		`{"table_name":"big","bytes_read":17000000,"documents_read":40000}]}}]}`
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/internal/usage", strings.NewReader(ingest))
+	req.Header.Set("Authorization", "Bearer usage-secret")
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("ingest: want 200, got %d (%s)", rr.Code, rr.Body.String())
+	}
+	var ing struct {
+		Ingested int `json:"ingested"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &ing); err != nil {
+		t.Fatalf("decode ingest resp: %v", err)
+	}
+	if ing.Ingested != 2 {
+		t.Fatalf("ingested=%d want 2", ing.Ingested)
+	}
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet,
+		"/api/dashboard/teams/0/usage/query?deploymentName=dev", nil)
+	req.Header.Set("Authorization", "Bearer usage-secret")
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("query: want 200, got %d (%s)", rr.Code, rr.Body.String())
+	}
+	var rows [][]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &rows); err != nil {
+		t.Fatalf("decode query rows: %v", err)
+	}
+	kinds := make(map[string]bool)
+	for _, row := range rows {
+		if len(row) != 4 {
+			t.Fatalf("row must have 4 cells, got %d: %v", len(row), row)
+		}
+		k, _ := row[0].(string)
+		if _, ok := row[3].(string); !ok {
+			t.Fatalf("cell 4 must be a JSON string, got %T", row[3])
+		}
+		kinds[k] = true
+	}
+	if !kinds["occRetried"] {
+		t.Errorf("missing occRetried row; got %v", rows)
+	}
+	if !kinds["bytesReadLimit"] {
+		t.Errorf("missing bytesReadLimit row; got %v", rows)
+	}
+	if !kinds["documentsReadLimit"] {
+		t.Errorf("missing documentsReadLimit row; got %v", rows)
+	}
+}
+
+func TestServer_UsageQueryUnknownDeployment(t *testing.T) {
+	t.Parallel()
+	_, h := newTestServer(t)
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/dashboard/teams/0/usage/query?deploymentName=ghost", nil)
+	req.Header.Set("Authorization", "Bearer usage-secret")
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("unknown deployment: want 404, got %d", rr.Code)
 	}
 }
 

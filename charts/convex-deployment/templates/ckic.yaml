@@ -21,7 +21,7 @@ data:
       import basic-compression-set
       import default-headers-set-custom
       header * { X-Robots-Tag "noindex, noarchive, nofollow" }
-      import reverse-proxy-xri-hd http://{{ include "convex.leaderName" $ }}.{{ $.Release.Namespace }}.svc.cluster.local:3211
+      import reverse-proxy-xri-hd http://{{ $.Values.ingress.usherService.name }}.{{ $.Values.ingress.usherService.namespace }}.svc.cluster.local:{{ $.Values.ingress.usherService.port }}
     }
     {{- end }}
     {{- with .Values.hosts.dashboard }}

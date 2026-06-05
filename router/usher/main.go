@@ -34,10 +34,13 @@ const (
 	streamBackoffCap     = 15 * time.Second
 	pathPromote          = "/instance/promote"
 	pathDemote           = "/instance/demote"
+	sitePort             = "3211"
+	routesPerDeployment  = 2
 )
 
 type deploymentCfg struct {
 	Host     string   `json:"host"`
+	SiteHost string   `json:"siteHost"`
 	Name     string   `json:"name"`
 	Backends []string `json:"backends"`
 }
@@ -64,8 +67,14 @@ type leaderEvent struct {
 	LeaderURL string `json:"leaderUrl"`
 }
 
+type route struct {
+	tracker *tracker
+	site    bool
+}
+
 type tracker struct {
 	host        string
+	siteHost    string
 	name        string
 	backends    []string
 	bigbrainURL string
@@ -73,6 +82,20 @@ type tracker struct {
 	mu          sync.RWMutex
 	leaderURL   string
 	proxy       *httputil.ReverseProxy
+	siteProxy   *httputil.ReverseProxy
+}
+
+func newReverseProxy(u *url.URL) *httputil.ReverseProxy {
+	rp := &httputil.ReverseProxy{
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			pr.SetURL(u)
+		},
+		FlushInterval: -1,
+		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
+			http.Error(w, "upstream error: "+err.Error(), http.StatusBadGateway)
+		},
+	}
+	return rp
 }
 
 func (t *tracker) setLeader(leaderURL string) bool {
@@ -82,7 +105,7 @@ func (t *tracker) setLeader(leaderURL string) bool {
 		return false
 	}
 	if leaderURL == "" {
-		t.leaderURL, t.proxy = "", nil
+		t.leaderURL, t.proxy, t.siteProxy = "", nil, nil
 		log.Printf("usher: %s leader cleared (none available)", t.host)
 		return true
 	}
@@ -91,20 +114,25 @@ func (t *tracker) setLeader(leaderURL string) bool {
 		log.Printf("usher: %s bad leader url %q: %v", t.host, leaderURL, err)
 		return false
 	}
-	rp := httputil.NewSingleHostReverseProxy(u)
-	rp.FlushInterval = -1
-	rp.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
-		http.Error(w, "upstream error: "+err.Error(), http.StatusBadGateway)
+	t.leaderURL, t.proxy = leaderURL, newReverseProxy(u)
+	if t.siteHost != "" {
+		su := *u
+		su.Host = net.JoinHostPort(u.Hostname(), sitePort)
+		t.siteProxy = newReverseProxy(&su)
+		log.Printf("usher: %s leader -> %s (site %s -> %s)", t.host, leaderURL, t.siteHost, su.String())
+	} else {
+		log.Printf("usher: %s leader -> %s", t.host, leaderURL)
 	}
-	t.leaderURL, t.proxy = leaderURL, rp
-	log.Printf("usher: %s leader -> %s", t.host, leaderURL)
 	return true
 }
 
-func (t *tracker) currentLeader() (string, *httputil.ReverseProxy) {
+func (t *tracker) currentLeader(site bool) *httputil.ReverseProxy {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
-	return t.leaderURL, t.proxy
+	if site {
+		return t.siteProxy
+	}
+	return t.proxy
 }
 
 func (t *tracker) resolveOnce(ctx context.Context) {
@@ -231,12 +259,12 @@ func isBlockedControlPath(p string) bool {
 	}
 }
 
-func (t *tracker) serveHTTP(w http.ResponseWriter, r *http.Request) {
+func (t *tracker) serveHTTP(w http.ResponseWriter, r *http.Request, site bool) {
 	if isBlockedControlPath(r.URL.Path) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
-	_, p := t.currentLeader()
+	p := t.currentLeader(site)
 	if p == nil {
 		http.Error(w, "no leader available for "+t.host, http.StatusServiceUnavailable)
 		return
@@ -282,6 +310,46 @@ func (m *misdirectWriter) Write(b []byte) (int, error) {
 	return m.ResponseWriter.Write(b)
 }
 
+func startTracker(ctx context.Context, client *http.Client, bigbrainURL string, d deploymentCfg) *tracker {
+	name := d.Name
+	if name == "" {
+		name = firstLabel(d.Host)
+	}
+	t := &tracker{
+		host:        d.Host,
+		siteHost:    d.SiteHost,
+		name:        name,
+		backends:    d.Backends,
+		bigbrainURL: bigbrainURL,
+		client:      client,
+	}
+	initCtx, cancel := context.WithTimeout(ctx, resolveTimeout)
+	t.resolveOnce(initCtx)
+	cancel()
+	go t.resolveLoop(ctx)
+	go t.streamBigbrain(ctx)
+	log.Printf(
+		"usher: configured host=%s siteHost=%q name=%s bigbrain=%q fallback=%v",
+		d.Host, d.SiteHost, name, bigbrainURL, d.Backends,
+	)
+	return t
+}
+
+func (t *tracker) resolveLoop(ctx context.Context) {
+	tick := time.NewTicker(resolveInterval)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			rctx, rcancel := context.WithTimeout(ctx, resolveTimeout)
+			t.resolveOnce(rctx)
+			rcancel()
+		}
+	}
+}
+
 func main() {
 	cfgPath := flag.String("config", env("USHER_CONFIG", "/etc/usher/config.json"), "config file path")
 	addr := flag.String("addr", env("USHER_ADDR", ":8080"), "listen address")
@@ -300,41 +368,15 @@ func main() {
 		log.Fatalf("parse config: %v", err)
 	}
 	client := &http.Client{Timeout: httpClientTimeout}
-	trackers := make(map[string]*tracker, len(cfg.Deployments))
+	routes := make(map[string]route, len(cfg.Deployments)*routesPerDeployment)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	for _, d := range cfg.Deployments {
-		name := d.Name
-		if name == "" {
-			name = firstLabel(d.Host)
+		t := startTracker(ctx, client, *bigbrainURL, d)
+		routes[d.Host] = route{tracker: t}
+		if d.SiteHost != "" {
+			routes[d.SiteHost] = route{tracker: t, site: true}
 		}
-		t := &tracker{
-			host:        d.Host,
-			name:        name,
-			backends:    d.Backends,
-			bigbrainURL: *bigbrainURL,
-			client:      client,
-		}
-		initCtx, cancel := context.WithTimeout(ctx, resolveTimeout)
-		t.resolveOnce(initCtx)
-		cancel()
-		trackers[d.Host] = t
-		go func(t *tracker) {
-			tick := time.NewTicker(resolveInterval)
-			defer tick.Stop()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-tick.C:
-					rctx, rcancel := context.WithTimeout(ctx, resolveTimeout)
-					t.resolveOnce(rctx)
-					rcancel()
-				}
-			}
-		}(t)
-		go t.streamBigbrain(ctx)
-		log.Printf("usher: configured host=%s name=%s bigbrain=%q fallback=%v", d.Host, name, *bigbrainURL, d.Backends)
 	}
 	mux := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/usher/healthz" {
@@ -343,12 +385,12 @@ func main() {
 			return
 		}
 		host := stripPort(r.Host)
-		t := trackers[host]
-		if t == nil {
+		rt, ok := routes[host]
+		if !ok {
 			http.Error(w, "usher: unknown deployment host "+host, http.StatusNotFound)
 			return
 		}
-		t.serveHTTP(w, r)
+		rt.tracker.serveHTTP(w, r, rt.site)
 	})
 	log.Printf("usher listening on %s, %d deployment(s), bigbrain=%q", *addr, len(cfg.Deployments), *bigbrainURL)
 	srv := &http.Server{Addr: *addr, Handler: mux, ReadHeaderTimeout: readHeaderTimeout}

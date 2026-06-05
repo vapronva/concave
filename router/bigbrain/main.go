@@ -15,6 +15,7 @@ import (
 
 	"git.horse/vapronva/concave/router/bigbrain/backend"
 	"git.horse/vapronva/concave/router/bigbrain/election"
+	"git.horse/vapronva/concave/router/bigbrain/insights"
 	"git.horse/vapronva/concave/router/bigbrain/k8sclient"
 	"git.horse/vapronva/concave/router/bigbrain/registry"
 	"git.horse/vapronva/concave/router/bigbrain/server"
@@ -27,6 +28,7 @@ const (
 	defaultPromoteDebounce   = 3
 	defaultFailbackStability = 15 * time.Second
 	defaultFailbackWarmthLag = 5_000_000_000
+	defaultInsightsRingCap   = 50_000
 	readHeaderTimeout        = 10 * time.Second
 	shutdownTimeout          = 10 * time.Second
 )
@@ -60,6 +62,10 @@ func main() {
 		"max latest_ts lag for the candidate to count as warm/caught-up")
 	controlPlaneToken := flag.String("control-plane-token", env("BIGBRAIN_CONTROL_PLANE_TOKEN", ""),
 		"if set, sent as the X-Convex-Control-Plane-Token header on promote/demote requests")
+	insightsRingCap := flag.Int("insights-ring-cap", envInt("INSIGHTS_RING_CAP", defaultInsightsRingCap),
+		"in-memory insights ring-buffer capacity (rows retained per process)")
+	usageToken := flag.String("usage-token", env("BIGBRAIN_USAGE_TOKEN", ""),
+		"if set, required as the bearer token on /internal/usage and the dashboard usage query (fail closed)")
 	flag.Parse()
 	log := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(log)
@@ -82,7 +88,9 @@ func main() {
 			FailbackWarmthLagNs: *failbackWarmthLag,
 		}, k8s, be, reg, log)
 	}
-	srv := server.New(reg, log)
+	ins := insights.New(*insightsRingCap)
+	srv := server.New(reg, ins, *usageToken, log)
+	log.Info("bigbrain: insights enabled", "ringCap", *insightsRingCap, "usageTokenSet", *usageToken != "")
 	httpSrv := &http.Server{
 		Addr:              *addr,
 		Handler:           srv.Handler(),

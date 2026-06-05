@@ -146,3 +146,17 @@ imagePullSecrets:
 {{- define "convex.funrunAddr" -}}
 http://{{ include "convex.funrunName" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ trimPrefix ":" .Values.funrun.listen }}
 {{- end -}}
+
+{{- define "convex.insightsTokenSecretName" -}}
+{{- default (include "convex.instanceSecretName" .) .Values.insights.tokenRef.name -}}
+{{- end -}}
+
+{{- define "convex.usageSinkEnv" -}}
+- name: CONVEX_USAGE_SINK_URL
+  value: {{ required "insights.sinkUrl is required when insights.enabled" .Values.insights.sinkUrl | quote }}
+- name: CONVEX_USAGE_SINK_TOKEN
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "convex.insightsTokenSecretName" . }}
+      key: {{ .Values.insights.tokenRef.key }}
+{{- end -}}

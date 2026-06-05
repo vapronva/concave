@@ -1,6 +1,8 @@
 package server
 
 import (
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,21 +11,28 @@ import (
 	"strings"
 	"time"
 
+	"git.horse/vapronva/concave/router/bigbrain/insights"
 	"git.horse/vapronva/concave/router/bigbrain/registry"
 )
 
-const keepaliveInterval = 25 * time.Second
+const (
+	keepaliveInterval = 25 * time.Second
+	usageBodyLimit    = 4 * 1024 * 1024
+	bearerPrefixLen   = len("bearer ")
+)
 
 type Server struct {
-	reg *registry.Registry
-	log *slog.Logger
+	reg        *registry.Registry
+	ins        *insights.Insights
+	usageToken string
+	log        *slog.Logger
 }
 
-func New(reg *registry.Registry, log *slog.Logger) *Server {
+func New(reg *registry.Registry, ins *insights.Insights, usageToken string, log *slog.Logger) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Server{reg: reg, log: log}
+	return &Server{reg: reg, ins: ins, usageToken: usageToken, log: log}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -36,7 +45,113 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /registry/deployments/{name}", s.handleGetDeployment)
 	mux.HandleFunc("GET /registry/deployments/{name}/leader", s.handleGetLeader)
 	mux.HandleFunc("GET /registry/deployments/{name}/leader-stream", s.handleLeaderStream)
+	mux.HandleFunc("POST /internal/usage", s.handleUsageIngest)
+	mux.HandleFunc("GET /api/dashboard/teams/{teamId}/usage/query", s.handleUsageQuery)
 	return logging(s.log, mux)
+}
+
+func (s *Server) bearerOK(r *http.Request) bool {
+	if s.usageToken == "" {
+		return false
+	}
+	provided := bearerToken(r.Header.Get("Authorization"))
+	a := sha256.Sum256([]byte(provided))
+	b := sha256.Sum256([]byte(s.usageToken))
+	return provided != "" && subtle.ConstantTimeCompare(a[:], b[:]) == 1
+}
+
+func (s *Server) handleUsageIngest(w http.ResponseWriter, r *http.Request) {
+	if !s.bearerOK(r) {
+		writeErr(w, http.StatusUnauthorized, "invalid usage token")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, usageBodyLimit)
+	var body struct {
+		Deployment string              `json:"deployment"`
+		Events     []insights.AnyEvent `json:"events"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid usage body")
+		return
+	}
+	if body.Deployment == "" {
+		writeErr(w, http.StatusBadRequest, "missing deployment")
+		return
+	}
+	if s.ins == nil {
+		writeErr(w, http.StatusServiceUnavailable, "insights disabled")
+		return
+	}
+	kept, err := s.ins.Ingest(r.Context(), body.Deployment, body.Events)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]int{"ingested": kept})
+}
+
+func (s *Server) handleUsageQuery(w http.ResponseWriter, r *http.Request) {
+	if !s.bearerOK(r) {
+		writeErr(w, http.StatusUnauthorized, "invalid usage token")
+		return
+	}
+	if s.ins == nil {
+		writeErr(w, http.StatusServiceUnavailable, "insights disabled")
+		return
+	}
+	q := r.URL.Query()
+	dep := s.resolveUsageDeployment(q.Get("deploymentName"))
+	if dep == "" {
+		writeErr(w, http.StatusBadRequest, "deploymentName is required")
+		return
+	}
+	if _, ok := s.reg.Namespace(dep); !ok {
+		writeErr(w, http.StatusNotFound, "unknown deployment "+dep)
+		return
+	}
+	now := time.Now().UTC()
+	from := q.Get("from")
+	to := q.Get("to")
+	if to == "" {
+		to = now.Format("2006-01-02")
+	}
+	if from == "" {
+		from = now.AddDate(0, 0, -3).Format("2006-01-02")
+	}
+	out, err := s.ins.Query(r.Context(), dep, from, to)
+	if err != nil {
+		if errors.Is(err, insights.ErrBadDateRange) {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) resolveUsageDeployment(nameParam string) string {
+	if nameParam == "" {
+		return ""
+	}
+	for _, n := range s.reg.Names() {
+		if n == nameParam {
+			return n
+		}
+	}
+	return nameParam
+}
+
+func bearerToken(authHeader string) string {
+	h := strings.TrimSpace(authHeader)
+	if len(h) < bearerPrefixLen {
+		return ""
+	}
+	if !strings.EqualFold(h[:bearerPrefixLen-1], "bearer") {
+		return ""
+	}
+	rest := strings.TrimLeft(h[bearerPrefixLen-1:], " \t")
+	return rest
 }
 
 func (s *Server) handleListDeployments(w http.ResponseWriter, _ *http.Request) {

@@ -1,3 +1,2477 @@
+diff --git a/npm-packages/dashboard-common/package.json b/npm-packages/dashboard-common/package.json
+index 715c4eed5..c3701fe9c 100644
+--- a/npm-packages/dashboard-common/package.json
++++ b/npm-packages/dashboard-common/package.json
+@@ -52,6 +52,7 @@
+     "react-hotkeys-hook": "~4.6.0",
+     "react-popper": "^2.3.0",
+     "react-resizable-panels": "~2.1.1",
++    "react-sparklines": "~1.7.0",
+     "react-table": "7.8.0",
+     "react-virtualized-auto-sizer": "1.0.26",
+     "react-window": "1.8.11",
+@@ -85,6 +86,7 @@
+     "@types/prettier-old-sync": "npm:@types/prettier@2.7.3",
+     "@types/react": "^18.0.0",
+     "@types/react-dom": "^18.0.0",
++    "@types/react-sparklines": "~1.7.5",
+     "@types/react-table": "^7.7.2",
+     "@types/react-window": "^1.8.5",
+     "@types/react-window-infinite-loader": "^1.0.4",
+diff --git a/npm-packages/dashboard-common/src/features/health/components/ChartForInsight.tsx b/npm-packages/dashboard-common/src/features/health/components/ChartForInsight.tsx
+new file mode 100644
+index 000000000..10fda8f76
+--- /dev/null
++++ b/npm-packages/dashboard-common/src/features/health/components/ChartForInsight.tsx
+@@ -0,0 +1,295 @@
++import {
++  useInsightsPeriod,
++  Insight,
++} from "@common/features/health/lib/insights";
++import {
++  formatBytes,
++  formatNumberCompact,
++  toNumericUTC,
++} from "@common/lib/format";
++import { ChartTooltip } from "@common/elements/ChartTooltip";
++import { format } from "date-fns";
++import {
++  ResponsiveContainer,
++  XAxis,
++  YAxis,
++  Tooltip,
++  Line,
++  LineChart,
++  ReferenceLine,
++  CartesianGrid,
++} from "recharts";
++import { LoadingTransition } from "@ui/Loading";
++import { DeploymentTimes } from "@common/features/health/components/DeploymentTimes";
++import { useDeploymentAuditLogs } from "@common/lib/useDeploymentAuditLog";
++import { documentsReadLimit, megabytesReadLimit } from "./ProblemForInsight";
++
++export function ChartForInsight({ insight }: { insight: Insight }) {
++  switch (insight.kind) {
++    case "occFailedPermanently":
++    case "occRetried":
++      return <ChartOCC insight={insight} />;
++    case "bytesReadLimit":
++    case "bytesReadThreshold": {
++      const bytesReadInsight = insight as Insight & {
++        kind: "bytesReadLimit" | "bytesReadThreshold";
++      };
++      return <ChartCountBytesRead insight={bytesReadInsight} />;
++    }
++    case "documentsReadLimit":
++    case "documentsReadThreshold": {
++      const docsReadInsight = insight as Insight & {
++        kind: "documentsReadLimit" | "documentsReadThreshold";
++      };
++      return <ChartCountDocumentsRead insight={docsReadInsight} />;
++    }
++    default: {
++      insight satisfies never;
++      return null;
++    }
++  }
++}
++
++function InsightsLineChart<T extends Record<string, any>>({
++  data,
++  name,
++  dataKey,
++  max,
++  formatY = formatNumberCompact,
++}: {
++  data?: T[];
++  name: string;
++  dataKey: keyof T extends string | number ? keyof T : never;
++  max?: number;
++  formatY?: (value: number) => string;
++}) {
++  const { from } = useInsightsPeriod();
++  const auditLogs = useDeploymentAuditLogs(toNumericUTC(from), {
++    actions: ["push_config", "push_config_with_components"],
++  });
++  const deploysByHour = auditLogs?.map(
++    (log) => {
++      const creationDate = new Date(log._creationTime);
++      const hour = `${creationDate.getUTCFullYear()}-${String(
++        creationDate.getUTCMonth() + 1,
++      ).padStart(2, "0")}-${String(creationDate.getUTCDate()).padStart(
++        2,
++        "0",
++      )} ${String(creationDate.getUTCHours()).padStart(2, "0")}:00:00`;
++      return { hour, timestamp: log._creationTime };
++    },
++    {} as Record<string, { hour: string; timestamp: number }[]>,
++  );
++  const midnightTicks = (data ?? [])
++    .filter((d) => new Date(toNumericUTCWithHour(d.hour)).getHours() === 0)
++    .map((d) => d.hour);
++  return (
++    <div>
++      <LoadingTransition
++        loadingProps={{ fullHeight: false, className: "h-[200px] w-full" }}
++      >
++        {data && (
++          <ResponsiveContainer height={200} width="100%">
++            <LineChart
++              data={data}
++              style={{
++                fontSize: 12,
++              }}
++            >
++              {deploysByHour?.map(({ hour, timestamp }) => (
++                <ReferenceLine
++                  key={timestamp}
++                  x={hour}
++                  stroke="var(--brand-yellow)"
++                  strokeDasharray="3 3"
++                />
++              ))}
++              <CartesianGrid
++                className="stroke-content-tertiary/30"
++                horizontal
++                strokeWidth={1}
++                syncWithTicks
++              />
++              <XAxis
++                dataKey="hour"
++                domain={["auto", "auto"]}
++                tickFormatter={dateLabel}
++                strokeWidth={1}
++                axisLine={{ className: "stroke-content-tertiary/30" }}
++                tickLine={false}
++                tick={{
++                  fontSize: 12,
++                  fill: "var(--content-secondary)",
++                }}
++                max={max}
++                {...(midnightTicks.length > 0 ? { ticks: midnightTicks } : {})}
++              />
++              <YAxis
++                tick={{
++                  fontSize: 12,
++                  fill: "currentColor",
++                }}
++                axisLine={{ className: "stroke-content-tertiary/30" }}
++                tickLine={false}
++                tickFormatter={formatY}
++                width={48}
++              />
++              <Tooltip
++                content={({ active, payload, label }) => {
++                  const deploymentTimes = deploysByHour
++                    ?.filter((deploy) => deploy.hour === label)
++                    .map((deploy) => format(new Date(deploy.timestamp), "Pp"));
++                  return (
++                    <ChartTooltip
++                      active={active}
++                      payload={payload?.map((p) => ({
++                        formattedValue: (
++                          <div className="flex flex-col items-start">
++                            <div>
++                              {formatY(p.payload[dataKey])} {name}
++                            </div>
++                          </div>
++                        ),
++                        ...p,
++                      }))}
++                      extraContent={
++                        <DeploymentTimes deploymentTimes={deploymentTimes} />
++                      }
++                      label={timeLabel(label)}
++                    />
++                  );
++                }}
++                animationDuration={100}
++              />
++              <Line
++                isAnimationActive={false}
++                className="stroke-chart-line-1"
++                activeDot={{ r: 4, className: "stroke-none" }}
++                name={name}
++                dataKey={dataKey}
++                dot={false}
++              />
++            </LineChart>
++          </ResponsiveContainer>
++        )}
++      </LoadingTransition>
++    </div>
++  );
++}
++
++function ChartOCC({
++  insight,
++}: {
++  insight: Insight & { kind: "occFailedPermanently" | "occRetried" };
++}) {
++  return (
++    <InsightsLineChart
++      data={insight.details.hourlyCounts}
++      dataKey="count"
++      name={`write conflict ${insight.kind === "occFailedPermanently" ? "failures" : "retries"}`}
++    />
++  );
++}
++
++function ChartCountBytesRead({
++  insight,
++}: {
++  insight: Insight & { kind: "bytesReadLimit" | "bytesReadThreshold" };
++}) {
++  return (
++    <InsightsLineChart
++      data={insight.details.hourlyCounts}
++      dataKey="count"
++      name={`function calls reading more than ${formatBytes(megabytesReadLimit * 1024 * 1024 * 0.8)}`}
++    />
++  );
++}
++
++function ChartCountDocumentsRead({
++  insight,
++}: {
++  insight: Insight & {
++    kind: "documentsReadLimit" | "documentsReadThreshold";
++  };
++}) {
++  return (
++    <InsightsLineChart
++      data={insight.details.hourlyCounts}
++      dataKey="count"
++      name={`function calls reading more than ${formatNumberCompact(documentsReadLimit * 0.8)} documents`}
++    />
++  );
++}
++
++function toNumericUTCWithHour(dateString: string) {
++  try {
++    if (dateString.includes("T")) {
++      const [datePart, timePart] = dateString.split("T");
++      const [year, month, day] = datePart.split("-");
++      const hour = timePart;
++      return Date.UTC(
++        Number(year),
++        Number(month) - 1,
++        Number(day),
++        Number(hour),
++        0,
++        0,
++      );
++    }
++    const [datePart, timePart] = dateString.split(" ");
++    if (!datePart) return NaN;
++    const [year, month, day] = datePart.split("-");
++    const [hour = "0", minute = "0", second = "0"] = timePart
++      ? timePart.split(":")
++      : [];
++    return Date.UTC(
++      Number(year),
++      Number(month) - 1,
++      Number(day),
++      Number(hour),
++      Number(minute),
++      Number(second),
++    );
++  } catch (error) {
++    console.error("Error parsing date:", error, dateString);
++    return NaN;
++  }
++}
++
++const dateLabel = (value: string) => {
++  if (!value) {
++    return "";
++  }
++  try {
++    const timestamp = toNumericUTCWithHour(value);
++    if (Number.isNaN(timestamp)) {
++      console.warn("Invalid date for dateLabel:", value);
++      return "Invalid date";
++    }
++    const date = new Date(timestamp);
++    return date.toLocaleDateString();
++  } catch (error) {
++    console.error("Error in dateLabel:", error, value);
++    return "Invalid date";
++  }
++};
++
++const timeLabel = (value: string | number | undefined) => {
++  if (!value) {
++    return "";
++  }
++  const stringValue = typeof value === "number" ? String(value) : value;
++  try {
++    const timestamp = toNumericUTCWithHour(stringValue);
++    if (Number.isNaN(timestamp)) {
++      console.warn("Invalid date for timeLabel:", stringValue);
++      return "Invalid date";
++    }
++    const date = new Date(timestamp);
++    const oneHourLater = new Date(date.getTime() + 60 * 60 * 1000);
++    return `${format(date, "P")} ${format(date, "h a")} – ${format(oneHourLater, "h a")}`;
++  } catch (error) {
++    console.error("Error formatting date:", error, stringValue);
++    return "Invalid date format";
++  }
++};
+diff --git a/npm-packages/dashboard-common/src/features/health/components/EventsForInsight.tsx b/npm-packages/dashboard-common/src/features/health/components/EventsForInsight.tsx
+new file mode 100644
+index 000000000..05d2fb390
+--- /dev/null
++++ b/npm-packages/dashboard-common/src/features/health/components/EventsForInsight.tsx
+@@ -0,0 +1,689 @@
++import { DeploymentInfoContext } from "@common/lib/deploymentContext";
++import {
++  Disclosure,
++  DisclosureButton,
++  DisclosurePanel,
++} from "@headlessui/react";
++import {
++  CaretDownIcon,
++  ChevronDownIcon,
++  ChevronUpIcon,
++  QuestionMarkCircledIcon,
++} from "@radix-ui/react-icons";
++import { Insight } from "@common/features/health/lib/insights";
++import { Button } from "@ui/Button";
++import { FunctionNameOption } from "@common/elements/FunctionNameOption";
++import { Loading } from "@ui/Loading";
++import { Tooltip } from "@ui/Tooltip";
++import { HelpTooltip } from "@ui/HelpTooltip";
++import { formatBytes, formatNumberCompact } from "@common/lib/format";
++import { functionIdentifierValue } from "@common/lib/functions/generateFileTree";
++import { ComponentId, useNents } from "@common/lib/useNents";
++import { documentHref } from "@common/lib/utils";
++import { cn } from "@ui/cn";
++import { Link } from "@ui/Link";
++import { useContext } from "react";
++
++type HourlyCount = {
++  hour: string;
++  count: number;
++};
++
++type OccRecentEvent = {
++  timestamp: string;
++  id: string;
++  request_id: string;
++  occ_document_id: string;
++  occ_write_source: string;
++  occ_retry_count: number;
++};
++
++type BytesReadRecentEvent = {
++  timestamp: string;
++  id: string;
++  request_id: string;
++  calls: { table_name: string; bytes_read: number; documents_read: number }[];
++  success: boolean;
++};
++
++type FormattedBytesReadEvent = {
++  timestamp: string;
++  id: string;
++  requestId: string;
++  executionId: string;
++  totalCount: number;
++  events: { tableName: string; count: number }[];
++  status: string;
++};
++
++type FormattedOccEvent = {
++  timestamp: string;
++  id: string;
++  requestId: string;
++  executionId: string;
++  occDocumentId: string;
++  occWriteSource: string;
++  occRetryCount: number;
++};
++
++function isOccInsight(insight: Insight): insight is Insight & {
++  kind: "occRetried" | "occFailedPermanently";
++  details: {
++    occCalls: number;
++    occTableName: string;
++    hourlyCounts: HourlyCount[];
++    recentEvents: OccRecentEvent[];
++  };
++} {
++  return (
++    insight.kind === "occRetried" || insight.kind === "occFailedPermanently"
++  );
++}
++
++function isMetricsInsight(insight: Insight): insight is Insight & {
++  kind:
++    | "bytesReadLimit"
++    | "bytesReadThreshold"
++    | "documentsReadLimit"
++    | "documentsReadThreshold";
++  details: {
++    count: number;
++    hourlyCounts: HourlyCount[];
++    recentEvents: BytesReadRecentEvent[];
++  };
++} {
++  return [
++    "bytesReadLimit",
++    "bytesReadThreshold",
++    "documentsReadLimit",
++    "documentsReadThreshold",
++  ].includes(insight.kind);
++}
++
++export function EventsForInsight({ insight }: { insight: Insight }) {
++  return (
++    <div className="flex flex-col gap-2 overflow-y-hidden">
++      <div className="flex items-end justify-between">
++        <div className="flex items-center gap-1">
++          <h5>Recent Events</h5>
++          <Tooltip
++            tip="Recent events matching the criteria of this Insight."
++            side="right"
++          >
++            <QuestionMarkCircledIcon />
++          </Tooltip>
++        </div>
++        <span className="text-xs text-content-secondary">
++          Data may be behind by a couple hours.
++        </span>
++      </div>
++      {(() => {
++        switch (insight.kind) {
++          case "occFailedPermanently":
++            return (
++              <OCCFailedEvents
++                insight={insight as Insight & { kind: "occFailedPermanently" }}
++              />
++            );
++          case "occRetried":
++            return (
++              <OCCRetriedEvents
++                insight={insight as Insight & { kind: "occRetried" }}
++              />
++            );
++          case "bytesReadLimit":
++          case "bytesReadThreshold":
++            return (
++              <BytesReadEvents
++                insight={
++                  insight as Insight & {
++                    kind: "bytesReadLimit" | "bytesReadThreshold";
++                  }
++                }
++              />
++            );
++          case "documentsReadLimit":
++          case "documentsReadThreshold":
++            return (
++              <DocumentsReadEvents
++                insight={
++                  insight as Insight & {
++                    kind: "documentsReadLimit" | "documentsReadThreshold";
++                  }
++                }
++              />
++            );
++          default: {
++            insight satisfies never;
++            return null;
++          }
++        }
++      })()}
++    </div>
++  );
++}
++
++const eventTimestampColumn = {
++  header: (
++    <div className="flex items-center gap-1">
++      Timestamp{" "}
++      <Tooltip tip="Events are sorted in reverse cronological order.">
++        <CaretDownIcon />
++      </Tooltip>
++    </div>
++  ),
++  className: "w-40",
++  key: "timestamp",
++  Column: EventTimestamp,
++};
++const eventFunctionCallColumn = {
++  header: "Function Call ID",
++  className: "w-32",
++  key: "executionId",
++  tooltip: "The unique ID of the function call that encountered this error.",
++  Column: EventExecutionId,
++};
++const eventRequestIdColumn = {
++  header: "Request ID",
++  className: "w-36",
++  key: "requestId",
++  tooltip:
++    "The ID of the request that triggered this function call. Multiple function calls may have the same Request ID if they are part of the same request, or if a function was retried.",
++  Column: EventRequestId,
++};
++const eventOccWriteSourceColumn = {
++  header: "Conflicting Function",
++  className: "w-60",
++  key: "occWriteSource",
++  tooltip: "The function that caused the write conflict.",
++  Column: EventOccWriteSource,
++};
++const eventOccDocumentIdColumn = {
++  header: "Conflicting Document ID",
++  className: "w-[16rem]",
++  key: "occDocumentId",
++  tooltip: "The ID of the document that caused the write conflict.",
++  Column: EventOccDocumentId,
++};
++const eventStatusColumn = {
++  header: "Status",
++  className: "w-16",
++  key: "status",
++  tooltip: "Whether the function call ultimately succeeded or failed.",
++  Column: EventStatus,
++};
++
++function BytesReadEvents({
++  insight,
++}: {
++  insight: Insight & {
++    kind: "bytesReadLimit" | "bytesReadThreshold";
++  };
++}) {
++  const events = insight.details.recentEvents.map((event) => {
++    const totalCount = event.calls.reduce(
++      (sum, call) => sum + call.bytes_read,
++      0,
++    );
++    return {
++      timestamp: event.timestamp,
++      id: event.id,
++      requestId: event.request_id,
++      executionId: event.id,
++      totalCount,
++      events: event.calls.map((call) => ({
++        tableName: call.table_name,
++        count: call.bytes_read,
++      })),
++      status: event.success ? "success" : "failure",
++    } as FormattedBytesReadEvent;
++  });
++  return (
++    <EventsTable
++      events={events}
++      insight={insight}
++      columns={[
++        eventRequestIdColumn,
++        eventFunctionCallColumn,
++        eventTimestampColumn,
++        eventStatusColumn,
++        {
++          header: "Bytes Read",
++          className: "w-60",
++          key: "bytesRead",
++          tooltip: "The number of bytes read by the function during this call.",
++          Column: BytesEventReadAmount,
++        },
++      ]}
++    />
++  );
++}
++
++function DocumentsReadEvents({
++  insight,
++}: {
++  insight: Insight & {
++    kind: "documentsReadLimit" | "documentsReadThreshold";
++  };
++}) {
++  const events = insight.details.recentEvents.map((event) => {
++    const totalCount = event.calls.reduce(
++      (sum, call) => sum + call.documents_read,
++      0,
++    );
++    return {
++      timestamp: event.timestamp,
++      id: event.id,
++      requestId: event.request_id,
++      executionId: event.id,
++      totalCount,
++      events: event.calls.map((call) => ({
++        tableName: call.table_name,
++        count: call.documents_read,
++      })),
++      status: event.success ? "success" : "failure",
++    } as FormattedBytesReadEvent;
++  });
++  return (
++    <EventsTable
++      events={events}
++      insight={insight}
++      columns={[
++        eventRequestIdColumn,
++        eventFunctionCallColumn,
++        eventTimestampColumn,
++        eventStatusColumn,
++        {
++          header: "Documents Read",
++          className: "w-60",
++          key: "bytesRead",
++          tooltip:
++            "The number of documents read by the function during this call.",
++          Column: DocumentsEventReadAmount,
++        },
++      ]}
++    />
++  );
++}
++
++function OCCFailedEvents({
++  insight,
++}: {
++  insight: Insight & {
++    kind: "occFailedPermanently";
++  };
++}) {
++  const events = insight.details.recentEvents.map(
++    (event) =>
++      ({
++        timestamp: event.timestamp,
++        id: event.id,
++        requestId: event.request_id,
++        executionId: event.id,
++        occDocumentId: event.occ_document_id,
++        occWriteSource: event.occ_write_source,
++        occRetryCount: event.occ_retry_count,
++      }) as FormattedOccEvent,
++  );
++  return (
++    <EventsTable
++      events={events}
++      insight={insight}
++      columns={[
++        eventRequestIdColumn,
++        eventFunctionCallColumn,
++        eventTimestampColumn,
++        eventOccDocumentIdColumn,
++        eventOccWriteSourceColumn,
++      ]}
++    />
++  );
++}
++
++function OCCRetriedEvents({
++  insight,
++}: {
++  insight: Insight & {
++    kind: "occRetried";
++  };
++}) {
++  const events = insight.details.recentEvents.map(
++    (event) =>
++      ({
++        timestamp: event.timestamp,
++        id: event.id,
++        requestId: event.request_id,
++        executionId: event.id,
++        occDocumentId: event.occ_document_id,
++        occWriteSource: event.occ_write_source,
++        occRetryCount: event.occ_retry_count,
++      }) as FormattedOccEvent,
++  );
++  return (
++    <EventsTable
++      events={events}
++      insight={insight}
++      columns={[
++        eventRequestIdColumn,
++        eventFunctionCallColumn,
++        eventTimestampColumn,
++        eventOccDocumentIdColumn,
++        eventOccWriteSourceColumn,
++        {
++          header: "Retry #",
++          className: "flex w-16 items-center gap-1",
++          key: "occRetryCount",
++          tooltip:
++            "The number of previous attempts before this one to call the function.",
++          Column: EventOccRetryCount,
++        },
++      ]}
++    />
++  );
++}
++
++function EventsTable<T, I extends Insight>({
++  events,
++  insight,
++  columns,
++}: {
++  events?: T[];
++  insight: I;
++  columns: {
++    header: React.ReactNode;
++    className: string;
++    key: string;
++    tooltip?: string;
++    Column: React.FC<{
++      event: T;
++      insight: I;
++      componentId: ComponentId | undefined;
++    }>;
++  }[];
++}) {
++  const { nents } = useNents();
++  const nentId = nents?.find((nent) => nent.path === insight.componentPath)?.id;
++  return (
++    <div className="scrollbar flex max-h-full w-full flex-col overflow-y-auto rounded-sm border">
++      <div className="sticky top-0 z-20 flex min-w-fit gap-2 border-b bg-background-secondary px-2 pt-2 pb-1 text-xs text-content-secondary">
++        {columns.map((col) => (
++          <div
++            key={col.key}
++            className={cn("flex items-center gap-1", col.className)}
++          >
++            {col.header}
++            {col.tooltip && (
++              <Tooltip tip={col.tooltip}>
++                <QuestionMarkCircledIcon />
++              </Tooltip>
++            )}
++          </div>
++        ))}
++      </div>
++      <div className="flex max-h-full grow flex-col">
++        {events &&
++          events.map((event, idx) => (
++            <div
++              key={idx}
++              className="flex min-w-fit animate-fadeInFromLoading gap-2 border-b p-2 text-xs last:border-b-0"
++            >
++              {columns.map((col) => (
++                <col.Column
++                  key={col.key}
++                  event={event}
++                  insight={insight}
++                  componentId={nentId}
++                />
++              ))}
++            </div>
++          ))}
++        {!events &&
++          Array.from(
++            {
++              length: Math.min(
++                7,
++                isOccInsight(insight)
++                  ? insight.details.occCalls
++                  : isMetricsInsight(insight)
++                    ? insight.details.count
++                    : 7,
++              ),
++            },
++            (_, i) => i,
++          ).map((i) => (
++            <div
++              key={i}
++              className="flex w-full gap-2 border-b p-2 last:border-b-0"
++            >
++              {columns.map((col) => (
++                <Loading className="h-4" key={col.key}>
++                  <div className={col.className} />
++                </Loading>
++              ))}
++            </div>
++          ))}
++      </div>
++    </div>
++  );
++}
++
++function EventTimestamp({ event }: { event: { timestamp: string } }) {
++  return (
++    <div className="min-w-40">
++      {(() => {
++        try {
++          const timestamp = event.timestamp.endsWith("Z")
++            ? event.timestamp
++            : `${event.timestamp}Z`;
++          return new Date(timestamp).toLocaleString();
++        } catch {
++          return new Date(event.timestamp).toLocaleString();
++        }
++      })()}
++    </div>
++  );
++}
++
++function EventExecutionId({ event }: { event: { executionId: string } }) {
++  return <div className="w-32 truncate">{event.executionId}</div>;
++}
++
++function EventRequestId({
++  event,
++  insight: _insight,
++  componentId: _componentId,
++}: {
++  event: { requestId: string };
++  insight: Insight;
++  componentId: ComponentId | undefined;
++}) {
++  return (
++    <div className="w-36">
++      {event.requestId || (
++        <span className="text-content-secondary">Unknown</span>
++      )}
++    </div>
++  );
++}
++
++function EventOccDocumentId({
++  insight,
++  event,
++  componentId,
++}: {
++  insight: Insight & {
++    kind: "occFailedPermanently" | "occRetried";
++  };
++  event: FormattedOccEvent;
++  componentId: ComponentId | undefined;
++}) {
++  const { deploymentsURI, captureMessage } = useContext(DeploymentInfoContext);
++  return (
++    <div className="flex w-[16rem]">
++      {event.occDocumentId && insight.details.occTableName ? (
++        <Link
++          href={documentHref({
++            deploymentsURI,
++            tableName: insight.details.occTableName,
++            id: event.occDocumentId,
++            componentId: componentId ?? null,
++            captureMessage,
++          })}
++          target="_blank"
++          externalIcon
++        >
++          {event.occDocumentId}
++        </Link>
++      ) : (
++        <span className="text-content-secondary">Unknown</span>
++      )}
++    </div>
++  );
++}
++
++function EventOccWriteSource({
++  insight,
++  event,
++  componentId: _componentId,
++}: {
++  insight: Insight & {
++    kind: "occFailedPermanently" | "occRetried";
++  };
++  event: FormattedOccEvent;
++  componentId: ComponentId | undefined;
++}) {
++  return (
++    <div className="w-60 truncate">
++      {!event.occWriteSource && (
++        <span className="text-content-secondary">Unknown</span>
++      )}
++      {event.occWriteSource &&
++        (insight.functionId === event.occWriteSource ? (
++          <span className="flex items-center gap-1 text-content-secondary">
++            Self{" "}
++            <HelpTooltip>
++              Two calls to the same function resulted in this write conflict.
++            </HelpTooltip>
++          </span>
++        ) : (
++          <FunctionNameOption
++            label={functionIdentifierValue(event.occWriteSource)}
++            oneLine
++          />
++        ))}
++    </div>
++  );
++}
++
++function EventOccRetryCount({
++  event,
++  insight: _insight,
++  componentId: _componentId,
++}: {
++  event: FormattedOccEvent;
++  insight: Insight & { kind: "occRetried" };
++  componentId: ComponentId | undefined;
++}) {
++  return <div className="w-16">{event.occRetryCount}</div>;
++}
++
++function BytesEventReadAmount({
++  event,
++  insight: _insight,
++  componentId: _componentId,
++}: {
++  event: FormattedBytesReadEvent;
++  insight: Insight & { kind: "bytesReadLimit" | "bytesReadThreshold" };
++  componentId: ComponentId | undefined;
++}) {
++  return <EventReadAmount event={event} format={formatBytes} />;
++}
++
++function DocumentsEventReadAmount({
++  event,
++  insight: _insight,
++  componentId: _componentId,
++}: {
++  event: FormattedBytesReadEvent;
++  insight: Insight & {
++    kind: "documentsReadLimit" | "documentsReadThreshold";
++  };
++  componentId: ComponentId | undefined;
++}) {
++  return <EventReadAmount event={event} format={formatNumberCompact} />;
++}
++
++function EventReadAmount({
++  event,
++  format,
++}: {
++  event: FormattedBytesReadEvent;
++  format: (count: number) => string;
++}) {
++  return (
++    <div className="w-60">
++      <Disclosure>
++        {({ open }) => (
++          <>
++            <div className="flex items-center gap-1">
++              <span className="min-w-17">{format(event.totalCount)}</span>
++              <Tooltip tip="View breakdown" side="right" asChild>
++                <DisclosureButton
++                  as={Button}
++                  inline
++                  variant="neutral"
++                  size="xs"
++                  className="-my-1"
++                  aria-label={open ? "Hide breakdown" : "Show breakdown"}
++                >
++                  {open ? <ChevronUpIcon /> : <ChevronDownIcon />}
++                </DisclosureButton>
++              </Tooltip>
++            </div>
++            <DisclosurePanel>
++              <ul className="mt-2 flex animate-fadeInFromLoading flex-col gap-1">
++                {event.events.map((e, idx) => (
++                  <li
++                    key={idx}
++                    className="list-inside list-decimal text-xs text-content-secondary"
++                  >
++                    <span className="font-semibold">{format(e.count)}</span>{" "}
++                    from <span className="font-semibold">{e.tableName}</span>
++                  </li>
++                ))}
++              </ul>
++            </DisclosurePanel>
++          </>
++        )}
++      </Disclosure>
++    </div>
++  );
++}
++
++function EventStatus({
++  event,
++  insight: _insight,
++  componentId: _componentId,
++}: {
++  event: FormattedBytesReadEvent;
++  insight: Insight & {
++    kind:
++      | "bytesReadLimit"
++      | "bytesReadThreshold"
++      | "documentsReadLimit"
++      | "documentsReadThreshold";
++  };
++  componentId: ComponentId | undefined;
++}) {
++  return (
++    <div className="w-16">
++      {event.status === "success" ? (
++        "Success"
++      ) : event.status === "failure" ? (
++        "Failure"
++      ) : (
++        <span className="text-content-secondary">Unknown</span>
++      )}
++    </div>
++  );
++}
+diff --git a/npm-packages/dashboard-common/src/features/health/components/HealthWithInsights.tsx b/npm-packages/dashboard-common/src/features/health/components/HealthWithInsights.tsx
+new file mode 100644
+index 000000000..6af64ec47
+--- /dev/null
++++ b/npm-packages/dashboard-common/src/features/health/components/HealthWithInsights.tsx
+@@ -0,0 +1,396 @@
++import React, {
++  useState,
++  useCallback,
++  useMemo,
++  useContext,
++  createContext,
++  PropsWithChildren,
++} from "react";
++import { cn } from "@ui/cn";
++import { ChevronLeftIcon } from "@radix-ui/react-icons";
++import { Button } from "@ui/Button";
++import { Sheet } from "@ui/Sheet";
++import { MultiSelectCombobox, MultiSelectValue } from "@ui/MultiSelectCombobox";
++import { FunctionNameOption } from "@common/elements/FunctionNameOption";
++import { HealthView } from "@common/features/health/components/HealthView";
++import {
++  Insight,
++  useInsights,
++  useInsightsPeriod,
++  getInsightPageIdentifier,
++} from "@common/features/health/lib/insights";
++import {
++  useCurrentDeployment,
++  useDeploymentRegions,
++} from "@common/lib/cloudApiShim";
++import { useCurrentTeam, useTeamMembers } from "@common/lib/cloudApiShim";
++import { useCurrentProject } from "@common/lib/cloudApiShim";
++import { useListCloudBackupsIfAvailable } from "@common/lib/cloudApiShim";
++import { PermissionsContext } from "@common/lib/deploymentContext";
++import {
++  useHasCustomRolePermission,
++  useHasProjectAdminPermissions,
++} from "@common/lib/cloudApiShim";
++import { deploymentResource } from "@common/lib/cloudApiShim";
++import { useRouter } from "next/router";
++import { Link } from "@ui/Link";
++import {
++  itemIdentifier,
++  useModuleFunctions,
++} from "@common/lib/functions/FunctionsProvider";
++import {
++  functionIdentifierValue,
++  functionIdentifierFromValue,
++} from "@common/lib/functions/generateFileTree";
++import { NoPermissionMessage } from "@common/elements/NoPermissionMessage";
++import { SmallInsightsSummary } from "./SmallInsightsSummary";
++import { InsightsSummary } from "./InsightsSummary";
++import { InsightSummaryBreakdown } from "./InsightsSummaryBreakdown";
++import { UrlObject } from "url";
++
++const InsightsContext = createContext<
++  | {
++      page: string;
++      insights?: Insight[];
++      selectedFunctions: MultiSelectValue;
++      setSelectedFunctions: (selectedFunctions: MultiSelectValue) => void;
++      canViewInsights: boolean;
++    }
++  | undefined
++>(undefined);
++
++export function HealthWithInsights() {
++  const { query, push } = useRouter();
++  const page = (query.view as string)?.startsWith("insight:")
++    ? (query.view as string)
++    : query.view === "insights"
++      ? "insights"
++      : "home";
++  const moduleFunctions = useModuleFunctions();
++  const functions = useMemo(
++    () => [
++      ...moduleFunctions.map((value) => itemIdentifier(value)),
++      functionIdentifierValue("_other"),
++    ],
++    [moduleFunctions],
++  );
++  const [selectedFunctions, setSelectedFunctions] =
++    useState<MultiSelectValue>("all");
++  const insights = useInsights();
++  const { from } = useInsightsPeriod();
++  const deployment = useCurrentDeployment();
++  const team = useCurrentTeam();
++  const project = useCurrentProject();
++  const teamMembers = useTeamMembers(team?.id);
++  const { regions } = useDeploymentRegions(team?.id);
++  const { useIsOperationAllowed } = useContext(PermissionsContext);
++  const canViewBackups = useIsOperationAllowed("ViewBackups");
++  const backups = useListCloudBackupsIfAvailable(
++    canViewBackups ? deployment : undefined,
++  );
++  const lastBackupTime = useMemo(() => {
++    if (backups === null) return null;
++    if (backups === undefined) return undefined;
++    const deploymentsBackups = backups.filter((b) => b.state === "complete");
++    return deploymentsBackups.length > 0
++      ? deploymentsBackups[0].requestedTime
++      : null;
++  }, [backups]);
++  const insightsResource =
++    project && deployment && deployment.kind === "cloud"
++      ? deploymentResource(project, {
++          id: deployment.id,
++          deploymentType: deployment.deploymentType,
++          creator: deployment.creator ?? null,
++        })
++      : undefined;
++  const isAdmin = useHasProjectAdminPermissions(project?.id);
++  const canViewInsightsCustom = useHasCustomRolePermission(
++    team?.id,
++    "deployment:insights:view",
++    insightsResource,
++    true,
++  );
++  const canViewInsights = isAdmin || canViewInsightsCustom !== false;
++  const selectedInsight = insights?.find(
++    (insight) => getInsightPageIdentifier(insight) === page,
++  );
++  const header = (
++    <div
++      className={cn(
++        "sticky top-0 mx-6 flex flex-wrap items-center justify-between gap-4 pt-2",
++        page === "insights" ? "max-w-280" : "",
++      )}
++    >
++      <div className="flex items-center gap-2">
++        {canViewInsights && page.startsWith("insight") && (
++          <Button
++            icon={<ChevronLeftIcon className="size-5" />}
++            tip="Back to Health"
++            onClick={() =>
++              void push(
++                {
++                  pathname: "/",
++                  query: {
++                    team: query.team,
++                    project: query.project,
++                    deploymentName: query.deploymentName,
++                    ...(query.lowInsightsThreshold
++                      ? { lowInsightsThreshold: query.lowInsightsThreshold }
++                      : {}),
++                  },
++                },
++                undefined,
++                { shallow: true },
++              )
++            }
++            size="xs"
++            variant="neutral"
++            className="text-content-secondary hover:text-content-primary"
++            inline
++          />
++        )}
++        <h3 className="flex items-center gap-2 py-2">
++          <MaybeLink
++            href={
++              page === "home"
++                ? null
++                : {
++                    pathname: "/",
++                    query: {
++                      team: query.team,
++                      project: query.project,
++                      deploymentName: query.deploymentName,
++                      ...(query.lowInsightsThreshold
++                        ? { lowInsightsThreshold: query.lowInsightsThreshold }
++                        : {}),
++                    },
++                  }
++            }
++          >
++            Health
++          </MaybeLink>{" "}
++          {canViewInsights && page.startsWith("insight") && (
++            <>
++              <span className="animate-fadeInFromLoading">/</span>
++              <span className="animate-fadeInFromLoading">
++                <MaybeLink
++                  href={
++                    page === "insights"
++                      ? null
++                      : {
++                          pathname: "/",
++                          query: {
++                            team: query.team,
++                            project: query.project,
++                            deploymentName: query.deploymentName,
++                            view: "insights",
++                            ...(query.lowInsightsThreshold
++                              ? {
++                                  lowInsightsThreshold:
++                                    query.lowInsightsThreshold,
++                                }
++                              : {}),
++                          },
++                        }
++                  }
++                >
++                  Insights
++                </MaybeLink>
++              </span>
++            </>
++          )}
++          {canViewInsights && selectedInsight && (
++            <>
++              <span className="animate-fadeInFromLoading">/</span>
++              <div className="flex animate-fadeInFromLoading flex-wrap gap-1 text-content-primary">
++                Insight Breakdown{" "}
++              </div>
++            </>
++          )}
++        </h3>
++      </div>
++      {canViewInsights && page === "insights" && (
++        <div className="flex animate-fadeInFromLoading flex-wrap items-center gap-4">
++          <span className="text-sm text-content-secondary">
++            {new Date(from).toLocaleString([], {
++              year: "numeric",
++              month: "numeric",
++              day: "numeric",
++              hour: "numeric",
++              minute: undefined,
++            })}{" "}
++            – Now
++          </span>
++          <div className="min-w-[20rem]">
++            <MultiSelectCombobox
++              options={functions}
++              selectedOptions={selectedFunctions}
++              setSelectedOptions={setSelectedFunctions}
++              unit="function"
++              unitPlural="functions"
++              label="Functions"
++              labelHidden
++              Option={FunctionNameOption}
++              processFilterOption={(option) => {
++                const id = functionIdentifierFromValue(option);
++                return id.componentPath
++                  ? `${id.componentPath}/${id.identifier}`
++                  : id.identifier;
++              }}
++            />
++          </div>
++        </div>
++      )}
++    </div>
++  );
++  const providerValue = useMemo(
++    () => ({
++      page,
++      insights: canViewInsights ? insights : undefined,
++      selectedFunctions,
++      setSelectedFunctions,
++      canViewInsights,
++    }),
++    [page, insights, selectedFunctions, setSelectedFunctions, canViewInsights],
++  );
++  return (
++    <InsightsContext.Provider value={providerValue}>
++      <HealthView
++        header={header}
++        PagesWrapper={InsightsWrapper}
++        PageWrapper={PageWrapper}
++        deployment={deployment}
++        teamSlug={team?.slug}
++        projectSlug={project?.slug}
++        lastBackupTime={lastBackupTime}
++        teamMembers={teamMembers}
++        regions={regions}
++      />
++    </InsightsContext.Provider>
++  );
++}
++
++function InsightsWrapper({ children }: { children: React.ReactNode }) {
++  const { insights, selectedFunctions, page, canViewInsights } =
++    useContext(InsightsContext) || {};
++  return (
++    <div
++      className={cn(
++        "flex min-h-0 grow gap-6 transition-transform duration-500 motion-reduce:transition-none",
++        page === "home" && "translate-x-0",
++        page === "insights" && "-translate-x-[calc(100%+1.5rem)]",
++        page?.startsWith("insight:") && "-translate-x-[calc(200%+3rem)]",
++      )}
++    >
++      {children}
++      <div
++        // @ts-expect-error https://github.com/facebook/react/issues/17157
++        inert={page !== "insights" ? "inert" : undefined}
++        className="mb-6 flex w-full shrink-0 px-6"
++      >
++        {canViewInsights === false ? (
++          <Sheet className="scrollbar h-fit max-h-full w-full max-w-280 min-w-0 overflow-auto py-12">
++            <NoPermissionMessage
++              message="You do not have permission to view insights."
++              missingPermission="deployment:insights:view"
++            />
++          </Sheet>
++        ) : (
++          <Sheet
++            padding={false}
++            className="scrollbar h-fit max-h-full w-full max-w-280 min-w-0 overflow-auto"
++          >
++            <InsightsSummary
++              insights={insights?.filter((insight) => {
++                if (!selectedFunctions) return true;
++                if (selectedFunctions === "all") return true;
++                return (
++                  selectedFunctions.includes(
++                    functionIdentifierValue(
++                      insight.functionId,
++                      insight.componentPath ?? undefined,
++                    ),
++                  ) || selectedFunctions.includes("_other")
++                );
++              })}
++            />
++          </Sheet>
++        )}
++      </div>
++      <div
++        // @ts-expect-error https://github.com/facebook/react/issues/17157
++        inert={!page.startsWith("insight:") ? "inert" : undefined}
++        className="scrollbar flex w-full shrink-0 overflow-y-auto px-6"
++      >
++        {canViewInsights === false ? (
++          <Sheet className="max-w-3xl py-12">
++            <NoPermissionMessage
++              message="You do not have permission to view insights."
++              missingPermission="deployment:insights:view"
++            />
++          </Sheet>
++        ) : (
++          <InsightSummaryBreakdown
++            insight={
++              insights
++                ? insights?.find(
++                    (insight) => getInsightPageIdentifier(insight) === page,
++                  ) || null
++                : undefined
++            }
++          />
++        )}
++      </div>
++    </div>
++  );
++}
++
++function PageWrapper({ children }: { children: React.ReactNode }) {
++  const { query, push } = useRouter();
++  const onViewAll = useCallback(() => {
++    void push(
++      {
++        pathname: "/",
++        query: {
++          team: query.team,
++          project: query.project,
++          deploymentName: query.deploymentName,
++          view: "insights",
++          ...(query.lowInsightsThreshold
++            ? { lowInsightsThreshold: query.lowInsightsThreshold }
++            : {}),
++        },
++      },
++      undefined,
++      { shallow: true },
++    );
++  }, [query, push]);
++  const { page, canViewInsights } = useContext(InsightsContext) || {};
++  return (
++    <div
++      className="scrollbar flex w-full shrink-0 grow flex-col overflow-y-auto px-6 pb-4"
++      // @ts-expect-error https://github.com/facebook/react/issues/17157
++      inert={page !== "home" ? "inert" : undefined}
++    >
++      {children}
++      <SmallInsightsSummary
++        onViewAll={onViewAll || (() => {})}
++        canViewInsights={canViewInsights}
++      />
++    </div>
++  );
++}
++
++function MaybeLink({
++  href,
++  children,
++}: PropsWithChildren<{
++  href: UrlObject | null;
++}>) {
++  return href === null ? (
++    <span>{children}</span>
++  ) : (
++    <Link href={href}>{children}</Link>
++  );
++}
+diff --git a/npm-packages/dashboard-common/src/features/health/components/InsightsSummary.tsx b/npm-packages/dashboard-common/src/features/health/components/InsightsSummary.tsx
+new file mode 100644
+index 000000000..4c2d4449c
+--- /dev/null
++++ b/npm-packages/dashboard-common/src/features/health/components/InsightsSummary.tsx
+@@ -0,0 +1,66 @@
++import { Insight } from "@common/features/health/lib/insights";
++import { Loading } from "@ui/Loading";
++import { EmptySection } from "@common/elements/EmptySection";
++import { CheckCircledIcon } from "@radix-ui/react-icons";
++import { InsightsSummaryListItem } from "./InsightsSummaryListItem";
++
++export type InsightsSummaryData = Insight;
++
++export function InsightsSummary({
++  insights,
++}: {
++  insights: InsightsSummaryData[] | undefined;
++}) {
++  const hasAnyInsights = !insights || insights.length > 0;
++  if (!hasAnyInsights) {
++    return (
++      <div className="py-16">
++        <EmptySection
++          Icon={CheckCircledIcon}
++          header="All clear!"
++          color="green"
++          sheet={false}
++          body="There are no issues here to address."
++          learnMoreButton={{
++            href: "https://docs.convex.dev/dashboard/deployments/health#insights",
++            children: "Learn more about Insights",
++          }}
++        />
++      </div>
++    );
++  }
++  return (
++    <div className="flex size-full animate-fadeInFromLoading flex-col">
++      <div className="flex min-w-fit gap-2 border-b px-2 pt-2 pb-1 text-xs text-content-secondary">
++        <p className="min-w-20">Severity</p>
++        <p className="min-w-72">Function</p>
++        <p className="min-w-60">Problem</p>
++        <p className="min-w-60">Chart</p>
++      </div>
++      {insights && (
++        <div className="flex w-full animate-fadeInFromLoading flex-col">
++          {insights.map((insight, idx) => (
++            <InsightsSummaryListItem key={idx} insight={insight} />
++          ))}
++        </div>
++      )}
++      {!insights &&
++        Array.from(
++          {
++            length: 5,
++          },
++          (_, i) => i,
++        ).map((i) => (
++          <div
++            key={i}
++            className="flex w-full items-center gap-2 border-b p-2 last:border-b-0"
++          >
++            <Loading className="h-6 w-20" />
++            <Loading className="h-4 w-72" />
++            <Loading className="h-9 w-60" />
++            <Loading className="h-9 w-60" />
++          </div>
++        ))}
++    </div>
++  );
++}
+diff --git a/npm-packages/dashboard-common/src/features/health/components/InsightsSummaryBreakdown.tsx b/npm-packages/dashboard-common/src/features/health/components/InsightsSummaryBreakdown.tsx
+new file mode 100644
+index 000000000..fbb76b742
+--- /dev/null
++++ b/npm-packages/dashboard-common/src/features/health/components/InsightsSummaryBreakdown.tsx
+@@ -0,0 +1,62 @@
++import { Insight } from "@common/features/health/lib/insights";
++import { Sheet } from "@ui/Sheet";
++import { Loading } from "@ui/Loading";
++import { FunctionNameOption } from "@common/elements/FunctionNameOption";
++import { functionIdentifierValue } from "@common/lib/functions/generateFileTree";
++import { useFunctionUrl } from "@common/lib/deploymentApi";
++import Link from "next/link";
++import { useNents } from "@common/lib/useNents";
++import { ProblemForInsight } from "./ProblemForInsight";
++import { ChartForInsight } from "./ChartForInsight";
++import { EventsForInsight } from "./EventsForInsight";
++
++export function InsightSummaryBreakdown({
++  insight,
++}: {
++  insight?: Insight | null;
++}) {
++  const { nents } = useNents();
++  const selectedNentId = nents?.find(
++    (nent) => nent.path === insight?.componentPath,
++  )?.id;
++  const urlToSelectedFunction = useFunctionUrl(
++    insight?.functionId || "",
++    selectedNentId,
++  );
++  if (!insight) {
++    return (
++      <Sheet className="flex size-full items-center justify-center text-content-secondary">
++        {insight === null ? (
++          "Insight not found."
++        ) : (
++          <Loading className="w-full" />
++        )}
++      </Sheet>
++    );
++  }
++  return (
++    <Sheet className="scrollbar flex max-h-full min-h-160 max-w-full flex-col gap-4 overflow-y-auto">
++      <h4 className="flex items-center gap-1">
++        Insight Breakdown for{" "}
++        <Link
++          href={urlToSelectedFunction}
++          className="font-semibold text-content-primary hover:underline"
++        >
++          <FunctionNameOption
++            label={functionIdentifierValue(
++              insight.functionId,
++              insight.componentPath ?? undefined,
++            )}
++            oneLine
++            disableTruncation
++          />
++        </Link>
++      </h4>
++      <div className="flex items-end justify-between gap-4">
++        <ProblemForInsight insight={insight} explain />
++      </div>
++      <ChartForInsight insight={insight} />
++      <EventsForInsight insight={insight} />
++    </Sheet>
++  );
++}
+diff --git a/npm-packages/dashboard-common/src/features/health/components/InsightsSummaryListItem.tsx b/npm-packages/dashboard-common/src/features/health/components/InsightsSummaryListItem.tsx
+new file mode 100644
+index 000000000..4fe7c9bdc
+--- /dev/null
++++ b/npm-packages/dashboard-common/src/features/health/components/InsightsSummaryListItem.tsx
+@@ -0,0 +1,92 @@
++import {
++  Insight,
++  getInsightPageIdentifier,
++} from "@common/features/health/lib/insights";
++import {
++  CrossCircledIcon,
++  ExclamationTriangleIcon,
++} from "@radix-ui/react-icons";
++import { Tooltip } from "@ui/Tooltip";
++import { Button } from "@ui/Button";
++import { FunctionNameOption } from "@common/elements/FunctionNameOption";
++import { functionIdentifierValue } from "@common/lib/functions/generateFileTree";
++import { useRouter } from "next/router";
++import { SparklineForInsight } from "./SparklineForInsight";
++import { ProblemForInsight } from "./ProblemForInsight";
++import { useLogDeploymentEvent } from "@common/lib/deploymentApi";
++
++export function InsightsSummaryListItem({ insight }: { insight: Insight }) {
++  const log = useLogDeploymentEvent();
++  const { query, push } = useRouter();
++  return (
++    <Button
++      className="flex w-full min-w-fit animate-fadeInFromLoading items-center gap-2 border-b p-2 text-xs last:border-b-0 hover:bg-background-tertiary"
++      variant="unstyled"
++      onClick={() => {
++        void push(
++          {
++            pathname: "/",
++            query: {
++              team: query.team,
++              project: query.project,
++              deploymentName: query.deploymentName,
++              view: getInsightPageIdentifier(insight),
++              ...(query.lowInsightsThreshold
++                ? { lowInsightsThreshold: query.lowInsightsThreshold }
++                : {}),
++            },
++          },
++          undefined,
++          { shallow: true },
++        );
++        log("open insight", { kind: insight.kind });
++      }}
++    >
++      <span className="w-20">
++        {severityForInsightKind[insight.kind] === "error" ? (
++          <Tooltip
++            className="flex w-fit gap-1 rounded-sm border bg-background-error p-1 text-xs text-content-error"
++            tip="This insight is a critical problem and should be addressed soon."
++            side="left"
++          >
++            <CrossCircledIcon /> Critical
++          </Tooltip>
++        ) : (
++          <Tooltip
++            className="flex w-fit gap-1 rounded-sm border bg-background-warning p-1 text-xs text-content-warning"
++            tip="This insight indicates a potential issue and should be investigated."
++            side="left"
++          >
++            <ExclamationTriangleIcon /> Warning
++          </Tooltip>
++        )}
++      </span>
++      <div className="w-72 font-semibold">
++        <FunctionNameOption
++          label={functionIdentifierValue(
++            insight.functionId,
++            insight.componentPath ?? undefined,
++          )}
++        />
++      </div>
++      <div className="w-60">
++        <ProblemForInsight insight={insight} />
++      </div>
++      <div className="h-full w-60">
++        <SparklineForInsight insight={insight} />
++      </div>
++    </Button>
++  );
++}
++
++export const severityForInsightKind: Record<
++  Insight["kind"],
++  "error" | "warning"
++> = {
++  bytesReadLimit: "error",
++  bytesReadThreshold: "warning",
++  documentsReadLimit: "error",
++  documentsReadThreshold: "warning",
++  occFailedPermanently: "error",
++  occRetried: "warning",
++};
+diff --git a/npm-packages/dashboard-common/src/features/health/components/ProblemForInsight.tsx b/npm-packages/dashboard-common/src/features/health/components/ProblemForInsight.tsx
+new file mode 100644
+index 000000000..62f51cdd1
+--- /dev/null
++++ b/npm-packages/dashboard-common/src/features/health/components/ProblemForInsight.tsx
+@@ -0,0 +1,247 @@
++import {
++  InfoCircledIcon,
++  QuestionMarkCircledIcon,
++} from "@radix-ui/react-icons";
++import { Insight } from "@common/features/health/lib/insights";
++import { Button } from "@ui/Button";
++import { formatNumberCompact } from "@common/lib/format";
++import { Link } from "@ui/Link";
++
++export function ProblemForInsight({
++  insight,
++  explain = false,
++}: {
++  insight: Insight;
++  explain?: boolean;
++}) {
++  switch (insight.kind) {
++    case "bytesReadLimit":
++    case "bytesReadThreshold": {
++      const bytesReadInsight = insight as Insight & {
++        kind: "bytesReadLimit" | "bytesReadThreshold";
++      };
++      return (
++        <BytesReadCountProblem insight={bytesReadInsight} explain={explain} />
++      );
++    }
++    case "documentsReadLimit":
++    case "documentsReadThreshold": {
++      const docsReadInsight = insight as Insight & {
++        kind: "documentsReadLimit" | "documentsReadThreshold";
++      };
++      return (
++        <DocsReadCountProblem insight={docsReadInsight} explain={explain} />
++      );
++    }
++    case "occFailedPermanently":
++    case "occRetried": {
++      const occInsight = insight as Insight & {
++        kind: "occFailedPermanently" | "occRetried";
++      };
++      return <OCCProblem insight={occInsight} explain={explain} />;
++    }
++    default: {
++      insight satisfies never;
++      return null;
++    }
++  }
++}
++
++function OCCProblem({
++  insight,
++  explain,
++}: {
++  insight: Insight & {
++    kind: "occFailedPermanently" | "occRetried";
++  };
++  explain: boolean;
++}) {
++  const isFailed = insight.kind === "occFailedPermanently";
++  return (
++    <div className="flex flex-col items-start gap-1">
++      <span className="flex items-center gap-1 truncate">
++        {isFailed ? "Failed" : "Retried"} due to write conflicts{" "}
++        {explain && (
++          <>
++            in table{" "}
++            {insight.details.occTableName ? (
++              <span className="font-semibold">
++                {insight.details.occTableName}
++              </span>
++            ) : (
++              <span className="text-content-secondary">an unknown table</span>
++            )}
++          </>
++        )}
++        {!explain && (
++          <Button
++            href="https://docs.convex.dev/error#1"
++            tip={
++              <>
++                <Link href="https://docs.convex.dev/error#1" target="_blank">
++                  Learn more
++                </Link>{" "}
++                about write conflicts.
++              </>
++            }
++            tipSide="right"
++            variant="unstyled"
++            target="_blank"
++          >
++            <QuestionMarkCircledIcon />
++          </Button>
++        )}
++      </span>
++      {!explain && (
++        <span className="max-w-full truncate text-left text-xs text-content-secondary">
++          {formatNumberCompact(insight.details.occCalls)} time
++          {insight.details.occCalls === 1 ? "" : "s"} in{" "}
++          {!insight.details.occTableName ? (
++            "an unknown table"
++          ) : (
++            <>
++              table{" "}
++              <span className="font-semibold">
++                {insight.details.occTableName}
++              </span>
++            </>
++          )}
++        </span>
++      )}
++      {explain && (
++        <div className="my-2 flex max-w-prose items-start gap-2 rounded-sm border p-2 text-sm text-pretty">
++          <InfoCircledIcon className="mt-[3px] shrink-0" />
++          <div className="space-y-2">
++            <p>
++              Write conflicts occur when two functions running in parallel make
++              conflicting changes to the same table.{" "}
++            </p>
++            <p>
++              Convex will attempt to retry mutations that fail this way, but
++              will eventually fail permanently if the conflicts persist.
++            </p>
++            <p>
++              <Link href="https://docs.convex.dev/error#1" target="_blank">
++                Learn how to debug this Insight.
++              </Link>
++            </p>
++          </div>
++        </div>
++      )}
++    </div>
++  );
++}
++
++function BytesReadCountProblem({
++  insight,
++  explain,
++}: {
++  insight: Insight & { kind: "bytesReadLimit" | "bytesReadThreshold" };
++  explain: boolean;
++}) {
++  return (
++    <div className="flex flex-col items-start gap-1">
++      <ReadLimitProblem explain={explain} kind="bytes" />
++      {!explain && (
++        <span className="text-xs text-content-secondary">
++          {formatNumberCompact(insight.details.count)} function call
++          {insight.details.count === 1 ? "" : "s"}
++        </span>
++      )}
++    </div>
++  );
++}
++
++export const documentsReadLimit = 32000;
++export const megabytesReadLimit = 16;
++
++const bytesLimitString = `${megabytesReadLimit} MB`;
++const documentsLimitString = documentsReadLimit.toLocaleString();
++
++function ReadLimitProblem({
++  kind,
++  explain,
++}: {
++  kind: "bytes" | "documents";
++  explain: boolean;
++}) {
++  return (
++    <div className="flex flex-col">
++      <span className="flex items-center gap-1">
++        Nearing {kind} read limit
++        {!explain && (
++          <Button
++            href="https://stack.convex.dev/queries-that-scale"
++            tip={`This function has been approaching or exceeding the Convex limit on ${kind} read. When a function exceeds the limit of ${kind === "bytes" ? bytesLimitString : documentsLimitString}, it will fail.`}
++            tipSide="right"
++            variant="unstyled"
++            target="_blank"
++          >
++            <QuestionMarkCircledIcon />
++          </Button>
++        )}
++      </span>
++      {explain && (
++        <div className="my-2 flex max-w-prose items-start gap-2 rounded-sm border p-2 text-sm text-pretty">
++          <InfoCircledIcon className="mt-[3px] shrink-0" />
++          <div className="space-y-2">
++            <p>
++              This issue occurs when a function gets close to or exceeds the
++              limit on {kind} read within a single transaction.{" "}
++            </p>
++            <p>
++              When a function exceeds the{" "}
++              <Link
++                href="https://docs.convex.dev/production/state/limits#transactions"
++                target="_blank"
++              >
++                limit of{" "}
++                {kind === "bytes" ? bytesLimitString : documentsLimitString}
++              </Link>
++              , it will fail.
++            </p>
++            <p>
++              To limit the amount of data read by a function, consider{" "}
++              <Link
++                href="https://docs.convex.dev/database/indexes/indexes-and-query-perf"
++                target="_blank"
++              >
++                adding an index
++              </Link>{" "}
++              or{" "}
++              <Link
++                href="https://docs.convex.dev/database/pagination"
++                target="_blank"
++              >
++                implementing pagination
++              </Link>
++              .
++            </p>
++          </div>
++        </div>
++      )}
++    </div>
++  );
++}
++
++function DocsReadCountProblem({
++  insight,
++  explain,
++}: {
++  insight: Insight & {
++    kind: "documentsReadLimit" | "documentsReadThreshold";
++  };
++  explain: boolean;
++}) {
++  return (
++    <div className="flex flex-col items-start gap-1">
++      <ReadLimitProblem explain={explain} kind="documents" />
++      {!explain && (
++        <span className="text-xs text-content-secondary">
++          {formatNumberCompact(insight.details.count)} function call
++          {insight.details.count === 1 ? "" : "s"}
++        </span>
++      )}
++    </div>
++  );
++}
+diff --git a/npm-packages/dashboard-common/src/features/health/components/SmallInsightsSummary.tsx b/npm-packages/dashboard-common/src/features/health/components/SmallInsightsSummary.tsx
+new file mode 100644
+index 000000000..81ee07d5b
+--- /dev/null
++++ b/npm-packages/dashboard-common/src/features/health/components/SmallInsightsSummary.tsx
+@@ -0,0 +1,109 @@
++import { useCurrentDeployment } from "@common/lib/cloudApiShim";
++import {
++  useInsights,
++  useInsightsPeriod,
++} from "@common/features/health/lib/insights";
++import { Button } from "@ui/Button";
++import { Sheet } from "@ui/Sheet";
++import { DisclosureSection } from "@common/features/health/components/HealthView";
++import {
++  ChevronRightIcon,
++  CrossCircledIcon,
++  ExclamationTriangleIcon,
++} from "@radix-ui/react-icons";
++import { NoPermissionMessage } from "@common/elements/NoPermissionMessage";
++import { InsightsSummary } from "./InsightsSummary";
++import { severityForInsightKind } from "./InsightsSummaryListItem";
++
++export function SmallInsightsSummary({
++  onViewAll,
++  canViewInsights,
++}: {
++  onViewAll: () => void;
++  canViewInsights?: boolean;
++}) {
++  const deployment = useCurrentDeployment();
++  const insights = useInsights();
++  const { from } = useInsightsPeriod();
++  if (deployment?.kind === "local") {
++    return null;
++  }
++  const criticalCount =
++    insights?.filter(
++      (insight) => severityForInsightKind[insight.kind] === "error",
++    ).length ?? 0;
++  const warningCount =
++    insights?.filter(
++      (insight) => severityForInsightKind[insight.kind] === "warning",
++    ).length ?? 0;
++  const closedDescription = insights ? (
++    <span className="flex animate-fadeInFromLoading items-center gap-3 text-xs text-content-secondary">
++      {criticalCount > 0 && (
++        <span className="flex items-center gap-1 text-content-error">
++          <CrossCircledIcon className="size-3 min-w-3" />
++          {criticalCount} critical
++        </span>
++      )}
++      {warningCount > 0 && (
++        <span className="flex items-center gap-1 text-content-warning">
++          <ExclamationTriangleIcon className="size-3 min-w-3" />
++          {warningCount} warning{warningCount !== 1 ? "s" : ""}
++        </span>
++      )}
++      {criticalCount === 0 && warningCount === 0 && "No issues"}
++    </span>
++  ) : null;
++  return (
++    <DisclosureSection
++      id="insights"
++      title="Insights"
++      defaultOpen
++      closedDescription={canViewInsights === false ? null : closedDescription}
++    >
++      {canViewInsights === false ? (
++        <Sheet className="flex w-full max-w-3xl animate-fadeInFromLoading flex-col py-12">
++          <NoPermissionMessage
++            message="You do not have permission to view insights."
++            missingPermission="deployment:insights:view"
++          />
++        </Sheet>
++      ) : (
++        <>
++          <Sheet
++            padding={false}
++            className="flex w-full animate-fadeInFromLoading flex-col"
++          >
++            <div className="flex items-center justify-between p-2">
++              <span className="text-xs text-content-secondary">
++                {new Date(from).toLocaleString([], {
++                  year: "numeric",
++                  month: "numeric",
++                  day: "numeric",
++                  hour: "numeric",
++                  minute: undefined,
++                })}{" "}
++                – Now
++              </span>
++            </div>
++            <InsightsSummary insights={insights?.slice(0, 5)} />
++          </Sheet>
++          <div className="flex">
++            {insights && insights.length > 0 && (
++              <Button
++                variant="neutral"
++                className="m-auto mt-2 w-fit gap-1 hover:bg-background-tertiary"
++                onClick={onViewAll}
++              >
++                View{" "}
++                {insights.length > 6
++                  ? `${insights.length - 5} more insights`
++                  : "all Insights"}{" "}
++                <ChevronRightIcon />
++              </Button>
++            )}
++          </div>
++        </>
++      )}
++    </DisclosureSection>
++  );
++}
+diff --git a/npm-packages/dashboard-common/src/features/health/components/SparklineForInsight.tsx b/npm-packages/dashboard-common/src/features/health/components/SparklineForInsight.tsx
+new file mode 100644
+index 000000000..99ea571a3
+--- /dev/null
++++ b/npm-packages/dashboard-common/src/features/health/components/SparklineForInsight.tsx
+@@ -0,0 +1,104 @@
++import { Insight } from "@common/features/health/lib/insights";
++
++import { Sparklines, SparklinesCurve } from "react-sparklines";
++import { LoadingTransition } from "@ui/Loading";
++
++export function SparklineForInsight({ insight }: { insight: Insight }) {
++  switch (insight.kind) {
++    case "bytesReadLimit":
++    case "bytesReadThreshold":
++      return (
++        <BytesReadCountSparkline
++          insight={{
++            ...insight,
++            kind: insight.kind as "bytesReadLimit" | "bytesReadThreshold",
++          }}
++        />
++      );
++    case "documentsReadLimit":
++    case "documentsReadThreshold":
++      return (
++        <DocumentsReadCountSparkline
++          insight={{
++            ...insight,
++            kind: insight.kind as
++              | "documentsReadLimit"
++              | "documentsReadThreshold",
++          }}
++        />
++      );
++    case "occFailedPermanently":
++    case "occRetried":
++      return <OCCSparkline insight={insight} />;
++    default: {
++      insight satisfies never;
++      return null;
++    }
++  }
++}
++
++function Sparkline({
++  data,
++  height = 36,
++  width = 240,
++  color = "var(--chart-line-1)",
++  min = 0,
++  max,
++}: {
++  data?: number[];
++  height?: number;
++  width?: number;
++  color?: string;
++  min?: number;
++  max?: number;
++}) {
++  return (
++    <LoadingTransition
++      loadingProps={{
++        fullHeight: false,
++        className: "h-[36px] w-60",
++      }}
++    >
++      {data && (
++        <Sparklines
++          data={data}
++          height={height}
++          width={width}
++          margin={0}
++          min={min}
++          max={max}
++        >
++          <SparklinesCurve color={color} />
++        </Sparklines>
++      )}
++    </LoadingTransition>
++  );
++}
++
++function BytesReadCountSparkline({
++  insight,
++}: {
++  insight: Insight & { kind: "bytesReadLimit" | "bytesReadThreshold" };
++}) {
++  return <Sparkline data={insight.details.hourlyCounts.map((b) => b.count)} />;
++}
++
++function DocumentsReadCountSparkline({
++  insight,
++}: {
++  insight: Insight & {
++    kind: "documentsReadLimit" | "documentsReadThreshold";
++  };
++}) {
++  return <Sparkline data={insight.details.hourlyCounts.map((b) => b.count)} />;
++}
++
++function OCCSparkline({
++  insight,
++}: {
++  insight: Insight & {
++    kind: "occFailedPermanently" | "occRetried";
++  };
++}) {
++  return <Sparkline data={insight.details.hourlyCounts.map((b) => b.count)} />;
++}
+diff --git a/npm-packages/dashboard-common/src/features/health/lib/insights.ts b/npm-packages/dashboard-common/src/features/health/lib/insights.ts
+new file mode 100644
+index 000000000..30fccf46f
+--- /dev/null
++++ b/npm-packages/dashboard-common/src/features/health/lib/insights.ts
+@@ -0,0 +1,230 @@
++import { useCurrentDeployment } from "@common/lib/cloudApiShim";
++import { useCurrentTeam } from "@common/lib/cloudApiShim";
++
++import {
++  rootComponentPath,
++  useUsageQuery,
++} from "@common/features/health/lib/usage";
++import {
++  itemIdentifier,
++  useModuleFunctions,
++} from "@common/lib/functions/FunctionsProvider";
++import { functionIdentifierValue } from "@common/lib/functions/generateFileTree";
++
++export function useInsightsPeriod() {
++  const now = new Date();
++  const hoursAgo72 = new Date(now.getTime() - 72 * 60 * 60 * 1000);
++  return {
++    from: hoursAgo72.toISOString(),
++    to: now.toISOString(),
++  };
++}
++
++type HourlyCount = {
++  hour: string;
++  count: number;
++};
++
++type OccRecentEvent = {
++  timestamp: string;
++  id: string;
++  request_id: string;
++  occ_document_id?: string;
++  occ_write_source?: string;
++  occ_retry_count: number;
++};
++
++type BytesReadRecentEvent = {
++  timestamp: string;
++  id: string;
++  request_id: string;
++  calls: { table_name: string; bytes_read: number; documents_read: number }[];
++  success: boolean;
++};
++
++export type Insight = { functionId: string; componentPath: string | null } & (
++  | {
++      kind: "occRetried" | "occFailedPermanently";
++      details: {
++        occCalls: number;
++        occTableName?: string;
++        hourlyCounts: HourlyCount[];
++        recentEvents: OccRecentEvent[];
++      };
++    }
++  | {
++      kind:
++        | "bytesReadLimit"
++        | "bytesReadThreshold"
++        | "documentsReadLimit"
++        | "documentsReadThreshold";
++      details: {
++        count: number;
++        hourlyCounts: HourlyCount[];
++        recentEvents: BytesReadRecentEvent[];
++      };
++    }
++);
++
++function padAndSortHourlyData(
++  hourlyCounts: HourlyCount[],
++  periodStart?: string,
++): HourlyCount[] {
++  const currentTime = new Date();
++  if (hourlyCounts.length === 0) {
++    if (periodStart) {
++      const startDate = new Date(periodStart);
++      const endDate = new Date(currentTime);
++      const result: HourlyCount[] = [];
++      const currentDate = new Date(startDate);
++      while (currentDate < endDate) {
++        const year = currentDate.getUTCFullYear();
++        const month = String(currentDate.getUTCMonth() + 1).padStart(2, "0");
++        const day = String(currentDate.getUTCDate()).padStart(2, "0");
++        const hour = String(currentDate.getUTCHours()).padStart(2, "0");
++        const formattedHour = `${year}-${month}-${day} ${hour}:00:00`;
++        result.push({
++          hour: formattedHour,
++          count: 0,
++        });
++        currentDate.setHours(currentDate.getHours() + 1);
++      }
++      return result;
++    }
++    return [];
++  }
++  const hours = hourlyCounts.map((item) => item.hour);
++  const hourToCountMap = new Map<string, number>();
++  hourlyCounts.forEach((item) => {
++    hourToCountMap.set(item.hour, item.count);
++  });
++  let startDate: Date;
++  let endDate: Date;
++  if (periodStart) {
++    startDate = new Date(periodStart);
++    endDate = new Date(currentTime);
++  } else {
++    try {
++      const sortedHours = [...hours].sort();
++      const minHour = sortedHours[0];
++      const maxHour = sortedHours[sortedHours.length - 1];
++      let minDate: string;
++      let minHourNum: string;
++      let maxDate: string;
++      let maxHourNum: string;
++      if (minHour.includes("T")) {
++        [minDate, minHourNum] = minHour.split("T");
++        [maxDate, maxHourNum] = maxHour.split("T");
++      } else {
++        minDate = minHour.substring(0, 10);
++        minHourNum = minHour.substring(11, 13) || "00";
++        maxDate = maxHour.substring(0, 10);
++        maxHourNum = maxHour.substring(11, 13) || "23";
++      }
++      startDate = new Date(`${minDate}T${minHourNum}:00:00Z`);
++      endDate = new Date(`${maxDate}T${maxHourNum}:59:59Z`);
++      if (endDate > currentTime) {
++        endDate.setTime(currentTime.getTime());
++      }
++      if (
++        Number.isNaN(startDate.getTime()) ||
++        Number.isNaN(endDate.getTime())
++      ) {
++        throw new Error("Invalid date range");
++      }
++    } catch (error) {
++      console.error("Error parsing date range:", error);
++      return hourlyCounts;
++    }
++  }
++  const result: HourlyCount[] = [];
++  const currentDate = new Date(startDate);
++  while (currentDate < endDate) {
++    const year = currentDate.getUTCFullYear();
++    const month = String(currentDate.getUTCMonth() + 1).padStart(2, "0");
++    const day = String(currentDate.getUTCDate()).padStart(2, "0");
++    const hour = String(currentDate.getUTCHours()).padStart(2, "0");
++    const formattedHour = `${year}-${month}-${day} ${hour}:00:00`;
++    const isoHour = currentDate.toISOString().slice(0, 13);
++    const count =
++      hourToCountMap.get(isoHour) || hourToCountMap.get(formattedHour) || 0;
++    result.push({
++      hour: formattedHour,
++      count,
++    });
++    currentDate.setHours(currentDate.getHours() + 1);
++  }
++  return result;
++}
++
++export function useInsights(): Insight[] | undefined {
++  const moduleFunctions = useModuleFunctions();
++  const period = useInsightsPeriod();
++  const team = useCurrentTeam();
++  const deployment = useCurrentDeployment();
++  const common = {
++    deploymentName: deployment?.name,
++    period: {
++      from: period.from.split("T")[0],
++      to: period.to.split("T")[0],
++    },
++    teamId: team?.id!,
++    projectId: null,
++    componentPrefix: null,
++  };
++  const { data: insightsData } = useUsageQuery({
++    queryId: "9ab3b74e-a725-480b-88a6-43e6bd70bd82",
++    ...common,
++  });
++  if (!insightsData) {
++    return undefined;
++  }
++  const insights = insightsData.map((d) => {
++    const parsedDetails = JSON.parse(d[3]);
++    if (
++      parsedDetails.hourlyCounts &&
++      Array.isArray(parsedDetails.hourlyCounts)
++    ) {
++      parsedDetails.hourlyCounts = padAndSortHourlyData(
++        parsedDetails.hourlyCounts,
++        period.from,
++      );
++    }
++    return {
++      kind: d[0] as Insight["kind"],
++      functionId: d[1],
++      componentPath: d[2] === rootComponentPath ? null : d[2],
++      details: parsedDetails,
++    };
++  });
++  insights.sort((a, b) => {
++    const order: Record<Insight["kind"], number> = {
++      documentsReadLimit: 0,
++      bytesReadLimit: 1,
++      occFailedPermanently: 2,
++      documentsReadThreshold: 3,
++      bytesReadThreshold: 4,
++      occRetried: 5,
++    };
++    return order[a.kind] - order[b.kind];
++  });
++  return insights.filter((insight) => {
++    const id = functionIdentifierValue(
++      insight.functionId,
++      insight.componentPath ?? undefined,
++    );
++    return moduleFunctions.some((mf) => itemIdentifier(mf) === id);
++  });
++}
++
++export function getInsightPageIdentifier(insight: Insight): string {
++  if (
++    (insight.kind === "occRetried" ||
++      insight.kind === "occFailedPermanently") &&
++    "details" in insight &&
++    "occTableName" in insight.details
++  ) {
++    return `insight:${insight.kind}:${insight.componentPath}:${insight.functionId}:${insight.details.occTableName}`;
++  }
++  return `insight:${insight.kind}:${insight.componentPath}:${insight.functionId}`;
++}
+diff --git a/npm-packages/dashboard-common/src/features/health/lib/usage.ts b/npm-packages/dashboard-common/src/features/health/lib/usage.ts
+new file mode 100644
+index 000000000..77c090e5e
+--- /dev/null
++++ b/npm-packages/dashboard-common/src/features/health/lib/usage.ts
+@@ -0,0 +1,98 @@
++import { useBBQuery } from "@common/lib/bigBrainApi";
++
++export type DateRange = { from: string; to: string };
++
++export type UsageState =
++  | "Default"
++  | "Approaching"
++  | "Exceeded"
++  | "Disabled"
++  | "Paused";
++export function useTeamUsageState(
++  teamId: number | null,
++): UsageState | undefined {
++  const { data } = useBBQuery({
++    path: "/teams/{team_id}/usage/team_usage_state",
++    pathParams: {
++      team_id: teamId?.toString() || "",
++    },
++    swrOptions: { refreshInterval: 0 },
++  });
++  return data?.usageState;
++}
++
++export function useCurrentBillingPeriod(teamId: number) {
++  const { data } = useBBQuery({
++    path: "/teams/{team_id}/usage/current_billing_period",
++    pathParams: {
++      team_id: teamId.toString(),
++    },
++  });
++  return data;
++}
++
++export const USAGE_REFRESH_INTERVAL_MS =
++  getURLConfigInt("usage_refresh_secs", 60 * 10) * 1000;
++export type DatabricksQueryId = string;
++
++export const rootComponentPath = "-root-component-";
++
++export function useUsageQuery({
++  queryId,
++  teamId,
++  projectId,
++  deploymentName,
++  period,
++  componentPrefix,
++  functionId,
++  tableName,
++  skip,
++}: {
++  queryId: DatabricksQueryId;
++  teamId: number;
++  projectId: number | null;
++  functionId?: string;
++  tableName?: string;
++  period: DateRange | null;
++  componentPrefix: string | null;
++  deploymentName?: string;
++  skip?: boolean;
++}) {
++  const result = useBBQuery({
++    path: "/teams/{team_id}/usage/query",
++    pathParams: { team_id: teamId.toString() },
++    queryParams: {
++      queryId,
++      projectId: projectId ?? undefined,
++      ...(deploymentName ? { deploymentName } : {}),
++      ...(functionId ? { udfId: functionId } : {}),
++      ...(tableName ? { tableName } : {}),
++      ...(period ? { from: period.from, to: period.to } : {}),
++      ...(componentPrefix
++        ? {
++            componentPath:
++              componentPrefix === "app" ? rootComponentPath : componentPrefix,
++          }
++        : {}),
++    },
++    swrOptions: {
++      keepPreviousData: false,
++      refreshInterval: USAGE_REFRESH_INTERVAL_MS,
++      isPaused: () => skip ?? false,
++    },
++  });
++  return {
++    ...result,
++    data: result.data?.map((row: any[]) =>
++      row.map((cell: any) => cell ?? ""),
++    ) as string[][] | undefined,
++  };
++}
++
++function getURLConfigInt(name: string, default_value: number) {
++  if (typeof window === "undefined") {
++    return default_value;
++  }
++  const value = new URLSearchParams(window.location.search).get(name);
++  return value !== null ? parseInt(value) : default_value;
++}
 diff --git a/npm-packages/dashboard-common/src/features/settings/components/backups/SnapshotExport.tsx b/npm-packages/dashboard-common/src/features/settings/components/backups/SnapshotExport.tsx
 new file mode 100644
 index 000000000..d47655e25
@@ -594,6 +3068,389 @@ index e268b7bd5..fac7a33a0 100644
 -
    return pages;
  }
+diff --git a/npm-packages/dashboard-common/src/lib/bigBrainApi.ts b/npm-packages/dashboard-common/src/lib/bigBrainApi.ts
+new file mode 100644
+index 000000000..2c91afc41
+--- /dev/null
++++ b/npm-packages/dashboard-common/src/lib/bigBrainApi.ts
+@@ -0,0 +1,227 @@
++import { useCallback, useContext } from "react";
++import useSWR, { SWRConfiguration, SWRResponse, useSWRConfig } from "swr";
++import {
++  ConnectedDeploymentContext,
++  DeploymentInfoContext,
++} from "@common/lib/deploymentContext";
++import { toast } from "@common/lib/utils";
++
++export const OIDC_TOKEN_STORAGE_KEY = "convexOidcAccessToken";
++
++export function useBigBrainUrl(): string | undefined {
++  const ctx = useContext(DeploymentInfoContext);
++  return ctx.bigBrainUrl ?? undefined;
++}
++
++export function useBigBrainToken(): string | undefined {
++  const ctx = useContext(DeploymentInfoContext);
++  return ctx.bigBrainToken ?? undefined;
++}
++
++export function useProjectDeployKey(): (deployment: string) => Promise<string> {
++  const base = useBigBrainUrl();
++  return useCallback(
++    async (deployment: string): Promise<string> => {
++      if (!base) {
++        throw new Error("The control-plane router URL is not configured.");
++      }
++      const oidc =
++        typeof window !== "undefined"
++          ? window.sessionStorage.getItem(OIDC_TOKEN_STORAGE_KEY)
++          : null;
++      if (!oidc) {
++        throw new Error("Sign in with SSO to get a project deploy key.");
++      }
++      const r = await bbFetch(base, oidc, {
++        method: "POST",
++        path: "/project_deploy_key",
++        body: JSON.stringify({ deployment }),
++      });
++      if (!r.ok) {
++        throw new Error(r.error?.message || `Request failed (${r.status})`);
++      }
++      return r.data?.deployKey as string;
++    },
++    [base],
++  );
++}
++
++function useAuthToken(): string | undefined {
++  const bigBrainToken = useBigBrainToken();
++  if (bigBrainToken) return bigBrainToken;
++  const cd = useContext(ConnectedDeploymentContext);
++  const adminKey = cd?.deployment?.adminKey;
++  if (adminKey) return adminKey;
++  if (typeof window !== "undefined") {
++    const oidc = window.sessionStorage.getItem(OIDC_TOKEN_STORAGE_KEY);
++    if (oidc) return oidc;
++  }
++  return undefined;
++}
++
++function substitute(path: string, pathParams?: Record<string, any>): string {
++  if (!pathParams) return path;
++  return path.replace(/\{([^}]+)\}/g, (_m, k) =>
++    encodeURIComponent(String(pathParams[k] ?? "")),
++  );
++}
++
++function queryString(queryParams?: Record<string, any>): string {
++  if (!queryParams) return "";
++  const u = new URLSearchParams();
++  for (const [k, v] of Object.entries(queryParams)) {
++    if (v !== undefined && v !== null && v !== "") u.set(k, String(v));
++  }
++  const s = u.toString();
++  return s ? `?${s}` : "";
++}
++
++function keyFor(
++  path: string,
++  pathParams?: Record<string, any>,
++  queryParams?: Record<string, any>,
++): string {
++  return `bb:${substitute(path, pathParams)}${queryString(queryParams)}`;
++}
++
++async function bbFetch(
++  base: string,
++  token: string | undefined,
++  init: RequestInit & { path: string },
++): Promise<{ ok: boolean; status: number; data: any; error: any }> {
++  const url = `${base.replace(/\/$/, "")}/api/dashboard${init.path}`;
++  const res = await fetch(url, {
++    ...init,
++    headers: {
++      ...(token ? { Authorization: `Bearer ${token}` } : {}),
++      ...(init.body ? { "content-type": "application/json" } : {}),
++      ...(init.headers || {}),
++    },
++  });
++  let body: any;
++  try {
++    body = await res.json();
++  } catch {
++    body = undefined;
++  }
++  return {
++    ok: res.ok,
++    status: res.status,
++    data: res.ok ? body : undefined,
++    error: res.ok
++      ? undefined
++      : (body ?? { code: "Error", message: `HTTP ${res.status}` }),
++  };
++}
++
++export function useBBQuery({
++  path,
++  pathParams,
++  queryParams,
++  swrOptions,
++}: {
++  path: string;
++  pathParams?: Record<string, any>;
++  queryParams?: Record<string, any>;
++  swrOptions?: Omit<SWRConfiguration, "onError">;
++}): SWRResponse<any, any> {
++  const base = useBigBrainUrl();
++  const token = useAuthToken();
++  const paused =
++    !base ||
++    !token ||
++    (!!pathParams && Object.values(pathParams).some((p) => !p));
++  const key = paused ? null : keyFor(path, pathParams, queryParams);
++  return useSWR(
++    key,
++    async () => {
++      const r = await bbFetch(base!, token, {
++        method: "GET",
++        path: `${substitute(path, pathParams)}${queryString(queryParams)}`,
++      });
++      if (!r.ok) {
++        const e: any = new Error(r.error?.message || "request failed");
++        e.code = r.error?.code;
++        throw e;
++      }
++      return r.data;
++    },
++    swrOptions ?? {},
++  );
++}
++
++export function useBBMutation({
++  path,
++  pathParams,
++  method = "post",
++  successToast,
++  toastOnError = true,
++  mutateKey,
++  mutatePathParams,
++}: {
++  path: string;
++  pathParams?: Record<string, any>;
++  method?: "post";
++  successToast?: string;
++  toastOnError?: boolean;
++  mutateKey?: string;
++  mutatePathParams?: Record<string, any>;
++}) {
++  const base = useBigBrainUrl();
++  const token = useAuthToken();
++  const { mutate } = useSWRConfig();
++  const pp = JSON.stringify(pathParams ?? {});
++  const mpp = JSON.stringify(mutatePathParams ?? {});
++  return useCallback(
++    async (body?: any): Promise<any> => {
++      if (!base) {
++        const e = new Error("The control-plane router URL is not configured.");
++        if (toastOnError) toast("error", e.message);
++        throw e;
++      }
++      let r: { ok: boolean; status: number; data: any; error: any };
++      try {
++        r = await bbFetch(base, token, {
++          method: method.toUpperCase(),
++          path: substitute(path, pathParams),
++          body: body !== undefined ? JSON.stringify(body) : undefined,
++        });
++      } catch (e: any) {
++        if (toastOnError) toast("error", e.message || "Network error");
++        throw e;
++      }
++      if (!r.ok) {
++        if (toastOnError)
++          toast("error", r.error?.message || `Request failed (${r.status})`);
++        const e: any = new Error(
++          r.error?.message || `Request failed (${r.status})`,
++        );
++        e.code = r.error?.code;
++        throw e;
++      }
++      if (successToast) toast("success", successToast);
++      if (mutateKey) {
++        const prefix = keyFor(mutateKey, mutatePathParams);
++        await mutate(
++          (k) => typeof k === "string" && k.startsWith(prefix),
++          undefined,
++          { revalidate: true },
++        );
++      }
++      return r.data;
++    },
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++    [
++      base,
++      token,
++      path,
++      pp,
++      method,
++      successToast,
++      toastOnError,
++      mutateKey,
++      mpp,
++      mutate,
++    ],
++  );
++}
+diff --git a/npm-packages/dashboard-common/src/lib/cloudApiShim.tsx b/npm-packages/dashboard-common/src/lib/cloudApiShim.tsx
+new file mode 100644
+index 000000000..97e98d1ff
+--- /dev/null
++++ b/npm-packages/dashboard-common/src/lib/cloudApiShim.tsx
+@@ -0,0 +1,144 @@
++import { useContext } from "react";
++import { DeploymentInfoContext } from "@common/lib/deploymentContext";
++import {
++  CloudBackupResponse,
++  DeploymentResponse,
++  ProjectDetails,
++} from "@common/lib/generatedApiStub";
++import { PlatformDeploymentResponse } from "@convex-dev/platform/managementApi";
++
++export function useCurrentDeployment() {
++  const { useCurrentDeployment: hook } = useContext(DeploymentInfoContext);
++  return hook();
++}
++
++export function useDeploymentByName(_name?: string) {
++  const { useCurrentDeployment: hook } = useContext(DeploymentInfoContext);
++  return hook();
++}
++
++export function useDeploymentRegions(_teamId?: number): {
++  regions: Array<{ name: string; displayName: string }> | undefined;
++} {
++  return { regions: undefined };
++}
++
++export function useCurrentTeam() {
++  const { useCurrentTeam: hook } = useContext(DeploymentInfoContext);
++  return hook();
++}
++
++export function useTeamMembers(
++  teamId?: number,
++): Array<{ id: number; name?: string | null; email: string }> | undefined {
++  const { useTeamMembers: hook } = useContext(DeploymentInfoContext);
++  const members = hook(teamId);
++  return members?.map((m) => ({ ...m, email: m.email ?? "" }));
++}
++
++export function useCurrentProject() {
++  const { useCurrentProject: hook } = useContext(DeploymentInfoContext);
++  return hook();
++}
++
++export function useProjectById(projectId?: number): {
++  project: ProjectDetails | null;
++  isLoading: boolean;
++} {
++  const { useCurrentProject: hook } = useContext(DeploymentInfoContext);
++  const current = hook();
++  if (current && current.id === projectId) {
++    return {
++      project: { ...current, teamId: (current as any).teamId ?? 0 },
++      isLoading: false,
++    };
++  }
++  return { project: null, isLoading: false };
++}
++
++export function useProfile():
++  | { id: number; name?: string | null; email?: string }
++  | undefined {
++  return undefined;
++}
++
++export function useHasProjectAdminPermissions(_projectId?: number): boolean {
++  const { useHasProjectAdminPermissions: hook } = useContext(
++    DeploymentInfoContext,
++  );
++  return hook(_projectId);
++}
++
++export function useHasCustomRolePermission(
++  _teamId: number | undefined,
++  _action: string,
++  _resource: unknown,
++  builtinAllowed: boolean,
++): boolean | undefined {
++  const { useHasProjectAdminPermissions: hook } = useContext(
++    DeploymentInfoContext,
++  );
++  const isAdmin = hook(undefined);
++  return isAdmin || builtinAllowed;
++}
++
++export function useListCloudBackupsIfAvailable(
++  _deployment: PlatformDeploymentResponse | undefined,
++): CloudBackupResponse[] | null | undefined {
++  return null;
++}
++
++export function deploymentResource(
++  _project: unknown,
++  _deployment: unknown,
++): undefined {
++  return undefined;
++}
++
++export function permissionDeniedTip(
++  message: string,
++  _action: string,
++): React.ReactNode {
++  return message;
++}
++
++export function usePostHog(): {
++  capture: (event: string, properties?: Record<string, unknown>) => void;
++} {
++  return { capture: () => {} };
++}
++
++export function getDeploymentLabel({
++  deployment,
++  whoseName,
++}: {
++  deployment: PlatformDeploymentResponse | DeploymentResponse;
++  whoseName: string | null;
++}): string {
++  if (
++    (deployment.deploymentType === "custom" ||
++      ("isDefault" in deployment &&
++        !deployment.isDefault &&
++        deployment.deploymentType !== "preview")) &&
++    "reference" in deployment &&
++    deployment.reference
++  ) {
++    return deployment.reference;
++  }
++  switch (deployment.deploymentType) {
++    case "prod":
++      return "Production";
++    case "preview":
++      return `Preview: ${(deployment as any).previewIdentifier || "Unknown"}`;
++    case "dev": {
++      if (deployment.kind === "local") {
++        return (deployment as any).deviceName ?? "Local";
++      }
++      return whoseName === null ? "Development (Cloud)" : `${whoseName}’s Dev`;
++    }
++    case "custom":
++      return "Custom";
++    default:
++      return "";
++  }
++}
 diff --git a/npm-packages/dashboard-common/src/lib/deploymentApi.ts b/npm-packages/dashboard-common/src/lib/deploymentApi.ts
 index a3b43aab0..6706bb95e 100644
 --- a/npm-packages/dashboard-common/src/lib/deploymentApi.ts
@@ -710,6 +3567,201 @@ index a3b43aab0..6706bb95e 100644
 +  const { useLogDeploymentEvent: hook } = useContext(DeploymentInfoContext);
 +  return hook();
 +}
+diff --git a/npm-packages/dashboard-common/src/lib/deploymentContext.tsx b/npm-packages/dashboard-common/src/lib/deploymentContext.tsx
+index b3fa1da89..0fdd97a34 100644
+--- a/npm-packages/dashboard-common/src/lib/deploymentContext.tsx
++++ b/npm-packages/dashboard-common/src/lib/deploymentContext.tsx
+@@ -35,6 +35,8 @@ export type DeploymentInfo = (
+     }
+   | { ok: false; errorCode: string; errorMessage: string }
+ ) & {
++  bigBrainUrl?: string;
++  bigBrainToken?: string;
+   addBreadcrumb: (breadcrumb: {
+     message?: string;
+     data?: {
+diff --git a/npm-packages/dashboard-common/src/lib/generatedApiStub.ts b/npm-packages/dashboard-common/src/lib/generatedApiStub.ts
+new file mode 100644
+index 000000000..7e260bc21
+--- /dev/null
++++ b/npm-packages/dashboard-common/src/lib/generatedApiStub.ts
+@@ -0,0 +1,60 @@
++export type CloudBackupResponse = {
++  id: number;
++  snapshotId?: string | null;
++  sourceDeploymentId: number;
++  sourceDeploymentName: string;
++  state: string;
++  requestedTime: number;
++  completedTime: number;
++  expirationTime: number;
++  includeStorage?: boolean;
++};
++
++export type PeriodicBackupConfig = {
++  sourceDeploymentId: number;
++  cronspec: string;
++  expirationDeltaSecs: number;
++  nextRun: number;
++  includeStorage: boolean;
++};
++
++export type TeamResponse = {
++  id: number;
++  name: string;
++  slug: string;
++};
++
++export type TeamEntitlementsResponse = {
++  periodicBackupsEnabled?: boolean;
++  maxCloudBackups?: number;
++  auditLogRetentionDays?: number;
++  logStreamingEnabled?: boolean;
++  streamingExportEnabled?: boolean;
++};
++
++export type ProjectDetails = {
++  id: number;
++  name: string;
++  slug: string;
++  teamId: number;
++};
++
++export type DeploymentResponse = {
++  id: number;
++  name: string;
++  deploymentType: "prod" | "dev" | "preview" | "custom";
++  projectId: number;
++  kind: string;
++  previewIdentifier?: string | null;
++  creator?: number | null;
++  isDefault?: boolean;
++  reference?: string;
++  region?: string;
++  deviceName?: string;
++};
++
++export type components = {
++  schemas: {
++    DeploymentId: number;
++  };
++};
+diff --git a/npm-packages/dashboard-self-hosted/src/pages/_app.tsx b/npm-packages/dashboard-self-hosted/src/pages/_app.tsx
+index 3f5b50c6b..ab769d324 100644
+--- a/npm-packages/dashboard-self-hosted/src/pages/_app.tsx
++++ b/npm-packages/dashboard-self-hosted/src/pages/_app.tsx
+@@ -76,6 +76,8 @@ function App({
+     deploymentUrl,
+     adminKey,
+     defaultListDeploymentsApiUrl,
++    bigBrainUrl,
++    bigBrainToken,
+     ...pageProps
+   },
+ }: AppProps & {
+@@ -83,6 +85,8 @@ function App({
+     deploymentUrl: string | null;
+     adminKey: string | null;
+     defaultListDeploymentsApiUrl: string | null;
++    bigBrainUrl: string | null;
++    bigBrainToken: string | null;
+   };
+ }) {
+   return (
+@@ -101,6 +105,8 @@ function App({
+               deploymentUrl={deploymentUrl}
+               adminKey={adminKey}
+               defaultListDeploymentsApiUrl={defaultListDeploymentsApiUrl}
++              bigBrainUrl={bigBrainUrl}
++              bigBrainToken={bigBrainToken}
+             >
+               <DeploymentApiProvider deploymentOverride="local">
+                 <WaitForDeploymentApi>
+@@ -164,6 +170,8 @@ App.getInitialProps = async ({ ctx }: { ctx: { req?: any } }) => {
+         deploymentUrl,
+         adminKey,
+         defaultListDeploymentsApiUrl: listDeploymentsApiUrl,
++        bigBrainUrl: process.env.NEXT_PUBLIC_BIG_BRAIN_URL ?? null,
++        bigBrainToken: process.env.NEXT_PUBLIC_BIG_BRAIN_TOKEN ?? null,
+       },
+     };
+   }
+@@ -177,12 +185,18 @@ App.getInitialProps = async ({ ctx }: { ctx: { req?: any } }) => {
+     window.__NEXT_DATA__?.props?.pageProps?.listDeploymentsApiUrl ?? null;
+   const clientSideSelectedDeploymentName =
+     window.__NEXT_DATA__?.props?.pageProps?.selectedDeploymentName ?? null;
++  const clientSideBigBrainUrl =
++    window.__NEXT_DATA__?.props?.pageProps?.bigBrainUrl ?? null;
++  const clientSideBigBrainToken =
++    window.__NEXT_DATA__?.props?.pageProps?.bigBrainToken ?? null;
+   return {
+     pageProps: {
+       deploymentUrl: clientSideDeploymentUrl ?? null,
+       adminKey: clientSideAdminKey ?? null,
+       defaultListDeploymentsApiUrl: clientSideListDeploymentsApiUrl ?? null,
+       selectedDeploymentName: clientSideSelectedDeploymentName ?? null,
++      bigBrainUrl: clientSideBigBrainUrl ?? null,
++      bigBrainToken: clientSideBigBrainToken ?? null,
+     },
+   };
+ };
+@@ -319,11 +333,15 @@ function DeploymentInfoProvider({
+   deploymentUrl,
+   adminKey,
+   defaultListDeploymentsApiUrl,
++  bigBrainUrl,
++  bigBrainToken,
+ }: {
+   children: React.ReactNode;
+   deploymentUrl: string | null;
+   adminKey: string | null;
+   defaultListDeploymentsApiUrl: string | null;
++  bigBrainUrl: string | null;
++  bigBrainToken: string | null;
+ }) {
+   const [listDeploymentsApiUrl, setListDeploymentsApiUrl] = useState<
+     string | null
+@@ -393,13 +411,15 @@ function DeploymentInfoProvider({
+         ok: true,
+         adminKey: storedAdminKey,
+         deploymentUrl: storedDeploymentUrl,
++        bigBrainUrl: bigBrainUrl ?? undefined,
++        bigBrainToken: bigBrainToken ?? undefined,
+         useIsOperationAllowed: (operation: string) => {
+           // Empty allowedOps means all operations are allowed (full admin key).
+           if (allowedOps.length === 0) return true;
+           return allowedOps.includes(operation);
+         },
+       }) as DeploymentInfo,
+-    [storedAdminKey, storedDeploymentUrl, allowedOps],
++    [storedAdminKey, storedDeploymentUrl, bigBrainUrl, bigBrainToken, allowedOps],
+   );
+   const [mounted, setMounted] = useState(false);
+   useEffect(() => setMounted(true), []);
+diff --git a/npm-packages/dashboard-self-hosted/src/pages/index.tsx b/npm-packages/dashboard-self-hosted/src/pages/index.tsx
+index cd4843ab6..9f510a67a 100644
+--- a/npm-packages/dashboard-self-hosted/src/pages/index.tsx
++++ b/npm-packages/dashboard-self-hosted/src/pages/index.tsx
+@@ -1,17 +1,5 @@
+-import { HealthView } from "@common/features/health/components/HealthView";
++import { HealthWithInsights } from "@common/features/health/components/HealthWithInsights";
+ 
+ export default function Page() {
+-  return (
+-    <HealthView
+-      header={<h3 className="sticky top-0 mx-6 pt-4 pb-2">Health</h3>}
+-      PagesWrapper={({ children }) => (
+-        <div className="flex min-h-0 grow">{children}</div>
+-      )}
+-      PageWrapper={({ children }) => (
+-        <div className="scrollbar max-w-full shrink-0 grow overflow-y-auto px-6 pb-4">
+-          {children}
+-        </div>
+-      )}
+-    />
+-  );
++  return <HealthWithInsights />;
+ }
 diff --git a/npm-packages/dashboard-self-hosted/src/pages/settings/snapshots.tsx b/npm-packages/dashboard-self-hosted/src/pages/settings/snapshots.tsx
 new file mode 100644
 index 000000000..054b1a708

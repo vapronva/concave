@@ -45,6 +45,14 @@ ha:
   leaderPriority: 100
   followerPriority: 0
 
+insights:
+  enabled: false
+  sinkUrl: ""
+  bigbrainUrl: ""
+  tokenRef:
+    name: ""
+    key: usage-token
+
 funrun:
   enabled: true
   replicas: 2

@@ -107,6 +107,12 @@ spec:
               value: {{ $b.failback.stability | quote }}
             - name: BIGBRAIN_FAILBACK_WARMTH_LAG
               value: {{ int64 $b.failback.warmthLag | quote }}
+            {{- with $b.usageToken }}
+            - name: BIGBRAIN_USAGE_TOKEN
+              value: {{ . | quote }}
+            - name: INSIGHTS_RING_CAP
+              value: {{ $b.insightsRingCap | quote }}
+            {{- end }}
           ports:
             - { name: http, containerPort: {{ trimPrefix ":" $b.listen }} }
           readinessProbe:
@@ -135,4 +141,29 @@ spec:
     {{- include "convex.componentSelectorLabels" (dict "ctx" . "component" "bigbrain") | nindent 4 }}
   ports:
     - { name: http, port: {{ trimPrefix ":" $b.listen }}, targetPort: http }
+
+{{- with $b.dashboardHost }}
+---
+apiVersion: v1
+kind: ConfigMap
+
+metadata:
+  name: {{ include "convex.bigbrainName" $ }}-ckic
+  namespace: {{ $.Values.namespace.system }}
+  labels:
+    ckic.cmld.ru/aggregate: "true"
+    {{- include "convex.componentLabels" (dict "ctx" $ "component" "bigbrain") | nindent 4 }}
+
+data:
+  Caddyfile: |
+    {{ . }}:443 {
+      import basic-compression-set
+      import default-headers-set-custom
+      header * { X-Robots-Tag "noindex, noarchive, nofollow" }
+      @dash path /api/dashboard/*
+      handle @dash {
+        import reverse-proxy-xri-hd http://{{ include "convex.bigbrainName" $ }}.{{ $.Values.namespace.system }}.svc.cluster.local:{{ trimPrefix ":" $b.listen }}
+      }
+    }
+{{- end }}
 {{- end }}

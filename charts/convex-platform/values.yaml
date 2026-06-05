@@ -35,6 +35,9 @@ bigbrain:
     repository: vapronva/concave/bigbrain
     tag: ""
   deployments: ""
+  usageToken: ""
+  insightsRingCap: 50000
+  dashboardHost: ""
   reconcileInterval: 2s
   promoteDebounce: 3
   failback:

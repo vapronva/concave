@@ -47,6 +47,15 @@ spec:
                 secretKeyRef:
                   name: {{ include "convex.dashboardSecretName" . }}
                   key: {{ .Values.dashboard.adminKeyRef.key }}
+            {{- if .Values.insights.enabled }}
+            - name: NEXT_PUBLIC_BIG_BRAIN_URL
+              value: {{ required "insights.bigbrainUrl is required when insights.enabled" .Values.insights.bigbrainUrl | quote }}
+            - name: NEXT_PUBLIC_BIG_BRAIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "convex.insightsTokenSecretName" . }}
+                  key: {{ .Values.insights.tokenRef.key }}
+            {{- end }}
           readinessProbe:
             httpGet: { path: /, port: http }
             initialDelaySeconds: 5
