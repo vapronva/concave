@@ -64,26 +64,19 @@ func TestServer_Leader(t *testing.T) {
 	}
 }
 
-func TestServer_ListAndGet(t *testing.T) {
+func TestServer_RegistryListEndpointsRemoved(t *testing.T) {
 	t.Parallel()
 	reg, h := newTestServer(t)
 	reg.EnsureDeployment("dev", "convex-dev")
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/registry/deployments", nil))
-	if rr.Code != http.StatusOK {
-		t.Fatalf("list: want 200, got %d", rr.Code)
-	}
-	var all []registry.Deployment
-	if err := json.Unmarshal(rr.Body.Bytes(), &all); err != nil {
-		t.Fatalf("decode list: %v", err)
-	}
-	if len(all) != 1 || all[0].Name != "dev" {
-		t.Fatalf("unexpected list: %+v", all)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("GET /registry/deployments should be unrouted: want 404, got %d", rr.Code)
 	}
 	rr = httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/registry/deployments/dev", nil))
-	if rr.Code != http.StatusOK {
-		t.Fatalf("get: want 200, got %d", rr.Code)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("GET /registry/deployments/{name} should be unrouted: want 404, got %d", rr.Code)
 	}
 }
 

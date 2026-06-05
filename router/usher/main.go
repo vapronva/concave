@@ -29,11 +29,11 @@ const (
 	resolveTimeout       = 3 * time.Second
 	resolveInterval      = 5 * time.Second
 	readHeaderTimeout    = 10 * time.Second
+	idleTimeout          = 120 * time.Second
 	shutdownTimeout      = 10 * time.Second
 	streamBackoffInitial = 1 * time.Second
 	streamBackoffCap     = 15 * time.Second
-	pathPromote          = "/instance/promote"
-	pathDemote           = "/instance/demote"
+	instancePrefix       = "/instance"
 	sitePort             = "3211"
 	routesPerDeployment  = 2
 )
@@ -56,12 +56,6 @@ type leadership struct {
 }
 
 type leaderResponse struct {
-	Name      string `json:"name"`
-	LeaderPod string `json:"leaderPod"`
-	LeaderURL string `json:"leaderUrl"`
-}
-
-type leaderEvent struct {
 	Name      string `json:"name"`
 	LeaderPod string `json:"leaderPod"`
 	LeaderURL string `json:"leaderUrl"`
@@ -92,7 +86,8 @@ func newReverseProxy(u *url.URL) *httputil.ReverseProxy {
 		},
 		FlushInterval: -1,
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
-			http.Error(w, "upstream error: "+err.Error(), http.StatusBadGateway)
+			log.Printf("usher: upstream error: %v", err)
+			http.Error(w, "bad gateway", http.StatusBadGateway)
 		},
 	}
 	return rp
@@ -242,7 +237,7 @@ func (t *tracker) consumeStream(ctx context.Context, u string) {
 		if !ok {
 			continue
 		}
-		var ev leaderEvent
+		var ev leaderResponse
 		if json.Unmarshal([]byte(data), &ev) != nil {
 			continue
 		}
@@ -251,22 +246,19 @@ func (t *tracker) consumeStream(ctx context.Context, u string) {
 }
 
 func isBlockedControlPath(p string) bool {
-	switch path.Clean("/" + strings.TrimSuffix(p, "/")) {
-	case pathPromote, pathDemote:
-		return true
-	default:
-		return false
-	}
+	c := path.Clean("/" + strings.TrimSuffix(p, "/"))
+	return c == instancePrefix || strings.HasPrefix(c, instancePrefix+"/") || strings.HasPrefix(c, instancePrefix+"_")
 }
 
 func (t *tracker) serveHTTP(w http.ResponseWriter, r *http.Request, site bool) {
-	if isBlockedControlPath(r.URL.Path) {
+	if !site && isBlockedControlPath(r.URL.Path) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
 	p := t.currentLeader(site)
 	if p == nil {
-		http.Error(w, "no leader available for "+t.host, http.StatusServiceUnavailable)
+		log.Printf("usher: %s no leader available", t.host)
+		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	mw := &misdirectWriter{ResponseWriter: w}
@@ -393,7 +385,7 @@ func main() {
 		rt.tracker.serveHTTP(w, r, rt.site)
 	})
 	log.Printf("usher listening on %s, %d deployment(s), bigbrain=%q", *addr, len(cfg.Deployments), *bigbrainURL)
-	srv := &http.Server{Addr: *addr, Handler: mux, ReadHeaderTimeout: readHeaderTimeout}
+	srv := &http.Server{Addr: *addr, Handler: mux, ReadHeaderTimeout: readHeaderTimeout, IdleTimeout: idleTimeout}
 	go func() {
 		if serr := srv.ListenAndServe(); serr != nil && !errors.Is(serr, http.ErrServerClosed) {
 			log.Printf("usher: serve: %v", serr)

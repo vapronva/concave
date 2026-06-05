@@ -67,7 +67,7 @@ type Call struct {
 
 type Insights struct {
 	memMu sync.Mutex
-	mem   []Row
+	mem   map[string][]Row
 	cap   int
 }
 
@@ -75,7 +75,7 @@ func New(ringCap int) *Insights {
 	if ringCap <= 0 {
 		ringCap = defaultRingCap
 	}
-	return &Insights{cap: ringCap}
+	return &Insights{mem: make(map[string][]Row), cap: ringCap}
 }
 
 type AnyEvent map[string]map[string]any
@@ -98,26 +98,27 @@ func (i *Insights) Ingest(_ context.Context, deployment string, events []AnyEven
 func (i *Insights) store(r Row) {
 	i.memMu.Lock()
 	defer i.memMu.Unlock()
-	i.mem = append(i.mem, r)
-	if len(i.mem) > i.cap {
-		i.mem = i.mem[len(i.mem)-i.cap:]
+	i.mem[r.Deployment] = append(i.mem[r.Deployment], r)
+	if dep := i.mem[r.Deployment]; len(dep) > i.cap {
+		i.mem[r.Deployment] = dep[len(dep)-i.cap:]
 	}
 }
 
 func (i *Insights) MemLen() int {
 	i.memMu.Lock()
 	defer i.memMu.Unlock()
-	return len(i.mem)
+	total := 0
+	for _, dep := range i.mem {
+		total += len(dep)
+	}
+	return total
 }
 
 func (i *Insights) rows(deployment string, fromMs, toMs int64) []Row {
 	i.memMu.Lock()
 	defer i.memMu.Unlock()
 	var out []Row
-	for _, r := range i.mem {
-		if r.Deployment != deployment {
-			continue
-		}
+	for _, r := range i.mem[deployment] {
 		ms := r.TS.UnixMilli()
 		if ms >= fromMs && ms < toMs {
 			out = append(out, r)

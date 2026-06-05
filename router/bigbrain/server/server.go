@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"git.horse/vapronva/concave/router/bigbrain/insights"
@@ -19,13 +20,15 @@ const (
 	keepaliveInterval = 25 * time.Second
 	usageBodyLimit    = 4 * 1024 * 1024
 	bearerPrefixLen   = len("bearer ")
+	maxLeaderStreams  = 256
 )
 
 type Server struct {
-	reg        *registry.Registry
-	ins        *insights.Insights
-	usageToken string
-	log        *slog.Logger
+	reg           *registry.Registry
+	ins           *insights.Insights
+	usageToken    string
+	log           *slog.Logger
+	leaderStreams atomic.Int64
 }
 
 func New(reg *registry.Registry, ins *insights.Insights, usageToken string, log *slog.Logger) *Server {
@@ -41,8 +44,6 @@ func (s *Server) Handler() http.Handler {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
-	mux.HandleFunc("GET /registry/deployments", s.handleListDeployments)
-	mux.HandleFunc("GET /registry/deployments/{name}", s.handleGetDeployment)
 	mux.HandleFunc("GET /registry/deployments/{name}/leader", s.handleGetLeader)
 	mux.HandleFunc("GET /registry/deployments/{name}/leader-stream", s.handleLeaderStream)
 	mux.HandleFunc("POST /internal/usage", s.handleUsageIngest)
@@ -84,7 +85,8 @@ func (s *Server) handleUsageIngest(w http.ResponseWriter, r *http.Request) {
 	}
 	kept, err := s.ins.Ingest(r.Context(), body.Deployment, body.Events)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		s.log.ErrorContext(r.Context(), "usage ingest failed", "deployment", body.Deployment, "err", err)
+		writeErr(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]int{"ingested": kept})
@@ -100,7 +102,7 @@ func (s *Server) handleUsageQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
-	dep := s.resolveUsageDeployment(q.Get("deploymentName"))
+	dep := q.Get("deploymentName")
 	if dep == "" {
 		writeErr(w, http.StatusBadRequest, "deploymentName is required")
 		return
@@ -124,22 +126,11 @@ func (s *Server) handleUsageQuery(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		s.log.ErrorContext(r.Context(), "usage query failed", "deployment", dep, "err", err)
+		writeErr(w, http.StatusInternalServerError, "query failed")
 		return
 	}
 	writeJSON(w, http.StatusOK, out)
-}
-
-func (s *Server) resolveUsageDeployment(nameParam string) string {
-	if nameParam == "" {
-		return ""
-	}
-	for _, n := range s.reg.Names() {
-		if n == nameParam {
-			return n
-		}
-	}
-	return nameParam
 }
 
 func bearerToken(authHeader string) string {
@@ -152,20 +143,6 @@ func bearerToken(authHeader string) string {
 	}
 	rest := strings.TrimLeft(h[bearerPrefixLen-1:], " \t")
 	return rest
-}
-
-func (s *Server) handleListDeployments(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, s.reg.SnapshotAll())
-}
-
-func (s *Server) handleGetDeployment(w http.ResponseWriter, r *http.Request) {
-	name := r.PathValue("name")
-	d, ok := s.reg.Snapshot(name)
-	if !ok {
-		writeErr(w, http.StatusNotFound, "unknown deployment "+name)
-		return
-	}
-	writeJSON(w, http.StatusOK, d)
 }
 
 type leaderResponse struct {
@@ -190,6 +167,12 @@ func (s *Server) handleGetLeader(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleLeaderStream(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
+	if s.leaderStreams.Add(1) > maxLeaderStreams {
+		s.leaderStreams.Add(-1)
+		writeErr(w, http.StatusServiceUnavailable, "too many leader streams")
+		return
+	}
+	defer s.leaderStreams.Add(-1)
 	ch, cancel, ok := s.reg.Subscribe(name)
 	if !ok {
 		writeErr(w, http.StatusNotFound, "unknown deployment "+name)
@@ -250,11 +233,13 @@ func logging(log *slog.Logger, next http.Handler) http.Handler {
 		start := time.Now()
 		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(sw, r)
+		level := slog.LevelInfo
 		if strings.HasSuffix(r.URL.Path, "/leader") || strings.HasSuffix(r.URL.Path, "/leader-stream") {
-			return
+			level = slog.LevelDebug
 		}
-		log.InfoContext(
+		log.Log(
 			r.Context(),
+			level,
 			"http",
 			"method",
 			r.Method,

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -13,10 +14,16 @@ import (
 func TestIsBlockedControlPath(t *testing.T) {
 	t.Parallel()
 	blocked := []string{
+		"/instance",
+		"/instance/",
 		"/instance/promote",
 		"/instance/demote",
 		"/instance/promote/",
 		"/instance/demote/",
+		"/instance/leadership",
+		"/instance/foo",
+		"/instance/promotething",
+		"/instance_version",
 		"/instance/./promote",
 		"/instance/../instance/promote",
 	}
@@ -26,12 +33,11 @@ func TestIsBlockedControlPath(t *testing.T) {
 		}
 	}
 	allowed := []string{
-		"/instance/leadership",
 		"/api/query",
 		"/sync",
 		"/",
-		"/instance/promotething",
-		"/instance",
+		"/instances",
+		"/instancex",
 	}
 	for _, p := range allowed {
 		if isBlockedControlPath(p) {
@@ -63,7 +69,9 @@ func TestServeHTTP_RejectsActuationPaths(t *testing.T) {
 		{http.MethodPost, "/instance/demote", http.StatusNotFound, false, ""},
 		{http.MethodGet, "/instance/promote", http.StatusNotFound, false, ""},
 		{http.MethodPost, "/instance/promote/", http.StatusNotFound, false, ""},
-		{http.MethodGet, "/instance/leadership", http.StatusOK, true, "upstream-reached"},
+		{http.MethodGet, "/instance/leadership", http.StatusNotFound, false, ""},
+		{http.MethodGet, "/instance/foo", http.StatusNotFound, false, ""},
+		{http.MethodGet, "/instance_version", http.StatusNotFound, false, ""},
 		{http.MethodPost, "/api/mutation", http.StatusOK, true, "upstream-reached"},
 	}
 	for _, c := range cases {
@@ -87,6 +95,38 @@ func TestServeHTTP_RejectsActuationPaths(t *testing.T) {
 		}
 		if c.wantBodyContains != "" && !strings.Contains(rr.Body.String(), c.wantBodyContains) {
 			t.Errorf("%s %s: body %q does not contain %q", c.method, c.path, rr.Body.String(), c.wantBodyContains)
+		}
+	}
+}
+
+func TestServeHTTP_SiteRoutePassesControlPaths(t *testing.T) {
+	t.Parallel()
+	var upstreamHits []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits = append(upstreamHits, r.URL.Path)
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "site-reached")
+	}))
+	defer upstream.Close()
+	u, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("parse upstream url: %v", err)
+	}
+	tr := &tracker{host: "api.convex.localtest.me", siteHost: "convex.localtest.me", client: &http.Client{}}
+	tr.siteProxy = newReverseProxy(u)
+	for _, p := range []string{"/instance/leadership", "/instance/promote", "/instance_version", "/arbitrary/action"} {
+		upstreamHits = nil
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, p, nil)
+		tr.serveHTTP(rr, req, true)
+		if rr.Code != http.StatusOK {
+			t.Errorf("site %s: want status %d, got %d", p, http.StatusOK, rr.Code)
+		}
+		if len(upstreamHits) == 0 {
+			t.Errorf("site %s: upstream not reached", p)
+		}
+		if !strings.Contains(rr.Body.String(), "site-reached") {
+			t.Errorf("site %s: body %q does not contain %q", p, rr.Body.String(), "site-reached")
 		}
 	}
 }

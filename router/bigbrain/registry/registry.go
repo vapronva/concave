@@ -117,16 +117,6 @@ func (r *Registry) Snapshot(name string) (Deployment, bool) {
 	return cloneDeployment(d), true
 }
 
-func (r *Registry) SnapshotAll() []Deployment {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	out := make([]Deployment, 0, len(r.deps))
-	for _, d := range r.deps {
-		out = append(out, cloneDeployment(d))
-	}
-	return out
-}
-
 func (r *Registry) Leader(name string) (string, string, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

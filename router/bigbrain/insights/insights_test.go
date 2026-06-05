@@ -56,6 +56,65 @@ func TestRingBufferCap(t *testing.T) {
 	}
 }
 
+func TestRingBufferCapPerDeployment(t *testing.T) {
+	t.Parallel()
+	i := insights.New(3)
+	floodA := func() {
+		_, _ = i.Ingest(context.Background(), "A", []insights.AnyEvent{
+			{"FunctionCall": map[string]any{"is_occ": true, "udf_id": "fa", "id": "xa"}},
+		})
+	}
+	_, _ = i.Ingest(context.Background(), "B", []insights.AnyEvent{
+		{"FunctionCall": map[string]any{
+			"is_occ": true, "udf_id": "fb", "id": "xb", "request_id": "rb",
+			"component_path": "_default", "occ_table_name": "tb", "status": "retried",
+		}},
+	})
+	for range 50 {
+		floodA()
+	}
+	if i.MemLen() != 4 {
+		t.Errorf("MemLen=%d want 4 (A capped at 3 + B's 1)", i.MemLen())
+	}
+	today := time.Now().UTC().Format("2006-01-02")
+	out, err := i.Query(context.Background(), "B", today, today)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 1 || out[0][1] != "fb" {
+		t.Fatalf("flooding A evicted B's row: %v", out)
+	}
+	outA, err := i.Query(context.Background(), "A", today, today)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(outA) != 1 {
+		t.Fatalf("expected 1 grouped row for A, got %v", outA)
+	}
+	if !strings.Contains(outA[0][3].(string), `"occCalls":3`) {
+		t.Errorf("A should be capped at 3 rows: %s", outA[0][3])
+	}
+}
+
+func TestQueryIsolatedPerDeployment(t *testing.T) {
+	t.Parallel()
+	i := insights.New(100)
+	_, _ = i.Ingest(context.Background(), "A", []insights.AnyEvent{
+		{"FunctionCall": map[string]any{
+			"is_occ": true, "udf_id": "fa", "id": "xa",
+			"component_path": "_default", "status": "retried",
+		}},
+	})
+	today := time.Now().UTC().Format("2006-01-02")
+	out, err := i.Query(context.Background(), "B", today, today)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 0 {
+		t.Fatalf("deployment B must not see A's rows: %v", out)
+	}
+}
+
 func TestQueryDateValidation(t *testing.T) {
 	t.Parallel()
 	i := insights.New(10)
