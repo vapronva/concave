@@ -121,12 +121,14 @@ spec:
             {{- if $b.usageToken }}
             - name: BIGBRAIN_USAGE_TOKEN
               value: {{ $b.usageToken | quote }}
-            {{- else with $b.usageTokenRef.name }}
+            {{- else }}
+            {{- with $b.usageTokenRef.name }}
             - name: BIGBRAIN_USAGE_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: {{ . }}
                   key: {{ default "usage-token" $b.usageTokenRef.key }}
+            {{- end }}
             {{- end }}
             - name: INSIGHTS_RING_CAP
               value: {{ $b.insightsRingCap | quote }}
