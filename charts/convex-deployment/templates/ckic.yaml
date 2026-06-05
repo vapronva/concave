@@ -13,14 +13,18 @@ data:
     {{ required "hosts.api is required" .Values.hosts.api }}:443 {
       import basic-compression-set
       import default-headers-set-custom
-      header * { X-Robots-Tag "noindex, noarchive, nofollow" }
+      header * {
+        X-Robots-Tag "noindex, noarchive, nofollow"
+      }
       import reverse-proxy-xri-hd http://{{ .Values.ingress.usherService.name }}.{{ .Values.ingress.usherService.namespace }}.svc.cluster.local:{{ .Values.ingress.usherService.port }}
     }
     {{- with .Values.hosts.site }}
     {{ . }}:443 {
       import basic-compression-set
       import default-headers-set-custom
-      header * { X-Robots-Tag "noindex, noarchive, nofollow" }
+      header * {
+        X-Robots-Tag "noindex, noarchive, nofollow"
+      }
       import reverse-proxy-xri-hd http://{{ $.Values.ingress.usherService.name }}.{{ $.Values.ingress.usherService.namespace }}.svc.cluster.local:{{ $.Values.ingress.usherService.port }}
     }
     {{- end }}
@@ -28,7 +32,9 @@ data:
     {{ . }}:443 {
       import basic-compression-set
       import default-headers-set-custom
-      header * { X-Robots-Tag "noindex, noarchive, nofollow" }
+      header * {
+        X-Robots-Tag "noindex, noarchive, nofollow"
+      }
       import reverse-proxy-xri-hd http://{{ include "convex.dashboardName" $ }}.{{ $.Release.Namespace }}.svc.cluster.local:{{ $.Values.dashboard.port }}
     }
     {{- end }}

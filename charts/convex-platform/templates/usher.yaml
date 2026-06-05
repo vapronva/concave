@@ -70,8 +70,8 @@ spec:
           image: {{ include "convex-platform.image" (dict "ctx" . "spec" $u.image) }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
-            - "--config=/etc/usher/config.json"
-            - "--addr={{ $u.listen }}"
+            - --config=/etc/usher/config.json
+            - --addr={{ $u.listen }}
           {{- $bbUrl := $u.bigbrainUrl }}
           {{- if and (not $bbUrl) .Values.bigbrain.enabled }}
           {{- $bbUrl = printf "http://%s.%s.svc.cluster.local:%s" (include "convex.bigbrainName" .) .Values.namespace.system (trimPrefix ":" .Values.bigbrain.listen) }}
@@ -93,6 +93,16 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
       volumes:
         - name: config
           configMap:

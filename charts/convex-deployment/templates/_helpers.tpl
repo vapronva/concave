@@ -141,6 +141,25 @@ imagePullSecrets:
   value: "https://{{ required "hosts.api is required" .Values.hosts.api }}"
 - name: CONVEX_SITE_ORIGIN
   value: "https://{{ required "hosts.site is required" .Values.hosts.site }}"
+{{- with .Values.hosts.dashboard }}
+- name: CONVEX_DASHBOARD_ORIGIN
+  value: "https://{{ . }}"
+{{- end }}
+{{ include "convex.controlPlaneEnv" . }}
+{{- end -}}
+
+{{- define "convex.controlPlaneEnabled" -}}
+{{- if .Values.controlPlane.tokenSecretRef.name -}}true{{- end -}}
+{{- end -}}
+
+{{- define "convex.controlPlaneEnv" -}}
+{{- if eq (include "convex.controlPlaneEnabled" .) "true" }}
+- name: CONVEX_CONTROL_PLANE_TOKEN
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.controlPlane.tokenSecretRef.name }}
+      key: {{ default "control-plane-token" .Values.controlPlane.tokenSecretRef.key }}
+{{- end }}
 {{- end -}}
 
 {{- define "convex.funrunAddr" -}}
@@ -152,11 +171,14 @@ http://{{ include "convex.funrunName" . }}.{{ .Release.Namespace }}.svc.cluster.
 {{- end -}}
 
 {{- define "convex.usageSinkEnv" -}}
+{{- $sink := required "insights.sinkUrl is required when insights.enabled" .Values.insights.sinkUrl -}}
 - name: CONVEX_USAGE_SINK_URL
-  value: {{ required "insights.sinkUrl is required when insights.enabled" .Values.insights.sinkUrl | quote }}
+  value: {{ $sink | quote }}
 - name: CONVEX_USAGE_SINK_TOKEN
   valueFrom:
     secretKeyRef:
       name: {{ include "convex.insightsTokenSecretName" . }}
       key: {{ .Values.insights.tokenRef.key }}
+- name: CONVEX_INSIGHTS_QUERY_URL
+  value: {{ $sink | trimSuffix "/internal/usage" | quote }}
 {{- end -}}

@@ -69,7 +69,7 @@ spec:
                   key: {{ .Values.instance.secretRef.key }}
             {{- include "convex.pgEnv" . | nindent 12 }}
             - name: FUNRUN_DB
-              value: "postgres-v5"
+              value: postgres-v5
             {{- if eq .Values.db.sslMode "disable" }}
             - name: FUNRUN_DO_NOT_REQUIRE_SSL
               value: "true"

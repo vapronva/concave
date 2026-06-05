@@ -48,10 +48,14 @@ ha:
 insights:
   enabled: false
   sinkUrl: ""
-  bigbrainUrl: ""
   tokenRef:
     name: ""
     key: usage-token
+
+controlPlane:
+  tokenSecretRef:
+    name: ""
+    key: control-plane-token
 
 funrun:
   enabled: true
