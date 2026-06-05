@@ -1,0 +1,34 @@
+---
+apiVersion: v1
+kind: ConfigMap
+
+metadata:
+  name: {{ include "convex.ckicName" . }}
+  labels:
+    ckic.cmld.ru/aggregate: "true"
+    {{- include "convex.labels" . | nindent 4 }}
+
+data:
+  Caddyfile: |
+    {{ required "hosts.api is required" .Values.hosts.api }}:443 {
+      import basic-compression-set
+      import default-headers-set-custom
+      header * { X-Robots-Tag "noindex, noarchive, nofollow" }
+      import reverse-proxy-xri-hd http://{{ .Values.ingress.usherService.name }}.{{ .Values.ingress.usherService.namespace }}.svc.cluster.local:{{ .Values.ingress.usherService.port }}
+    }
+    {{- with .Values.hosts.site }}
+    {{ . }}:443 {
+      import basic-compression-set
+      import default-headers-set-custom
+      header * { X-Robots-Tag "noindex, noarchive, nofollow" }
+      import reverse-proxy-xri-hd http://{{ include "convex.leaderName" $ }}.{{ $.Release.Namespace }}.svc.cluster.local:3211
+    }
+    {{- end }}
+    {{- with .Values.hosts.dashboard }}
+    {{ . }}:443 {
+      import basic-compression-set
+      import default-headers-set-custom
+      header * { X-Robots-Tag "noindex, noarchive, nofollow" }
+      import reverse-proxy-xri-hd http://{{ include "convex.dashboardName" $ }}.{{ $.Release.Namespace }}.svc.cluster.local:{{ $.Values.dashboard.port }}
+    }
+    {{- end }}

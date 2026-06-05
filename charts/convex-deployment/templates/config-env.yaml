@@ -1,0 +1,13 @@
+---
+apiVersion: v1
+kind: ConfigMap
+
+metadata:
+  name: {{ include "convex.envConfigName" . }}
+  labels:
+    {{- include "convex.labels" . | nindent 4 }}
+
+data:
+  RUST_LOG: "info"
+  DISABLE_BEACON: "true"
+  STORAGE_DIR: {{ include "convex.storageDir" . | quote }}

@@ -1,0 +1,99 @@
+---
+labelPrefix: convex
+
+instance:
+  name: ""
+  secretRef:
+    name: ""
+    key: instance-secret
+
+image:
+  registry: docker.horse
+  repository: vapronva/concave/backend
+  tag: ""
+  pullPolicy: IfNotPresent
+  dashboard:
+    repository: vapronva/concave/dashboard
+    tag: ""
+
+db:
+  host: ""
+  port: 5432
+  user: postgres
+  sslMode: disable
+  passwordRef:
+    name: ""
+    key: db-password
+
+storage:
+  mode: nfs
+  nfs:
+    server: ""
+    path: ""
+    mountPath: /convex/data
+
+hosts:
+  api: ""
+  site: ""
+  dashboard: ""
+
+ha:
+  standbyReplicas: 1
+  leaderNode: bho-core-v2
+  followerNode: unnecessary-addition
+  preferredNode: bho-core-v2
+  leaderPriority: 100
+  followerPriority: 0
+
+funrun:
+  enabled: true
+  replicas: 2
+  listen: ":8090"
+  hpa:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    cpuAverageUtilization: 70
+
+dashboard:
+  enabled: true
+  port: 6791
+  adminKeyRef:
+    name: ""
+    key: admin-key
+
+ingress:
+  usherService:
+    name: usher
+    namespace: convex-system
+    port: 8080
+
+resources:
+  leader:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: "6"
+      memory: 6Gi
+  follower:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 3Gi
+  funrun:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "4"
+      memory: 4Gi
+  dashboard:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "2"
+      memory: 1Gi

@@ -28,7 +28,7 @@ include:
     inputs:
       job_name: hadolint (dashboard)
       dockerfile_path: backend/Dockerfile.dashboard
-      ignore_rules: DL3008,DL3015
+      ignore_rules: DL3008,DL3015,DL3059
   - component: $CI_SERVER_FQDN/ci/docker/lint@4
     inputs:
       job_name: hadolint (usher)
@@ -89,3 +89,13 @@ include:
       rules_changes:
         - router/bigbrain/**/*
         - .gitlab-ci.yml
+  - component: $CI_SERVER_FQDN/ci/helm-chart/lint@1
+    inputs:
+      job_name: validate + lint (helm charts)
+      chart_dirs: charts
+      ct_args: --validate-chart-schema --validate-yaml --debug --validate-maintainers=false
+  - component: $CI_SERVER_FQDN/ci/helm-chart/publish@1
+    inputs:
+      job_name: publish helm charts to gitlab registry
+      charts_glob: charts/*
+      lint_job_name: validate + lint (helm charts)

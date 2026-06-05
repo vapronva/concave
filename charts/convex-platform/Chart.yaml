@@ -1,0 +1,13 @@
+---
+apiVersion: v2
+type: application
+
+name: convex-platform
+
+version: 0.1.0
+appVersion: latest
+
+maintainers:
+  - name: Vladimir Malinovskiy
+    email: git@vprw.ru
+    url: https://vapronva.pw

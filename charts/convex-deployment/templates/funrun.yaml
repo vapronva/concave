@@ -1,0 +1,133 @@
+{{- if .Values.funrun.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+
+metadata:
+  name: {{ include "convex.funrunName" . }}
+  labels:
+    {{- include "convex.componentLabels" (dict "ctx" . "component" "funrun") | nindent 4 }}
+
+spec:
+  {{- if not .Values.funrun.hpa.enabled }}
+  replicas: {{ .Values.funrun.replicas }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "convex.componentSelectorLabels" (dict "ctx" . "component" "funrun") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "convex.componentLabels" (dict "ctx" . "component" "funrun") | nindent 8 }}
+        {{- include "convex.componentDiscoveryLabel" (dict "ctx" . "component" "funrun") | nindent 8 }}
+    spec:
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 1
+              preference:
+                matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - {{ .Values.ha.preferredNode }}
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 1
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/component: funrun
+      containers:
+        - name: funrun
+          image: {{ include "convex.image" (dict "ctx" . "spec" .Values.image) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/convex/convex-funrun"]
+          ports:
+            - { name: grpc, containerPort: {{ trimPrefix ":" .Values.funrun.listen }} }
+          env:
+            - name: FUNRUN_LISTEN
+              value: "0.0.0.0:{{ trimPrefix ":" .Values.funrun.listen }}"
+            - name: FUNRUN_INSTANCE_NAME
+              value: {{ required "instance.name is required" .Values.instance.name | quote }}
+            - name: FUNRUN_INSTANCE_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "convex.instanceSecretName" . }}
+                  key: {{ .Values.instance.secretRef.key }}
+            {{- include "convex.pgEnv" . | nindent 12 }}
+            - name: FUNRUN_DB
+              value: "postgres-v5"
+            {{- if eq .Values.db.sslMode "disable" }}
+            - name: FUNRUN_DO_NOT_REQUIRE_SSL
+              value: "true"
+            {{- end }}
+            - name: STORAGE_DIR
+              value: {{ include "convex.storageDir" . | quote }}
+          volumeMounts:
+            {{- include "convex.dataVolumeMount" . | nindent 12 }}
+          readinessProbe:
+            tcpSocket: { port: grpc }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 20
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep 3"]
+          resources:
+            {{- toYaml .Values.resources.funrun | nindent 12 }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+      terminationGracePeriodSeconds: 30
+      volumes:
+        {{- include "convex.dataVolume" . | nindent 8 }}
+
+---
+apiVersion: v1
+kind: Service
+
+metadata:
+  name: {{ include "convex.funrunName" . }}
+  labels:
+    {{- include "convex.componentLabels" (dict "ctx" . "component" "funrun") | nindent 4 }}
+
+spec:
+  selector:
+    {{- include "convex.componentSelectorLabels" (dict "ctx" . "component" "funrun") | nindent 4 }}
+  ports:
+    - { name: grpc, port: {{ trimPrefix ":" .Values.funrun.listen }}, targetPort: grpc }
+
+{{- if .Values.funrun.hpa.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+
+metadata:
+  name: {{ include "convex.funrunName" . }}
+  labels:
+    {{- include "convex.componentLabels" (dict "ctx" . "component" "funrun") | nindent 4 }}
+
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "convex.funrunName" . }}
+  minReplicas: {{ .Values.funrun.hpa.minReplicas }}
+  maxReplicas: {{ .Values.funrun.hpa.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.funrun.hpa.cpuAverageUtilization }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,84 @@
+{{- if .Values.dashboard.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+
+metadata:
+  name: {{ include "convex.dashboardName" . }}
+  labels:
+    {{- include "convex.componentLabels" (dict "ctx" . "component" "dashboard") | nindent 4 }}
+
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "convex.componentSelectorLabels" (dict "ctx" . "component" "dashboard") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "convex.componentLabels" (dict "ctx" . "component" "dashboard") | nindent 8 }}
+        {{- include "convex.componentDiscoveryLabel" (dict "ctx" . "component" "dashboard") | nindent 8 }}
+    spec:
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 1
+              preference:
+                matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - {{ .Values.ha.preferredNode }}
+      containers:
+        - name: dashboard
+          image: {{ include "convex.image" (dict "ctx" . "spec" .Values.image.dashboard) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - { name: http, containerPort: {{ .Values.dashboard.port }} }
+          env:
+            - name: PORT
+              value: {{ .Values.dashboard.port | quote }}
+            - name: HOSTNAME
+              value: "0.0.0.0"
+            - name: CONVEX_SELF_HOSTED_URL
+              value: "https://{{ required "hosts.api is required" .Values.hosts.api }}"
+            - name: CONVEX_SELF_HOSTED_ADMIN_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "convex.dashboardSecretName" . }}
+                  key: {{ .Values.dashboard.adminKeyRef.key }}
+          readinessProbe:
+            httpGet: { path: /, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 12
+          livenessProbe:
+            httpGet: { path: /, port: http }
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.resources.dashboard | nindent 12 }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+
+---
+apiVersion: v1
+kind: Service
+
+metadata:
+  name: {{ include "convex.dashboardName" . }}
+  labels:
+    {{- include "convex.componentLabels" (dict "ctx" . "component" "dashboard") | nindent 4 }}
+
+spec:
+  selector:
+    {{- include "convex.componentSelectorLabels" (dict "ctx" . "component" "dashboard") | nindent 4 }}
+  ports:
+    - { name: http, port: {{ .Values.dashboard.port }}, targetPort: http }
+{{- end }}

@@ -1,0 +1,138 @@
+{{- if .Values.bigbrain.enabled }}
+{{- $b := .Values.bigbrain -}}
+{{- if $b.rbac.create }}
+---
+apiVersion: v1
+kind: ServiceAccount
+
+metadata:
+  name: {{ include "convex.bigbrainName" . }}
+  namespace: {{ .Values.namespace.system }}
+  labels:
+    {{- include "convex.componentLabels" (dict "ctx" . "component" "bigbrain") | nindent 4 }}
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+
+metadata:
+  name: {{ include "convex.bigbrainName" . }}
+  labels:
+    {{- include "convex.componentLabels" (dict "ctx" . "component" "bigbrain") | nindent 4 }}
+
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+
+metadata:
+  name: {{ include "convex.bigbrainName" . }}
+  labels:
+    {{- include "convex.componentLabels" (dict "ctx" . "component" "bigbrain") | nindent 4 }}
+
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "convex.bigbrainName" . }}
+
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "convex.bigbrainName" . }}
+    namespace: {{ .Values.namespace.system }}
+
+{{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+
+metadata:
+  name: {{ include "convex.bigbrainName" . }}
+  namespace: {{ .Values.namespace.system }}
+  labels:
+    {{- include "convex.componentLabels" (dict "ctx" . "component" "bigbrain") | nindent 4 }}
+
+spec:
+  replicas: {{ $b.replicas }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "convex.componentSelectorLabels" (dict "ctx" . "component" "bigbrain") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "convex.componentLabels" (dict "ctx" . "component" "bigbrain") | nindent 8 }}
+    spec:
+      {{- if $b.rbac.create }}
+      serviceAccountName: {{ include "convex.bigbrainName" . }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 1
+              preference:
+                matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - {{ $b.preferredNode }}
+      containers:
+        - name: bigbrain
+          image: {{ include "convex-platform.image" (dict "ctx" . "spec" $b.image) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["--addr={{ $b.listen }}"]
+          env:
+            - name: BIGBRAIN_LABEL_PREFIX
+              value: {{ include "convex.labelPrefix" . | quote }}
+            {{- with $b.deployments }}
+            - name: BIGBRAIN_DEPLOYMENTS
+              value: {{ . | quote }}
+            {{- end }}
+            - name: BIGBRAIN_INTERVAL
+              value: {{ $b.reconcileInterval | quote }}
+            - name: BIGBRAIN_PROMOTE_DEBOUNCE
+              value: {{ $b.promoteDebounce | quote }}
+            - name: BIGBRAIN_FAILBACK_ENABLED
+              value: {{ $b.failback.enabled | quote }}
+            - name: BIGBRAIN_FAILBACK_STABILITY
+              value: {{ $b.failback.stability | quote }}
+            - name: BIGBRAIN_FAILBACK_WARMTH_LAG
+              value: {{ int64 $b.failback.warmthLag | quote }}
+          ports:
+            - { name: http, containerPort: {{ trimPrefix ":" $b.listen }} }
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            {{- toYaml $b.resources | nindent 12 }}
+
+---
+apiVersion: v1
+kind: Service
+
+metadata:
+  name: {{ include "convex.bigbrainName" . }}
+  namespace: {{ .Values.namespace.system }}
+  labels:
+    {{- include "convex.componentLabels" (dict "ctx" . "component" "bigbrain") | nindent 4 }}
+
+spec:
+  selector:
+    {{- include "convex.componentSelectorLabels" (dict "ctx" . "component" "bigbrain") | nindent 4 }}
+  ports:
+    - { name: http, port: {{ trimPrefix ":" $b.listen }}, targetPort: http }
+{{- end }}

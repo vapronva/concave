@@ -1,0 +1,103 @@
+{{- if .Values.usher.enabled }}
+{{- $u := .Values.usher -}}
+---
+apiVersion: v1
+kind: ConfigMap
+
+metadata:
+  name: {{ include "convex.usherName" . }}-config
+  namespace: {{ .Values.namespace.system }}
+  labels:
+    {{- include "convex.componentLabels" (dict "ctx" . "component" "usher") | nindent 4 }}
+
+data:
+  config.json: |
+    {{ toJson (dict "deployments" $u.config.deployments) | nindent 4 }}
+
+---
+apiVersion: apps/v1
+kind: Deployment
+
+metadata:
+  name: {{ include "convex.usherName" . }}
+  namespace: {{ .Values.namespace.system }}
+  labels:
+    {{- include "convex.componentLabels" (dict "ctx" . "component" "usher") | nindent 4 }}
+
+spec:
+  replicas: {{ $u.replicas }}
+  selector:
+    matchLabels:
+      {{- include "convex.componentSelectorLabels" (dict "ctx" . "component" "usher") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "convex.componentLabels" (dict "ctx" . "component" "usher") | nindent 8 }}
+      annotations:
+        checksum/config: {{ toJson (dict "deployments" $u.config.deployments) | sha256sum }}
+    spec:
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 1
+              preference:
+                matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - {{ $u.preferredNode }}
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 1
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/component: usher
+      containers:
+        - name: usher
+          image: {{ include "convex-platform.image" (dict "ctx" . "spec" $u.image) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - "--config=/etc/usher/config.json"
+            - "--addr={{ $u.listen }}"
+          {{- $bbUrl := $u.bigbrainUrl }}
+          {{- if and (not $bbUrl) .Values.bigbrain.enabled }}
+          {{- $bbUrl = printf "http://%s.%s.svc.cluster.local:%s" (include "convex.bigbrainName" .) .Values.namespace.system (trimPrefix ":" .Values.bigbrain.listen) }}
+          {{- end }}
+          {{- if $bbUrl }}
+          env:
+            - name: USHER_BIGBRAIN_URL
+              value: {{ $bbUrl | quote }}
+          {{- end }}
+          ports:
+            - { name: http, containerPort: {{ trimPrefix ":" $u.listen }} }
+          volumeMounts:
+            - { name: config, mountPath: /etc/usher }
+          readinessProbe:
+            tcpSocket: { port: http }
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          resources:
+            {{- toYaml $u.resources | nindent 12 }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "convex.usherName" . }}-config
+
+---
+apiVersion: v1
+kind: Service
+
+metadata:
+  name: usher
+  namespace: {{ .Values.namespace.system }}
+  labels:
+    {{- include "convex.componentLabels" (dict "ctx" . "component" "usher") | nindent 4 }}
+
+spec:
+  selector:
+    {{- include "convex.componentSelectorLabels" (dict "ctx" . "component" "usher") | nindent 4 }}
+  ports:
+    - { name: http, port: 8080, targetPort: http }
+{{- end }}

@@ -1,0 +1,53 @@
+---
+labelPrefix: convex
+
+namespace:
+  system: convex-system
+
+image:
+  registry: docker.horse
+  pullPolicy: IfNotPresent
+
+usher:
+  enabled: true
+  replicas: 2
+  listen: ":8080"
+  image:
+    repository: vapronva/concave/usher
+    tag: ""
+  bigbrainUrl: ""
+  preferredNode: bho-core-v2
+  config:
+    deployments: []
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: "1"
+      memory: 256Mi
+
+bigbrain:
+  enabled: true
+  replicas: 1
+  listen: :8081
+  image:
+    repository: vapronva/concave/bigbrain
+    tag: ""
+  deployments: ""
+  reconcileInterval: 2s
+  promoteDebounce: 3
+  failback:
+    enabled: true
+    stability: 15s
+    warmthLag: 5000000000
+  preferredNode: bho-core-v2
+  rbac:
+    create: true
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: "1"
+      memory: 256Mi
