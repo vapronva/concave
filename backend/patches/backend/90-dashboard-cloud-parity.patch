@@ -1016,10 +1016,10 @@ index 000000000..05d2fb390
 +}
 diff --git a/npm-packages/dashboard-common/src/features/health/components/HealthWithInsights.tsx b/npm-packages/dashboard-common/src/features/health/components/HealthWithInsights.tsx
 new file mode 100644
-index 000000000..6af64ec47
+index 000000000..12cd99af7
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/health/components/HealthWithInsights.tsx
-@@ -0,0 +1,396 @@
+@@ -0,0 +1,375 @@
 +import React, {
 +  useState,
 +  useCallback,
@@ -1041,14 +1041,9 @@ index 000000000..6af64ec47
 +  useInsightsPeriod,
 +  getInsightPageIdentifier,
 +} from "@common/features/health/lib/insights";
-+import {
-+  useCurrentDeployment,
-+  useDeploymentRegions,
-+} from "@common/lib/cloudApiShim";
++import { useCurrentDeployment } from "@common/lib/cloudApiShim";
 +import { useCurrentTeam, useTeamMembers } from "@common/lib/cloudApiShim";
 +import { useCurrentProject } from "@common/lib/cloudApiShim";
-+import { useListCloudBackupsIfAvailable } from "@common/lib/cloudApiShim";
-+import { PermissionsContext } from "@common/lib/deploymentContext";
 +import {
 +  useHasCustomRolePermission,
 +  useHasProjectAdminPermissions,
@@ -1104,20 +1099,6 @@ index 000000000..6af64ec47
 +  const team = useCurrentTeam();
 +  const project = useCurrentProject();
 +  const teamMembers = useTeamMembers(team?.id);
-+  const { regions } = useDeploymentRegions(team?.id);
-+  const { useIsOperationAllowed } = useContext(PermissionsContext);
-+  const canViewBackups = useIsOperationAllowed("ViewBackups");
-+  const backups = useListCloudBackupsIfAvailable(
-+    canViewBackups ? deployment : undefined,
-+  );
-+  const lastBackupTime = useMemo(() => {
-+    if (backups === null) return null;
-+    if (backups === undefined) return undefined;
-+    const deploymentsBackups = backups.filter((b) => b.state === "complete");
-+    return deploymentsBackups.length > 0
-+      ? deploymentsBackups[0].requestedTime
-+      : null;
-+  }, [backups]);
 +  const insightsResource =
 +    project && deployment && deployment.kind === "cloud"
 +      ? deploymentResource(project, {
@@ -1285,9 +1266,7 @@ index 000000000..6af64ec47
 +        deployment={deployment}
 +        teamSlug={team?.slug}
 +        projectSlug={project?.slug}
-+        lastBackupTime={lastBackupTime}
 +        teamMembers={teamMembers}
-+        regions={regions}
 +      />
 +    </InsightsContext.Provider>
 +  );
@@ -2134,13 +2113,10 @@ index 000000000..99ea571a3
 +}
 diff --git a/npm-packages/dashboard-common/src/features/health/lib/insights.ts b/npm-packages/dashboard-common/src/features/health/lib/insights.ts
 new file mode 100644
-index 000000000..30fccf46f
+index 000000000..6f9deda9c
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/health/lib/insights.ts
-@@ -0,0 +1,230 @@
-+import { useCurrentDeployment } from "@common/lib/cloudApiShim";
-+import { useCurrentTeam } from "@common/lib/cloudApiShim";
-+
+@@ -0,0 +1,219 @@
 +import {
 +  rootComponentPath,
 +  useUsageQuery,
@@ -2300,21 +2276,13 @@ index 000000000..30fccf46f
 +export function useInsights(): Insight[] | undefined {
 +  const moduleFunctions = useModuleFunctions();
 +  const period = useInsightsPeriod();
-+  const team = useCurrentTeam();
-+  const deployment = useCurrentDeployment();
-+  const common = {
-+    deploymentName: deployment?.name,
++  const { data: insightsData } = useUsageQuery({
++    queryId: "9ab3b74e-a725-480b-88a6-43e6bd70bd82",
 +    period: {
 +      from: period.from.split("T")[0],
 +      to: period.to.split("T")[0],
 +    },
-+    teamId: team?.id!,
-+    projectId: null,
 +    componentPrefix: null,
-+  };
-+  const { data: insightsData } = useUsageQuery({
-+    queryId: "9ab3b74e-a725-480b-88a6-43e6bd70bd82",
-+    ...common,
 +  });
 +  if (!insightsData) {
 +    return undefined;
@@ -2370,42 +2338,15 @@ index 000000000..30fccf46f
 +}
 diff --git a/npm-packages/dashboard-common/src/features/health/lib/usage.ts b/npm-packages/dashboard-common/src/features/health/lib/usage.ts
 new file mode 100644
-index 000000000..77c090e5e
+index 000000000..bb913b91b
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/health/lib/usage.ts
-@@ -0,0 +1,98 @@
-+import { useBBQuery } from "@common/lib/bigBrainApi";
+@@ -0,0 +1,70 @@
++import useSWR, { BareFetcher } from "swr";
++import { deploymentAuthMiddleware } from "@common/lib/deploymentApi";
++import { deploymentFetch } from "@common/lib/fetching";
 +
 +export type DateRange = { from: string; to: string };
-+
-+export type UsageState =
-+  | "Default"
-+  | "Approaching"
-+  | "Exceeded"
-+  | "Disabled"
-+  | "Paused";
-+export function useTeamUsageState(
-+  teamId: number | null,
-+): UsageState | undefined {
-+  const { data } = useBBQuery({
-+    path: "/teams/{team_id}/usage/team_usage_state",
-+    pathParams: {
-+      team_id: teamId?.toString() || "",
-+    },
-+    swrOptions: { refreshInterval: 0 },
-+  });
-+  return data?.usageState;
-+}
-+
-+export function useCurrentBillingPeriod(teamId: number) {
-+  const { data } = useBBQuery({
-+    path: "/teams/{team_id}/usage/current_billing_period",
-+    pathParams: {
-+      team_id: teamId.toString(),
-+    },
-+  });
-+  return data;
-+}
 +
 +export const USAGE_REFRESH_INTERVAL_MS =
 +  getURLConfigInt("usage_refresh_secs", 60 * 10) * 1000;
@@ -2415,48 +2356,47 @@ index 000000000..77c090e5e
 +
 +export function useUsageQuery({
 +  queryId,
-+  teamId,
-+  projectId,
-+  deploymentName,
-+  period,
-+  componentPrefix,
 +  functionId,
 +  tableName,
++  period,
++  componentPrefix,
 +  skip,
 +}: {
 +  queryId: DatabricksQueryId;
-+  teamId: number;
-+  projectId: number | null;
 +  functionId?: string;
 +  tableName?: string;
 +  period: DateRange | null;
 +  componentPrefix: string | null;
-+  deploymentName?: string;
 +  skip?: boolean;
 +}) {
-+  const result = useBBQuery({
-+    path: "/teams/{team_id}/usage/query",
-+    pathParams: { team_id: teamId.toString() },
-+    queryParams: {
-+      queryId,
-+      projectId: projectId ?? undefined,
-+      ...(deploymentName ? { deploymentName } : {}),
-+      ...(functionId ? { udfId: functionId } : {}),
-+      ...(tableName ? { tableName } : {}),
-+      ...(period ? { from: period.from, to: period.to } : {}),
-+      ...(componentPrefix
-+        ? {
-+            componentPath:
-+              componentPrefix === "app" ? rootComponentPath : componentPrefix,
-+          }
-+        : {}),
-+    },
-+    swrOptions: {
++  const queryParams = new URLSearchParams();
++  queryParams.set("queryId", queryId);
++  if (functionId) {
++    queryParams.set("udfId", functionId);
++  }
++  if (tableName) {
++    queryParams.set("tableName", tableName);
++  }
++  if (period) {
++    queryParams.set("from", period.from);
++    queryParams.set("to", period.to);
++  }
++  if (componentPrefix) {
++    queryParams.set(
++      "componentPath",
++      componentPrefix === "app" ? rootComponentPath : componentPrefix,
++    );
++  }
++  const fetcher = deploymentFetch as BareFetcher<any[][]>;
++  const result = useSWR<any[][]>(
++    skip ? null : `/api/insights/usage/query?${queryParams.toString()}`,
++    fetcher,
++    {
++      use: [deploymentAuthMiddleware],
 +      keepPreviousData: false,
 +      refreshInterval: USAGE_REFRESH_INTERVAL_MS,
-+      isPaused: () => skip ?? false,
 +    },
-+  });
++  );
 +  return {
 +    ...result,
 +    data: result.data?.map((row: any[]) =>
@@ -2474,10 +2414,10 @@ index 000000000..77c090e5e
 +}
 diff --git a/npm-packages/dashboard-common/src/features/settings/components/backups/SnapshotExport.tsx b/npm-packages/dashboard-common/src/features/settings/components/backups/SnapshotExport.tsx
 new file mode 100644
-index 000000000..d47655e25
+index 000000000..dba10bfe4
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/settings/components/backups/SnapshotExport.tsx
-@@ -0,0 +1,117 @@
+@@ -0,0 +1,119 @@
 +import { DownloadIcon, EnvelopeClosedIcon } from "@radix-ui/react-icons";
 +import { Link } from "@ui/Link";
 +import { Button } from "@ui/Button";
@@ -2538,7 +2478,9 @@ index 000000000..d47655e25
 +                    variant="primary"
 +                    inline
 +                    aria-label="download"
-+                    href={getZipExport(existingExport._id)}
++                    onClick={() =>
++                      void getZipExport(existingExport._id, filename)
++                    }
 +                  >
 +                    <DownloadIcon aria-label="Download" />
 +                    <span className="hidden md:flex">Download</span>
@@ -3068,249 +3010,15 @@ index e268b7bd5..fac7a33a0 100644
 -
    return pages;
  }
-diff --git a/npm-packages/dashboard-common/src/lib/bigBrainApi.ts b/npm-packages/dashboard-common/src/lib/bigBrainApi.ts
-new file mode 100644
-index 000000000..2c91afc41
---- /dev/null
-+++ b/npm-packages/dashboard-common/src/lib/bigBrainApi.ts
-@@ -0,0 +1,227 @@
-+import { useCallback, useContext } from "react";
-+import useSWR, { SWRConfiguration, SWRResponse, useSWRConfig } from "swr";
-+import {
-+  ConnectedDeploymentContext,
-+  DeploymentInfoContext,
-+} from "@common/lib/deploymentContext";
-+import { toast } from "@common/lib/utils";
-+
-+export const OIDC_TOKEN_STORAGE_KEY = "convexOidcAccessToken";
-+
-+export function useBigBrainUrl(): string | undefined {
-+  const ctx = useContext(DeploymentInfoContext);
-+  return ctx.bigBrainUrl ?? undefined;
-+}
-+
-+export function useBigBrainToken(): string | undefined {
-+  const ctx = useContext(DeploymentInfoContext);
-+  return ctx.bigBrainToken ?? undefined;
-+}
-+
-+export function useProjectDeployKey(): (deployment: string) => Promise<string> {
-+  const base = useBigBrainUrl();
-+  return useCallback(
-+    async (deployment: string): Promise<string> => {
-+      if (!base) {
-+        throw new Error("The control-plane router URL is not configured.");
-+      }
-+      const oidc =
-+        typeof window !== "undefined"
-+          ? window.sessionStorage.getItem(OIDC_TOKEN_STORAGE_KEY)
-+          : null;
-+      if (!oidc) {
-+        throw new Error("Sign in with SSO to get a project deploy key.");
-+      }
-+      const r = await bbFetch(base, oidc, {
-+        method: "POST",
-+        path: "/project_deploy_key",
-+        body: JSON.stringify({ deployment }),
-+      });
-+      if (!r.ok) {
-+        throw new Error(r.error?.message || `Request failed (${r.status})`);
-+      }
-+      return r.data?.deployKey as string;
-+    },
-+    [base],
-+  );
-+}
-+
-+function useAuthToken(): string | undefined {
-+  const bigBrainToken = useBigBrainToken();
-+  if (bigBrainToken) return bigBrainToken;
-+  const cd = useContext(ConnectedDeploymentContext);
-+  const adminKey = cd?.deployment?.adminKey;
-+  if (adminKey) return adminKey;
-+  if (typeof window !== "undefined") {
-+    const oidc = window.sessionStorage.getItem(OIDC_TOKEN_STORAGE_KEY);
-+    if (oidc) return oidc;
-+  }
-+  return undefined;
-+}
-+
-+function substitute(path: string, pathParams?: Record<string, any>): string {
-+  if (!pathParams) return path;
-+  return path.replace(/\{([^}]+)\}/g, (_m, k) =>
-+    encodeURIComponent(String(pathParams[k] ?? "")),
-+  );
-+}
-+
-+function queryString(queryParams?: Record<string, any>): string {
-+  if (!queryParams) return "";
-+  const u = new URLSearchParams();
-+  for (const [k, v] of Object.entries(queryParams)) {
-+    if (v !== undefined && v !== null && v !== "") u.set(k, String(v));
-+  }
-+  const s = u.toString();
-+  return s ? `?${s}` : "";
-+}
-+
-+function keyFor(
-+  path: string,
-+  pathParams?: Record<string, any>,
-+  queryParams?: Record<string, any>,
-+): string {
-+  return `bb:${substitute(path, pathParams)}${queryString(queryParams)}`;
-+}
-+
-+async function bbFetch(
-+  base: string,
-+  token: string | undefined,
-+  init: RequestInit & { path: string },
-+): Promise<{ ok: boolean; status: number; data: any; error: any }> {
-+  const url = `${base.replace(/\/$/, "")}/api/dashboard${init.path}`;
-+  const res = await fetch(url, {
-+    ...init,
-+    headers: {
-+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-+      ...(init.body ? { "content-type": "application/json" } : {}),
-+      ...(init.headers || {}),
-+    },
-+  });
-+  let body: any;
-+  try {
-+    body = await res.json();
-+  } catch {
-+    body = undefined;
-+  }
-+  return {
-+    ok: res.ok,
-+    status: res.status,
-+    data: res.ok ? body : undefined,
-+    error: res.ok
-+      ? undefined
-+      : (body ?? { code: "Error", message: `HTTP ${res.status}` }),
-+  };
-+}
-+
-+export function useBBQuery({
-+  path,
-+  pathParams,
-+  queryParams,
-+  swrOptions,
-+}: {
-+  path: string;
-+  pathParams?: Record<string, any>;
-+  queryParams?: Record<string, any>;
-+  swrOptions?: Omit<SWRConfiguration, "onError">;
-+}): SWRResponse<any, any> {
-+  const base = useBigBrainUrl();
-+  const token = useAuthToken();
-+  const paused =
-+    !base ||
-+    !token ||
-+    (!!pathParams && Object.values(pathParams).some((p) => !p));
-+  const key = paused ? null : keyFor(path, pathParams, queryParams);
-+  return useSWR(
-+    key,
-+    async () => {
-+      const r = await bbFetch(base!, token, {
-+        method: "GET",
-+        path: `${substitute(path, pathParams)}${queryString(queryParams)}`,
-+      });
-+      if (!r.ok) {
-+        const e: any = new Error(r.error?.message || "request failed");
-+        e.code = r.error?.code;
-+        throw e;
-+      }
-+      return r.data;
-+    },
-+    swrOptions ?? {},
-+  );
-+}
-+
-+export function useBBMutation({
-+  path,
-+  pathParams,
-+  method = "post",
-+  successToast,
-+  toastOnError = true,
-+  mutateKey,
-+  mutatePathParams,
-+}: {
-+  path: string;
-+  pathParams?: Record<string, any>;
-+  method?: "post";
-+  successToast?: string;
-+  toastOnError?: boolean;
-+  mutateKey?: string;
-+  mutatePathParams?: Record<string, any>;
-+}) {
-+  const base = useBigBrainUrl();
-+  const token = useAuthToken();
-+  const { mutate } = useSWRConfig();
-+  const pp = JSON.stringify(pathParams ?? {});
-+  const mpp = JSON.stringify(mutatePathParams ?? {});
-+  return useCallback(
-+    async (body?: any): Promise<any> => {
-+      if (!base) {
-+        const e = new Error("The control-plane router URL is not configured.");
-+        if (toastOnError) toast("error", e.message);
-+        throw e;
-+      }
-+      let r: { ok: boolean; status: number; data: any; error: any };
-+      try {
-+        r = await bbFetch(base, token, {
-+          method: method.toUpperCase(),
-+          path: substitute(path, pathParams),
-+          body: body !== undefined ? JSON.stringify(body) : undefined,
-+        });
-+      } catch (e: any) {
-+        if (toastOnError) toast("error", e.message || "Network error");
-+        throw e;
-+      }
-+      if (!r.ok) {
-+        if (toastOnError)
-+          toast("error", r.error?.message || `Request failed (${r.status})`);
-+        const e: any = new Error(
-+          r.error?.message || `Request failed (${r.status})`,
-+        );
-+        e.code = r.error?.code;
-+        throw e;
-+      }
-+      if (successToast) toast("success", successToast);
-+      if (mutateKey) {
-+        const prefix = keyFor(mutateKey, mutatePathParams);
-+        await mutate(
-+          (k) => typeof k === "string" && k.startsWith(prefix),
-+          undefined,
-+          { revalidate: true },
-+        );
-+      }
-+      return r.data;
-+    },
-+    // eslint-disable-next-line react-hooks/exhaustive-deps
-+    [
-+      base,
-+      token,
-+      path,
-+      pp,
-+      method,
-+      successToast,
-+      toastOnError,
-+      mutateKey,
-+      mpp,
-+      mutate,
-+    ],
-+  );
-+}
 diff --git a/npm-packages/dashboard-common/src/lib/cloudApiShim.tsx b/npm-packages/dashboard-common/src/lib/cloudApiShim.tsx
 new file mode 100644
-index 000000000..97e98d1ff
+index 000000000..0d7aec4e2
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/lib/cloudApiShim.tsx
-@@ -0,0 +1,144 @@
+@@ -0,0 +1,131 @@
 +import { useContext } from "react";
 +import { DeploymentInfoContext } from "@common/lib/deploymentContext";
 +import {
-+  CloudBackupResponse,
 +  DeploymentResponse,
 +  ProjectDetails,
 +} from "@common/lib/generatedApiStub";
@@ -3324,12 +3032,6 @@ index 000000000..97e98d1ff
 +export function useDeploymentByName(_name?: string) {
 +  const { useCurrentDeployment: hook } = useContext(DeploymentInfoContext);
 +  return hook();
-+}
-+
-+export function useDeploymentRegions(_teamId?: number): {
-+  regions: Array<{ name: string; displayName: string }> | undefined;
-+} {
-+  return { regions: undefined };
 +}
 +
 +export function useCurrentTeam() {
@@ -3391,12 +3093,6 @@ index 000000000..97e98d1ff
 +  return isAdmin || builtinAllowed;
 +}
 +
-+export function useListCloudBackupsIfAvailable(
-+  _deployment: PlatformDeploymentResponse | undefined,
-+): CloudBackupResponse[] | null | undefined {
-+  return null;
-+}
-+
 +export function deploymentResource(
 +  _project: unknown,
 +  _deployment: unknown,
@@ -3452,7 +3148,7 @@ index 000000000..97e98d1ff
 +  }
 +}
 diff --git a/npm-packages/dashboard-common/src/lib/deploymentApi.ts b/npm-packages/dashboard-common/src/lib/deploymentApi.ts
-index a3b43aab0..6706bb95e 100644
+index a3b43aab0..07cfcc145 100644
 --- a/npm-packages/dashboard-common/src/lib/deploymentApi.ts
 +++ b/npm-packages/dashboard-common/src/lib/deploymentApi.ts
 @@ -1,14 +1,16 @@
@@ -3491,23 +3187,44 @@ index a3b43aab0..6706bb95e 100644
  export function useFunctionUrl(udfPath: string, componentId?: string | null) {
    const { deploymentsURI } = useContext(DeploymentInfoContext);
  
-@@ -103,3 +102,75 @@ export const deploymentAuthMiddleware: Middleware =
+@@ -103,3 +102,96 @@ export const deploymentAuthMiddleware: Middleware =
  
      return useSWRNext(swrKey, fetcher, config);
    };
 +
 +export function useGetZipExport(
 +  format: CompletedExport["format"],
-+): (snapshotId: Id<"_exports">) => string {
++): (snapshotId: Id<"_exports">, filename: string) => Promise<void> {
 +  const deploymentUrl = useDeploymentUrl();
 +  const adminKey = useAdminKey();
-+  return (snapshotId: Id<"_exports">) => {
-+    const params = new URLSearchParams({ adminKey });
-+    if (format?.format === "zip") {
-+      return `${deploymentUrl}/api/export/zip/${snapshotId}?${params}`;
-+    }
-+    throw new Error("expected zip");
-+  };
++  const { reportHttpError } = useContext(DeploymentInfoContext);
++  return useCallback(
++    async (snapshotId: Id<"_exports">, filename: string) => {
++      if (format?.format !== "zip") {
++        throw new Error("expected zip");
++      }
++      const url = `${deploymentUrl}/api/export/zip/${snapshotId}`;
++      const res = await fetch(url, {
++        headers: { Authorization: `Convex ${adminKey}` },
++      });
++      if (!res.ok) {
++        const err = await res.json();
++        reportHttpError("GET", res.url, err);
++        toast("error", err.message);
++        return;
++      }
++      const blob = await res.blob();
++      const objectUrl = URL.createObjectURL(blob);
++      const anchor = document.createElement("a");
++      anchor.href = objectUrl;
++      anchor.download = filename;
++      document.body.appendChild(anchor);
++      anchor.click();
++      document.body.removeChild(anchor);
++      URL.revokeObjectURL(objectUrl);
++    },
++    [deploymentUrl, adminKey, format, reportHttpError],
++  );
 +}
 +
 +export function useCancelImport(): (
@@ -3567,19 +3284,6 @@ index a3b43aab0..6706bb95e 100644
 +  const { useLogDeploymentEvent: hook } = useContext(DeploymentInfoContext);
 +  return hook();
 +}
-diff --git a/npm-packages/dashboard-common/src/lib/deploymentContext.tsx b/npm-packages/dashboard-common/src/lib/deploymentContext.tsx
-index b3fa1da89..0fdd97a34 100644
---- a/npm-packages/dashboard-common/src/lib/deploymentContext.tsx
-+++ b/npm-packages/dashboard-common/src/lib/deploymentContext.tsx
-@@ -35,6 +35,8 @@ export type DeploymentInfo = (
-     }
-   | { ok: false; errorCode: string; errorMessage: string }
- ) & {
-+  bigBrainUrl?: string;
-+  bigBrainToken?: string;
-   addBreadcrumb: (breadcrumb: {
-     message?: string;
-     data?: {
 diff --git a/npm-packages/dashboard-common/src/lib/generatedApiStub.ts b/npm-packages/dashboard-common/src/lib/generatedApiStub.ts
 new file mode 100644
 index 000000000..7e260bc21
@@ -3646,98 +3350,6 @@ index 000000000..7e260bc21
 +    DeploymentId: number;
 +  };
 +};
-diff --git a/npm-packages/dashboard-self-hosted/src/pages/_app.tsx b/npm-packages/dashboard-self-hosted/src/pages/_app.tsx
-index 3f5b50c6b..ab769d324 100644
---- a/npm-packages/dashboard-self-hosted/src/pages/_app.tsx
-+++ b/npm-packages/dashboard-self-hosted/src/pages/_app.tsx
-@@ -76,6 +76,8 @@ function App({
-     deploymentUrl,
-     adminKey,
-     defaultListDeploymentsApiUrl,
-+    bigBrainUrl,
-+    bigBrainToken,
-     ...pageProps
-   },
- }: AppProps & {
-@@ -83,6 +85,8 @@ function App({
-     deploymentUrl: string | null;
-     adminKey: string | null;
-     defaultListDeploymentsApiUrl: string | null;
-+    bigBrainUrl: string | null;
-+    bigBrainToken: string | null;
-   };
- }) {
-   return (
-@@ -101,6 +105,8 @@ function App({
-               deploymentUrl={deploymentUrl}
-               adminKey={adminKey}
-               defaultListDeploymentsApiUrl={defaultListDeploymentsApiUrl}
-+              bigBrainUrl={bigBrainUrl}
-+              bigBrainToken={bigBrainToken}
-             >
-               <DeploymentApiProvider deploymentOverride="local">
-                 <WaitForDeploymentApi>
-@@ -164,6 +170,8 @@ App.getInitialProps = async ({ ctx }: { ctx: { req?: any } }) => {
-         deploymentUrl,
-         adminKey,
-         defaultListDeploymentsApiUrl: listDeploymentsApiUrl,
-+        bigBrainUrl: process.env.NEXT_PUBLIC_BIG_BRAIN_URL ?? null,
-+        bigBrainToken: process.env.NEXT_PUBLIC_BIG_BRAIN_TOKEN ?? null,
-       },
-     };
-   }
-@@ -177,12 +185,18 @@ App.getInitialProps = async ({ ctx }: { ctx: { req?: any } }) => {
-     window.__NEXT_DATA__?.props?.pageProps?.listDeploymentsApiUrl ?? null;
-   const clientSideSelectedDeploymentName =
-     window.__NEXT_DATA__?.props?.pageProps?.selectedDeploymentName ?? null;
-+  const clientSideBigBrainUrl =
-+    window.__NEXT_DATA__?.props?.pageProps?.bigBrainUrl ?? null;
-+  const clientSideBigBrainToken =
-+    window.__NEXT_DATA__?.props?.pageProps?.bigBrainToken ?? null;
-   return {
-     pageProps: {
-       deploymentUrl: clientSideDeploymentUrl ?? null,
-       adminKey: clientSideAdminKey ?? null,
-       defaultListDeploymentsApiUrl: clientSideListDeploymentsApiUrl ?? null,
-       selectedDeploymentName: clientSideSelectedDeploymentName ?? null,
-+      bigBrainUrl: clientSideBigBrainUrl ?? null,
-+      bigBrainToken: clientSideBigBrainToken ?? null,
-     },
-   };
- };
-@@ -319,11 +333,15 @@ function DeploymentInfoProvider({
-   deploymentUrl,
-   adminKey,
-   defaultListDeploymentsApiUrl,
-+  bigBrainUrl,
-+  bigBrainToken,
- }: {
-   children: React.ReactNode;
-   deploymentUrl: string | null;
-   adminKey: string | null;
-   defaultListDeploymentsApiUrl: string | null;
-+  bigBrainUrl: string | null;
-+  bigBrainToken: string | null;
- }) {
-   const [listDeploymentsApiUrl, setListDeploymentsApiUrl] = useState<
-     string | null
-@@ -393,13 +411,15 @@ function DeploymentInfoProvider({
-         ok: true,
-         adminKey: storedAdminKey,
-         deploymentUrl: storedDeploymentUrl,
-+        bigBrainUrl: bigBrainUrl ?? undefined,
-+        bigBrainToken: bigBrainToken ?? undefined,
-         useIsOperationAllowed: (operation: string) => {
-           // Empty allowedOps means all operations are allowed (full admin key).
-           if (allowedOps.length === 0) return true;
-           return allowedOps.includes(operation);
-         },
-       }) as DeploymentInfo,
--    [storedAdminKey, storedDeploymentUrl, allowedOps],
-+    [storedAdminKey, storedDeploymentUrl, bigBrainUrl, bigBrainToken, allowedOps],
-   );
-   const [mounted, setMounted] = useState(false);
-   useEffect(() => setMounted(true), []);
 diff --git a/npm-packages/dashboard-self-hosted/src/pages/index.tsx b/npm-packages/dashboard-self-hosted/src/pages/index.tsx
 index cd4843ab6..9f510a67a 100644
 --- a/npm-packages/dashboard-self-hosted/src/pages/index.tsx

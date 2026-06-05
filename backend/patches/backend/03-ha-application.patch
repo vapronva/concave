@@ -1,5 +1,5 @@
 diff --git a/crates/application/src/lib.rs b/crates/application/src/lib.rs
-index c07c0726c..8ac563e87 100644
+index f81b976ac..6ce65c07a 100644
 --- a/crates/application/src/lib.rs
 +++ b/crates/application/src/lib.rs
 @@ -132,6 +132,7 @@ use common::{
@@ -457,7 +457,7 @@ index c07c0726c..8ac563e87 100644
      pub fn modules_storage(&self) -> &Arc<dyn Storage> {
          &self.application_storage.modules_storage
      }
-@@ -3675,7 +3857,10 @@ impl<RT: Runtime> Application<RT> {
+@@ -3700,7 +3882,10 @@ impl<RT: Runtime> Application<RT> {
      }
  
      pub async fn shutdown(&self) -> anyhow::Result<()> {

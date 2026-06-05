@@ -549,14 +549,15 @@ index 000000000..445628ee4
 +}
 diff --git a/crates/funrun_server/src/config.rs b/crates/funrun_server/src/config.rs
 new file mode 100644
-index 000000000..2b75a3a62
+index 000000000..8af625787
 --- /dev/null
 +++ b/crates/funrun_server/src/config.rs
-@@ -0,0 +1,283 @@
+@@ -0,0 +1,268 @@
 +use std::net::SocketAddr;
 +
 +use clusters::DbDriverTag;
 +use common::types::PersistenceVersion;
++use function_runner::remote::funrun_tls_pem_from_env;
 +use keybroker::DeploymentSecret;
 +
 +#[derive(Clone)]
@@ -568,30 +569,14 @@ index 000000000..2b75a3a62
 +
 +impl FunrunTlsConfig {
 +    pub fn from_env() -> anyhow::Result<Option<Self>> {
-+        let cert = std::env::var_os("CONVEX_FUNRUN_TLS_CERT");
-+        let key = std::env::var_os("CONVEX_FUNRUN_TLS_KEY");
-+        let ca = std::env::var_os("CONVEX_FUNRUN_TLS_CA");
-+        match (cert, key, ca) {
-+            (None, None, None) => Ok(None),
-+            (Some(cert), Some(key), Some(ca)) => {
-+                let cert_pem = std::fs::read(&cert)
-+                    .map_err(|e| anyhow::anyhow!("reading CONVEX_FUNRUN_TLS_CERT {cert:?}: {e}"))?;
-+                let key_pem = std::fs::read(&key)
-+                    .map_err(|e| anyhow::anyhow!("reading CONVEX_FUNRUN_TLS_KEY {key:?}: {e}"))?;
-+                let ca_pem = std::fs::read(&ca)
-+                    .map_err(|e| anyhow::anyhow!("reading CONVEX_FUNRUN_TLS_CA {ca:?}: {e}"))?;
-+                Ok(Some(Self {
-+                    cert_pem,
-+                    key_pem,
-+                    ca_pem,
-+                }))
-+            },
-+            _ => anyhow::bail!(
-+                "funrun mTLS misconfigured: set ALL of CONVEX_FUNRUN_TLS_CERT, \
-+                 CONVEX_FUNRUN_TLS_KEY, CONVEX_FUNRUN_TLS_CA (file paths) to enable mutual TLS, \
-+                 or NONE of them for plaintext"
-+            ),
-+        }
++        let Some((cert_pem, key_pem, ca_pem)) = funrun_tls_pem_from_env()? else {
++            return Ok(None);
++        };
++        Ok(Some(Self {
++            cert_pem,
++            key_pem,
++            ca_pem,
++        }))
 +    }
 +}
 +
@@ -838,10 +823,10 @@ index 000000000..2b75a3a62
 +}
 diff --git a/crates/funrun_server/src/main.rs b/crates/funrun_server/src/main.rs
 new file mode 100644
-index 000000000..e637eb824
+index 000000000..36d339027
 --- /dev/null
 +++ b/crates/funrun_server/src/main.rs
-@@ -0,0 +1,75 @@
+@@ -0,0 +1,74 @@
 +use std::sync::Arc;
 +
 +use anyhow::Context;
@@ -853,10 +838,9 @@ index 000000000..e637eb824
 +mod snapshot;
 +
 +use config::FunrunConfig;
++use function_runner::remote::MAX_GRPC_MESSAGE_BYTES;
 +use service::FunrunService;
 +use snapshot::InstanceRegistry;
-+
-+const MAX_GRPC_MESSAGE_BYTES: usize = udf::HTTP_ACTION_BODY_LIMIT + (1 << 20);
 +
 +fn main() -> anyhow::Result<()> {
 +    tracing_subscriber::fmt()
@@ -919,10 +903,10 @@ index 000000000..e637eb824
 +}
 diff --git a/crates/funrun_server/src/service.rs b/crates/funrun_server/src/service.rs
 new file mode 100644
-index 000000000..757003fb5
+index 000000000..de28f911d
 --- /dev/null
 +++ b/crates/funrun_server/src/service.rs
-@@ -0,0 +1,571 @@
+@@ -0,0 +1,632 @@
 +use std::{
 +    collections::BTreeMap,
 +    pin::Pin,
@@ -1012,6 +996,19 @@ index 000000000..757003fb5
 +
 +const RESPONSE_STREAM_BUFFER: usize = 256;
 +
++struct CommonRunInputs {
++    identity: Identity,
++    ts: RepeatableTimestamp,
++    existing_writes: FunctionWrites,
++    default_system_env_vars: BTreeMap<EnvVarName, EnvVarValue>,
++    in_memory_index_last_modified: BTreeMap<IndexId, Timestamp>,
++    context: ExecutionContext,
++    backend_url: ConvexOrigin,
++    action_callbacks: Arc<HttpActionCallbacks>,
++    deployment: DeploymentMetadata,
++    snapshot: crate::snapshot::SnapshotInputs,
++}
++
 +pub struct FunrunService<RT: Runtime> {
 +    rt: RT,
 +    registry: Arc<InstanceRegistry<RT>>,
@@ -1062,29 +1059,20 @@ index 000000000..757003fb5
 +            .map_err(|e| Status::not_found(format!("funrun: {e:#}")))
 +    }
 +
-+    async fn run(
-+        instance: Arc<InstanceState<RT>>,
-+        fetch_client: Arc<dyn common::http::fetch::FetchClient>,
-+        req: pb::funrun::RunFunctionRequest,
-+        part_tx: &mpsc::Sender<Result<pb::funrun::RunFunctionResponsePart, Status>>,
-+    ) -> anyhow::Result<pb::funrun::RunFunctionResult> {
-+        let pb::funrun::RunFunctionRequest {
-+            instance_name: _,
-+            udf_type,
-+            identity,
-+            ts,
-+            existing_writes,
-+            path_and_args,
-+            journal,
-+            default_system_env_vars,
-+            in_memory_index_last_modified,
-+            context,
-+            backend_callback_url,
-+            callback_token,
-+            auth_header,
-+        } = req;
-+        let udf_type =
-+            UdfType::from(pb::common::UdfType::try_from(udf_type).context("invalid udf_type")?);
++    #[allow(clippy::too_many_arguments)]
++    async fn decode_common_run_inputs(
++        instance: &Arc<InstanceState<RT>>,
++        identity: Option<pb::convex_identity::UncheckedIdentity>,
++        ts: Option<pb::common::RepeatableTimestamp>,
++        existing_writes: Vec<pb::common::DocumentUpdateWithPrevTs>,
++        default_system_env_vars: Vec<pb::funrun::EnvVar>,
++        in_memory_index_last_modified: Vec<pb::funrun::IndexLastModified>,
++        context: Option<pb::common::ExecutionContext>,
++        backend_callback_url: Option<String>,
++        callback_token: Option<String>,
++        auth_header: Option<String>,
++        action_name: Option<String>,
++    ) -> anyhow::Result<CommonRunInputs> {
 +        let identity = Identity::from_proto_unchecked(identity.context("missing identity")?)?;
 +        let ts: RepeatableTimestamp = ts.context("missing ts")?.try_into()?;
 +        let context: ExecutionContext = context.context("missing context")?.try_into()?;
@@ -1115,6 +1103,58 @@ index 000000000..757003fb5
 +                    },
 +                )
 +                .collect::<anyhow::Result<_>>()?;
++        let snapshot = instance.snapshot_inputs(ts).await?;
++        let backend_url =
++            ConvexOrigin::from(backend_callback_url.context("missing backend_callback_url")?);
++        let action_callbacks = Arc::new(HttpActionCallbacks::new(
++            backend_url.clone(),
++            callback_token.context("missing callback_token")?,
++            auth_header,
++            context.clone(),
++            action_name,
++        ));
++        let deployment = DeploymentMetadata {
++            name: instance.instance_name.clone(),
++            region: None,
++            class: DeploymentClass::S16,
++        };
++        Ok(CommonRunInputs {
++            identity,
++            ts,
++            existing_writes,
++            default_system_env_vars,
++            in_memory_index_last_modified,
++            context,
++            backend_url,
++            action_callbacks,
++            deployment,
++            snapshot,
++        })
++    }
++
++    async fn run(
++        instance: Arc<InstanceState<RT>>,
++        fetch_client: Arc<dyn common::http::fetch::FetchClient>,
++        req: pb::funrun::RunFunctionRequest,
++        part_tx: &mpsc::Sender<Result<pb::funrun::RunFunctionResponsePart, Status>>,
++    ) -> anyhow::Result<pb::funrun::RunFunctionResult> {
++        let pb::funrun::RunFunctionRequest {
++            instance_name: _,
++            udf_type,
++            identity,
++            ts,
++            existing_writes,
++            path_and_args,
++            journal,
++            default_system_env_vars,
++            in_memory_index_last_modified,
++            context,
++            backend_callback_url,
++            callback_token,
++            auth_header,
++        } = req;
++        let udf_type =
++            UdfType::from(pb::common::UdfType::try_from(udf_type).context("invalid udf_type")?);
 +        let function_metadata = match path_and_args {
 +            Some(path_and_args) => Some(FunctionMetadata {
 +                path_and_args: ValidatedPathAndArgs::from_proto(path_and_args)?,
@@ -1127,21 +1167,31 @@ index 000000000..757003fb5
 +        let action_name = function_metadata
 +            .as_ref()
 +            .map(|m| m.path_and_args.path().udf_path.to_string());
-+        let snapshot = instance.snapshot_inputs(ts).await?;
-+        let backend_url =
-+            ConvexOrigin::from(backend_callback_url.context("missing backend_callback_url")?);
-+        let action_callbacks = Arc::new(HttpActionCallbacks::new(
-+            backend_url.clone(),
-+            callback_token.unwrap_or_default(),
++        let CommonRunInputs {
++            identity,
++            ts,
++            existing_writes,
++            default_system_env_vars,
++            in_memory_index_last_modified,
++            context,
++            backend_url,
++            action_callbacks,
++            deployment,
++            snapshot,
++        } = Self::decode_common_run_inputs(
++            &instance,
++            identity,
++            ts,
++            existing_writes,
++            default_system_env_vars,
++            in_memory_index_last_modified,
++            context,
++            backend_callback_url,
++            callback_token,
 +            auth_header,
-+            context.clone(),
 +            action_name,
-+        ));
-+        let deployment = DeploymentMetadata {
-+            name: instance.instance_name.clone(),
-+            region: None,
-+            class: DeploymentClass::S16,
-+        };
++        )
++        .await?;
 +        let (log_line_sender, log_line_receiver) = mpsc::unbounded_channel::<LogLine>();
 +        let run_request_args = RunRequestArgs {
 +            key_broker: instance.key_broker.clone(),
@@ -1204,36 +1254,6 @@ index 000000000..757003fb5
 +            http_request_head,
 +            http_request_body,
 +        } = req;
-+        let identity = Identity::from_proto_unchecked(identity.context("missing identity")?)?;
-+        let ts: RepeatableTimestamp = ts.context("missing ts")?.try_into()?;
-+        let context: ExecutionContext = context.context("missing context")?.try_into()?;
-+        let existing_writes = FunctionWrites {
-+            updates: existing_writes
-+                .into_iter()
-+                .map(common::document::DocumentUpdateWithPrevTs::try_from)
-+                .collect::<anyhow::Result<Vec<_>>>()?,
-+        };
-+        let default_system_env_vars: BTreeMap<EnvVarName, EnvVarValue> = default_system_env_vars
-+            .into_iter()
-+            .map(|pb::funrun::EnvVar { name, value }| {
-+                anyhow::Ok((EnvVarName::from_str(&name)?, EnvVarValue::from_str(&value)?))
-+            })
-+            .collect::<anyhow::Result<_>>()?;
-+        let in_memory_index_last_modified: BTreeMap<IndexId, Timestamp> =
-+            in_memory_index_last_modified
-+                .into_iter()
-+                .map(
-+                    |pb::funrun::IndexLastModified {
-+                         index_id,
-+                         last_modified_ts,
-+                     }| {
-+                        anyhow::Ok((
-+                            IndexId::from_str(&index_id)?,
-+                            Timestamp::try_from(last_modified_ts)?,
-+                        ))
-+                    },
-+                )
-+                .collect::<anyhow::Result<_>>()?;
 +        let http_module_path =
 +            ValidatedHttpPath::from_proto(http_module_path.context("missing http_module_path")?)?;
 +        let routed_path = RoutedHttpPath(routed_path);
@@ -1246,25 +1266,32 @@ index 000000000..757003fb5
 +            });
 +        let http_request = HttpActionRequest { head, body };
 +        let action_name = Some(http_module_path.path().udf_path.to_string());
-+        let snapshot = instance.snapshot_inputs(ts).await?;
-+        let backend_url =
-+            ConvexOrigin::from(backend_callback_url.context("missing backend_callback_url")?);
-+        let action_callbacks = Arc::new(HttpActionCallbacks::new(
-+            backend_url.clone(),
-+            callback_token.unwrap_or_default(),
++        let CommonRunInputs {
++            identity,
++            ts,
++            existing_writes,
++            default_system_env_vars,
++            in_memory_index_last_modified,
++            context,
++            backend_url,
++            action_callbacks,
++            deployment,
++            snapshot,
++        } = Self::decode_common_run_inputs(
++            &instance,
++            identity,
++            ts,
++            existing_writes,
++            default_system_env_vars,
++            in_memory_index_last_modified,
++            context,
++            backend_callback_url,
++            callback_token,
 +            auth_header,
-+            context.clone(),
 +            action_name,
-+        ));
-+        let deployment = DeploymentMetadata {
-+            name: instance.instance_name.clone(),
-+            region: None,
-+            class: DeploymentClass::S16,
-+        };
-+        let (log_line_sender, mut log_line_receiver) = mpsc::unbounded_channel::<LogLine>();
-+        let mut drain_logs = instance.rt.spawn("funrun_http_log_drain", async move {
-+            while log_line_receiver.recv().await.is_some() {}
-+        });
++        )
++        .await?;
++        let (log_line_sender, log_line_receiver) = mpsc::unbounded_channel::<LogLine>();
 +        let run_request_args = RunRequestArgs {
 +            key_broker: instance.key_broker.clone(),
 +            index_reader: snapshot.index_reader,
@@ -1294,6 +1321,7 @@ index 000000000..757003fb5
 +        };
 +        let mut inner_response_stream =
 +            UnboundedReceiverStream::new(inner_response_receiver).fuse();
++        let mut log_lines = UnboundedReceiverStream::new(log_line_receiver).fuse();
 +        let mut run_fut = Box::pin(instance.core.run_function_no_retention_check(
 +            run_request_args,
 +            None,
@@ -1303,6 +1331,9 @@ index 000000000..757003fb5
 +        let result = loop {
 +            select_biased! {
 +                result = &mut run_fut => {
++                    while let Some(log_line) = log_lines.next().await {
++                        forward_http_log_line(part_tx, log_line).await;
++                    }
 +                    while let Some(part) = inner_response_stream.next().await {
 +                        if forward_http_part(part_tx, part).await.is_err() {
 +                            anyhow::bail!(ErrorMetadata::client_disconnect());
@@ -1317,9 +1348,11 @@ index 000000000..757003fb5
 +                part = inner_response_stream.select_next_some() => {
 +                    let _ = forward_http_part(part_tx, part).await;
 +                },
++                log_line = log_lines.select_next_some() => {
++                    forward_http_log_line(part_tx, log_line).await;
++                },
 +            }
 +        };
-+        drain_logs.shutdown();
 +        validate_run_function_result(
 +            UdfType::HttpAction,
 +            *ts,
@@ -1375,6 +1408,18 @@ index 000000000..757003fb5
 +) {
 +    let part = pb::funrun::RunFunctionResponsePart {
 +        part: Some(pb::funrun::run_function_response_part::Part::LogLine(
++            log_line.into(),
++        )),
++    };
++    let _ = part_tx.send(Ok(part)).await;
++}
++
++async fn forward_http_log_line(
++    part_tx: &mpsc::Sender<Result<pb::funrun::HttpActionResponsePart, Status>>,
++    log_line: LogLine,
++) {
++    let part = pb::funrun::HttpActionResponsePart {
++        part: Some(pb::funrun::http_action_response_part::Part::LogLine(
 +            log_line.into(),
 +        )),
 +    };

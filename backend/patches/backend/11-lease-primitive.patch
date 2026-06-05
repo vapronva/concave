@@ -22,7 +22,7 @@ index 9da2989bb..01a025a39 100644
  
  #[derive(Debug, Clone, Copy)]
 diff --git a/crates/postgres/src/lib.rs b/crates/postgres/src/lib.rs
-index cce12606d..52522ef12 100644
+index cce12606d..6e9e4a026 100644
 --- a/crates/postgres/src/lib.rs
 +++ b/crates/postgres/src/lib.rs
 @@ -481,6 +481,18 @@ impl Persistence for PostgresPersistence {
@@ -44,6 +44,59 @@ index cce12606d..52522ef12 100644
      #[fastrace::trace]
      async fn write<'a>(
          &self,
+@@ -1758,8 +1770,8 @@ struct Lease {
+ }
+ 
+ impl Lease {
+-    /// Acquire a lease. Blocks as long as there is another lease holder.
+-    /// Returns any transient errors encountered.
++    /// Acquire the lease, bumping its ts monotonically (GREATEST(now, current+1));
++    /// any competing holder is fenced out at commit time. Returns transient errors.
+     async fn acquire(
+         pool: Arc<ConvexPgPool>,
+         schema: &SchemaName,
+@@ -1777,27 +1789,27 @@ impl Lease {
+             .as_nanos() as i64;
+ 
+         tracing::info!("attempting to acquire lease");
+-        let stmt = client
++        let instance_name_q = instance_name.clone();
++        let row = client
+             .with_retry(async move |client| {
+-                client.prepare_cached(sql::lease_acquire(multitenant)).await
++                let mut params = vec![&ts as &(dyn ToSql + Sync)];
++                if multitenant {
++                    params.push(&instance_name_q.raw as &(dyn ToSql + Sync));
++                }
++                client
++                    .query_opt(sql::lease_acquire(multitenant), params.as_slice())
++                    .await
+             })
+             .await?;
+-        let mut params = vec![&ts as &(dyn ToSql + Sync)];
+-        if multitenant {
+-            params.push(&instance_name.raw as &(dyn ToSql + Sync));
+-        }
+-        let rows_modified = client.execute(&stmt, params.as_slice()).await?;
+         drop(client);
+-        anyhow::ensure!(
+-            rows_modified == 1,
+-            "failed to acquire lease: Already acquired with higher timestamp"
+-        );
+-        tracing::info!("lease acquired with ts {}", ts);
+-
++        let acquired_ts: i64 = row
++            .ok_or_else(|| anyhow::anyhow!("failed to acquire lease: leases row missing"))?
++            .get(0);
++        tracing::info!("lease acquired with ts {}", acquired_ts);
+         timer.finish();
+         Ok(Self {
+             pool,
+-            lease_ts: ts,
++            lease_ts: acquired_ts,
+             schema: schema.clone(),
+             instance_name,
+             multitenant,
 @@ -1805,6 +1817,65 @@ impl Lease {
          })
      }
@@ -111,10 +164,26 @@ index cce12606d..52522ef12 100644
      /// still held, otherwise return `LeaseLostError`.
      ///
 diff --git a/crates/postgres/src/sql.rs b/crates/postgres/src/sql.rs
-index 5fc5d0a2e..9ae0837ee 100644
+index 5fc5d0a2e..99ac6fd48 100644
 --- a/crates/postgres/src/sql.rs
 +++ b/crates/postgres/src/sql.rs
-@@ -771,6 +771,17 @@ pub const fn lease_acquire(multitenant: bool) -> &'static str {
+@@ -759,18 +759,31 @@ pub const fn advisory_lease_check(multitenant: bool) -> &'static str {
+     )
+ }
+ 
+-// Acquire the lease unless acquire by someone with a higher timestamp.
++// Acquire the lease, bumping ts to GREATEST(now, current+1) so it stays strictly
++// monotonic and a future-dated predecessor (clock skew) can't stall promotion;
++// safety is the commit-time fence (lease_release/transact pin ts), not this.
+ pub const fn lease_acquire(multitenant: bool) -> &'static str {
+     tableify!(
+         multitenant,
+         formatcp!(
+-            "UPDATE @db_name.leases SET ts=$1 WHERE {column}={value} AND ts<$1",
++            "UPDATE @db_name.leases SET ts=GREATEST($1, ts+1) WHERE {column}={value} RETURNING ts",
+             column = if multitenant { "instance_name" } else { "id" },
+             value = if multitenant { "$2" } else { "1" }
+         )
      )
  }
  
@@ -132,7 +201,7 @@ index 5fc5d0a2e..9ae0837ee 100644
  #[derive(PartialEq, Eq, Hash, Copy, Clone)]
  pub(crate) enum BoundType {
      Unbounded,
-@@ -1100,3 +1111,42 @@ pub const fn import_indexes_batch(multitenant: bool) -> &'static str {
+@@ -1100,3 +1113,42 @@ pub const fn import_indexes_batch(multitenant: bool) -> &'static str {
          )
      )
  }
@@ -171,7 +240,7 @@ index 5fc5d0a2e..9ae0837ee 100644
 +        assert!(!advisory_lease_check(false).contains("FOR UPDATE"));
 +        assert_eq!(
 +            lease_acquire(false),
-+            "UPDATE @db_name.leases SET ts=$1 WHERE id=1 AND ts<$1",
++            "UPDATE @db_name.leases SET ts=GREATEST($1, ts+1) WHERE id=1 RETURNING ts",
 +        );
 +    }
 +}

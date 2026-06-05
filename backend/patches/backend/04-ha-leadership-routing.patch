@@ -790,7 +790,7 @@ index 000000000..581dfd80a
 +    }
 +}
 diff --git a/crates/local_backend/src/router.rs b/crates/local_backend/src/router.rs
-index 5e8fdcc1d..7cdabe6fa 100644
+index 5e8fdcc1d..c1c32eab7 100644
 --- a/crates/local_backend/src/router.rs
 +++ b/crates/local_backend/src/router.rs
 @@ -101,11 +101,14 @@ use crate::{
@@ -808,7 +808,18 @@ index 5e8fdcc1d..7cdabe6fa 100644
          vector_search,
      },
      public_api::public_api_router,
-@@ -404,6 +407,7 @@ pub fn router(st: LocalAppState) -> Router {
+@@ -367,6 +370,10 @@ pub fn router(st: LocalAppState) -> Router {
+         .nest("/actions", action_callback_routes(st.clone()))
+         .nest("/export", snapshot_export_routes)
+         .nest("/streaming_import", streaming_import_routes())
++        .route(
++            "/insights/usage/query",
++            get(crate::usage_forwarder::insights_query),
++        )
+         .nest("/v1", platform_routes);
+ 
+     // Endpoints migrated to use the RouterState trait instead of application.
+@@ -404,6 +411,7 @@ pub fn router(st: LocalAppState) -> Router {
      Router::new()
          .nest("/api", api_routes)
          .merge(health_check_routes(version))
@@ -816,7 +827,7 @@ index 5e8fdcc1d..7cdabe6fa 100644
          .layer(cors())
          .with_state(st)
          .merge(migrated)
-@@ -447,6 +451,9 @@ where
+@@ -447,6 +455,9 @@ where
          .route("/storage_get_url", post(storage_get_url))
          .route("/storage_get_metadata", post(storage_get_metadata))
          .route("/storage_delete", post(storage_delete))
@@ -826,7 +837,7 @@ index 5e8fdcc1d..7cdabe6fa 100644
          .route("/audit_log", post(audit_log))
          // All routes above this line get the increased limit
          .layer(DefaultBodyLimit::max(*MAX_BACKEND_RPC_REQUEST_SIZE))
-@@ -591,17 +598,45 @@ where
+@@ -591,17 +602,45 @@ where
  }
  
  pub fn cors() -> CorsLayer {

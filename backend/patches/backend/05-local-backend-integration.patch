@@ -21,7 +21,7 @@ index cf0937e6a..e0cbc2f64 100644
                  project_name: backend_info.project_name.clone(),
                  project_slug: backend_info.project_slug.clone(),
 diff --git a/crates/local_backend/src/lib.rs b/crates/local_backend/src/lib.rs
-index 4633f83f5..9e2e397b6 100644
+index 4633f83f5..f0f4a554c 100644
 --- a/crates/local_backend/src/lib.rs
 +++ b/crates/local_backend/src/lib.rs
 @@ -33,7 +33,10 @@ use common::{
@@ -107,7 +107,7 @@ index 4633f83f5..9e2e397b6 100644
      zombify_rx: async_broadcast::Receiver<()>,
      preempt_tx: ShutdownSignal,
  ) -> anyhow::Result<LocalAppState> {
-@@ -156,29 +190,104 @@ pub async fn make_app(
+@@ -156,29 +190,61 @@ pub async fn make_app(
      // TODO(CX-6572) Separate `SegmentMetadataFetcher` from `SearcherImpl`
      let segment_metadata_fetcher: Arc<dyn SegmentTermMetadataFetcher> = in_process_searcher;
      let (deleted_tablet_sender, deleted_tablet_receiver) = tokio::sync::mpsc::channel(100);
@@ -164,49 +164,6 @@ index 4633f83f5..9e2e397b6 100644
 +    if config.role.is_leader() {
 +        initialize_application_system_tables(&database).await?;
 +    }
-+    if config.role.is_leader()
-+        && let Ok(deployment_type) = std::env::var("CONVEX_DEPLOYMENT_TYPE")
-+    {
-+        use common::types::{
-+            DeploymentId,
-+            ProjectId,
-+            TeamId,
-+            DEFAULT_PROVISION_CONCURRENCY,
-+        };
-+        use model::backend_info::{
-+            types::BackendInfoPersisted,
-+            BackendInfoModel,
-+        };
-+        let env_u64 = |k: &str| -> anyhow::Result<u64> {
-+            std::env::var(k)
-+                .map_err(|_| anyhow::anyhow!("{k} must be set when CONVEX_DEPLOYMENT_TYPE is set"))?
-+                .parse()
-+                .map_err(|e| anyhow::anyhow!("{k} must be a u64: {e}"))
-+        };
-+        let backend_info = BackendInfoPersisted {
-+            team: TeamId(env_u64("CONVEX_TEAM_ID")?),
-+            project: ProjectId(env_u64("CONVEX_PROJECT_ID")?),
-+            deployment: DeploymentId(env_u64("CONVEX_DEPLOYMENT_ID")?),
-+            deployment_type: deployment_type
-+                .parse()
-+                .map_err(|e| anyhow::anyhow!("invalid CONVEX_DEPLOYMENT_TYPE: {e}"))?,
-+            deployment_ref: std::env::var("CONVEX_DEPLOYMENT_REF").ok(),
-+            project_name: std::env::var("CONVEX_PROJECT_NAME").ok(),
-+            project_slug: std::env::var("CONVEX_PROJECT_SLUG").ok(),
-+            streaming_export_enabled: true,
-+            provision_concurrency: DEFAULT_PROVISION_CONCURRENCY,
-+            log_streaming_enabled: true,
-+            audit_log_retention_days: 0,
-+            send_logs_to_client: None,
-+            custom_audit_logs_in_log_streams_config_enabled: None,
-+        };
-+        let mut tx = database.begin(keybroker::Identity::system()).await?;
-+        BackendInfoModel::new(&mut tx).set(backend_info).await?;
-+        database
-+            .commit_with_write_source(tx, "concave_prod_build_set_backend_info")
-+            .await?;
-+        tracing::info!("[concave] _backend_info stamped from env (deployment_type set)");
-+    }
 +    let application_storage = if config.role.is_leader() {
 +        Application::initialize_storage(
              runtime.clone(),
@@ -234,7 +191,7 @@ index 4633f83f5..9e2e397b6 100644
  
      let file_storage = FileStorage {
          transactional_file_storage: TransactionalFileStorage::new(
-@@ -221,21 +330,41 @@ pub async fn make_app(
+@@ -221,21 +287,41 @@ pub async fn make_app(
          reqwest::redirect::Policy::default(),
      );
      let function_runner: Arc<dyn FunctionRunner<ProdRuntime>> =
@@ -288,7 +245,7 @@ index 4633f83f5..9e2e397b6 100644
          runtime.clone(),
          database.clone(),
          file_storage.clone(),
-@@ -252,7 +381,7 @@ pub async fn make_app(
+@@ -252,7 +338,7 @@ pub async fn make_app(
          config.convex_site_url()?,
          searcher.clone(),
          segment_metadata_fetcher,
@@ -297,7 +254,7 @@ index 4633f83f5..9e2e397b6 100644
          actions,
          Arc::new(RedactLogsToClient::new(config.redact_logs_to_client)),
          Arc::new(ApplicationAuth::new(
-@@ -273,7 +402,7 @@ pub async fn make_app(
+@@ -273,7 +359,7 @@ pub async fn make_app(
      let origin = config.convex_origin_url()?;
      let instance_name = config.name();
  
@@ -306,7 +263,7 @@ index 4633f83f5..9e2e397b6 100644
          let beacon_future = beacon::start_beacon(
              runtime.clone(),
              database.clone(),
-@@ -283,14 +412,80 @@ pub async fn make_app(
+@@ -283,14 +369,80 @@ pub async fn make_app(
          runtime.spawn_background("beacon_worker", beacon_future);
      }
  

@@ -1,9 +1,9 @@
 diff --git a/crates/pb/protos/funrun.proto b/crates/pb/protos/funrun.proto
 new file mode 100644
-index 000000000..d8be7724c
+index 000000000..64370d857
 --- /dev/null
 +++ b/crates/pb/protos/funrun.proto
-@@ -0,0 +1,150 @@
+@@ -0,0 +1,151 @@
 +syntax = "proto3";
 +
 +package funrun;
@@ -97,6 +97,7 @@ index 000000000..d8be7724c
 +  oneof part {
 +    common.HttpActionResponse response = 1;
 +    RunFunctionResult result = 2;
++    outcome.LogLine log_line = 3;
 +  }
 +}
 +

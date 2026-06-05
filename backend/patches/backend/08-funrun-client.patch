@@ -11,7 +11,7 @@ index bbdcaec82..9db9f167f 100644
      module_paths::CanonicalizedComponentModulePath,
      reference::Reference,
 diff --git a/crates/common/src/knobs.rs b/crates/common/src/knobs.rs
-index 2a4681265..942371cfe 100644
+index 8f0960f9a..5849dbdc2 100644
 --- a/crates/common/src/knobs.rs
 +++ b/crates/common/src/knobs.rs
 @@ -1126,6 +1126,11 @@ pub static FUNRUN_INDEX_READS_TO_CONDUCTOR_PERCENT: LazyLock<usize> =
@@ -293,10 +293,10 @@ index 000000000..17e83f819
 +}
 diff --git a/crates/function_runner/src/remote.rs b/crates/function_runner/src/remote.rs
 new file mode 100644
-index 000000000..a4349de26
+index 000000000..a0960ed59
 --- /dev/null
 +++ b/crates/function_runner/src/remote.rs
-@@ -0,0 +1,609 @@
+@@ -0,0 +1,623 @@
 +use std::{
 +    collections::{
 +        BTreeMap,
@@ -386,9 +386,9 @@ index 000000000..a4349de26
 +    FunctionWrites,
 +};
 +
-+const MAX_GRPC_MESSAGE_BYTES: usize = udf::HTTP_ACTION_BODY_LIMIT + (1 << 20);
++pub const MAX_GRPC_MESSAGE_BYTES: usize = udf::HTTP_ACTION_BODY_LIMIT + (1 << 20);
 +
-+fn funrun_client_tls_config() -> anyhow::Result<Option<ClientTlsConfig>> {
++pub fn funrun_tls_pem_from_env() -> anyhow::Result<Option<(Vec<u8>, Vec<u8>, Vec<u8>)>> {
 +    let cert = std::env::var_os("CONVEX_FUNRUN_TLS_CERT");
 +    let key = std::env::var_os("CONVEX_FUNRUN_TLS_KEY");
 +    let ca = std::env::var_os("CONVEX_FUNRUN_TLS_CA");
@@ -401,19 +401,25 @@ index 000000000..a4349de26
 +                .map_err(|e| anyhow::anyhow!("reading CONVEX_FUNRUN_TLS_KEY {key:?}: {e}"))?;
 +            let ca_pem = std::fs::read(&ca)
 +                .map_err(|e| anyhow::anyhow!("reading CONVEX_FUNRUN_TLS_CA {ca:?}: {e}"))?;
-+            let domain =
-+                std::env::var("CONVEX_FUNRUN_TLS_DOMAIN").unwrap_or_else(|_| "funrun".to_string());
-+            let config = ClientTlsConfig::new()
-+                .domain_name(domain)
-+                .ca_certificate(Certificate::from_pem(ca_pem))
-+                .identity(TlsIdentity::from_pem(cert_pem, key_pem));
-+            Ok(Some(config))
++            Ok(Some((cert_pem, key_pem, ca_pem)))
 +        },
 +        _ => anyhow::bail!(
 +            "funrun mTLS misconfigured: set ALL of CONVEX_FUNRUN_TLS_CERT, CONVEX_FUNRUN_TLS_KEY, \
 +             CONVEX_FUNRUN_TLS_CA (file paths) to enable mutual TLS, or NONE of them for plaintext"
 +        ),
 +    }
++}
++
++fn funrun_client_tls_config() -> anyhow::Result<Option<ClientTlsConfig>> {
++    let Some((cert_pem, key_pem, ca_pem)) = funrun_tls_pem_from_env()? else {
++        return Ok(None);
++    };
++    let domain = std::env::var("CONVEX_FUNRUN_TLS_DOMAIN").unwrap_or_else(|_| "funrun".to_string());
++    let config = ClientTlsConfig::new()
++        .domain_name(domain)
++        .ca_certificate(Certificate::from_pem(ca_pem))
++        .identity(TlsIdentity::from_pem(cert_pem, key_pem));
++    Ok(Some(config))
 +}
 +
 +pub struct RemoteFunctionRunner<RT: Runtime> {
@@ -605,6 +611,7 @@ index 000000000..a4349de26
 +        identity: Identity,
 +        ts: RepeatableTimestamp,
 +        existing_writes: FunctionWrites,
++        log_line_sender: Option<mpsc::UnboundedSender<LogLine>>,
 +        http_action_metadata: HttpActionMetadata,
 +        default_system_env_vars: BTreeMap<EnvVarName, EnvVarValue>,
 +        in_memory_index_last_modified: BTreeMap<IndexId, Timestamp>,
@@ -699,6 +706,12 @@ index 000000000..a4349de26
 +            .context("funrun RunHttpAction stream error")?
 +        {
 +            match part.part {
++                Some(pb::funrun::http_action_response_part::Part::LogLine(log_line)) => {
++                    let log_line = LogLine::try_from(log_line)?;
++                    if let Some(sender) = &log_line_sender {
++                        let _ = sender.send(log_line);
++                    }
++                },
 +                Some(pb::funrun::http_action_response_part::Part::Response(response)) => {
 +                    let part = http_action_response_part_from_proto(response)?;
 +                    let _ = http_response_streamer.send_part(part)?;
@@ -777,6 +790,7 @@ index 000000000..a4349de26
 +                    identity,
 +                    ts,
 +                    existing_writes,
++                    log_line_sender,
 +                    http_action_metadata,
 +                    default_system_env_vars,
 +                    in_memory_index_last_modified,

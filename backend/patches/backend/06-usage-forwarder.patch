@@ -1,14 +1,23 @@
 diff --git a/crates/local_backend/src/usage_forwarder.rs b/crates/local_backend/src/usage_forwarder.rs
 new file mode 100644
-index 000000000..4e83c0ad0
+index 000000000..5b77e7898
 --- /dev/null
 +++ b/crates/local_backend/src/usage_forwarder.rs
-@@ -0,0 +1,123 @@
+@@ -0,0 +1,197 @@
 +use async_trait::async_trait;
++use axum::{
++    extract::RawQuery,
++    response::{
++        IntoResponse,
++        Response,
++    },
++};
++use common::http::extract::MtState;
 +use events::usage::{
 +    UsageEvent,
 +    UsageEventLogger,
 +};
++use http::StatusCode;
 +use reqwest::Client;
 +use tokio::{
 +    sync::{
@@ -20,6 +29,11 @@ index 000000000..4e83c0ad0
 +        timeout,
 +        Duration,
 +    },
++};
++
++use crate::{
++    authentication::ExtractIdentity,
++    LocalAppState,
 +};
 +
 +const USAGE_FORWARDER_CHANNEL_CAPACITY: usize = 2048;
@@ -125,5 +139,65 @@ index 000000000..4e83c0ad0
 +            let _ = timeout(Duration::from_secs(5), handle).await;
 +        }
 +        Ok(())
++    }
++}
++
++pub async fn insights_query(
++    MtState(st): MtState<LocalAppState>,
++    ExtractIdentity(identity): ExtractIdentity,
++    RawQuery(query): RawQuery,
++) -> Response {
++    if identity
++        .require_operation(keybroker::DeploymentOp::ViewData)
++        .is_err()
++    {
++        return (StatusCode::FORBIDDEN, "insights requires deployment admin").into_response();
++    }
++    let Some(query_url) = std::env::var("CONVEX_INSIGHTS_QUERY_URL")
++        .ok()
++        .filter(|u| !u.is_empty())
++    else {
++        return (
++            StatusCode::NOT_FOUND,
++            "insights query endpoint not configured",
++        )
++            .into_response();
++    };
++    let token = std::env::var("CONVEX_USAGE_SINK_TOKEN")
++        .ok()
++        .filter(|t| !t.is_empty());
++    let upstream = format!(
++        "{}/api/dashboard/teams/0/usage/query?deploymentName={}&{}",
++        query_url.trim_end_matches('/'),
++        st.instance_name,
++        query.unwrap_or_default()
++    );
++    let client = Client::builder()
++        .timeout(Duration::from_secs(15))
++        .build()
++        .unwrap_or_else(|_| Client::new());
++    let mut req = client.get(&upstream);
++    if let Some(token) = token {
++        req = req.bearer_auth(token);
++    }
++    match req.send().await {
++        Ok(resp) => {
++            let status =
++                StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
++            let body = resp.bytes().await.unwrap_or_default();
++            (
++                status,
++                [(
++                    http::header::CONTENT_TYPE,
++                    http::HeaderValue::from_static("application/json"),
++                )],
++                body,
++            )
++                .into_response()
++        },
++        Err(e) => {
++            tracing::warn!("[concave] insights query proxy failed: {e}");
++            (StatusCode::BAD_GATEWAY, "insights upstream error").into_response()
++        },
 +    }
 +}
