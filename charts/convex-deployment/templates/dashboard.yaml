@@ -19,16 +19,19 @@ spec:
         {{- include "convex.componentLabels" (dict "ctx" . "component" "dashboard") | nindent 8 }}
         {{- include "convex.componentDiscoveryLabel" (dict "ctx" . "component" "dashboard") | nindent 8 }}
     spec:
+      {{- if .Values.dashboard.nodes }}
       affinity:
         nodeAffinity:
-          preferredDuringSchedulingIgnoredDuringExecution:
-            - weight: 1
-              preference:
-                matchExpressions:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
                   - key: kubernetes.io/hostname
                     operator: In
                     values:
-                      - {{ .Values.ha.preferredNode }}
+                      {{- range .Values.dashboard.nodes }}
+                      - {{ . }}
+                      {{- end }}
+      {{- end }}
       containers:
         - name: dashboard
           image: {{ include "convex.image" (dict "ctx" . "spec" .Values.image.dashboard) }}
@@ -65,8 +68,10 @@ spec:
             httpGet: { path: /, port: http }
             initialDelaySeconds: 30
             periodSeconds: 20
+          {{- with .Values.resources.dashboard }}
           resources:
-            {{- toYaml .Values.resources.dashboard | nindent 12 }}
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           securityContext:
             runAsNonRoot: true
             runAsUser: 1001

@@ -55,8 +55,10 @@ spec:
             preStop:
               exec:
                 command: ["sh", "-c", "kill -INT 1; sleep 2"]
+          {{- with .Values.resources.follower }}
           resources:
-            {{- toYaml .Values.resources.follower | nindent 12 }}
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           securityContext:
             runAsNonRoot: true
             runAsUser: 1001

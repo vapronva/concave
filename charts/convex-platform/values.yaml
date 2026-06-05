@@ -17,15 +17,10 @@ usher:
     tag: ""
   bigbrainUrl: ""
   preferredNode: bho-core-v2
+  nodes: []
   config:
     deployments: []
-  resources:
-    requests:
-      cpu: 50m
-      memory: 64Mi
-    limits:
-      cpu: "1"
-      memory: 256Mi
+  resources: {}
 
 bigbrain:
   enabled: true
@@ -45,12 +40,7 @@ bigbrain:
     stability: 15s
     warmthLag: 5000000000
   preferredNode: bho-core-v2
+  nodes: []
   rbac:
     create: true
-  resources:
-    requests:
-      cpu: 50m
-      memory: 64Mi
-    limits:
-      cpu: "1"
-      memory: 256Mi
+  resources: {}

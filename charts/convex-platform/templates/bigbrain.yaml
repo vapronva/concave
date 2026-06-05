@@ -85,6 +85,17 @@ spec:
                     operator: In
                     values:
                       - {{ $b.preferredNode }}
+          {{- if $b.nodes }}
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      {{- range $b.nodes }}
+                      - {{ . }}
+                      {{- end }}
+          {{- end }}
       containers:
         - name: bigbrain
           image: {{ include "convex-platform.image" (dict "ctx" . "spec" $b.image) }}
@@ -123,8 +134,10 @@ spec:
             httpGet: { path: /healthz, port: http }
             initialDelaySeconds: 10
             periodSeconds: 20
+          {{- with $b.resources }}
           resources:
-            {{- toYaml $b.resources | nindent 12 }}
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
 
 ---
 apiVersion: v1

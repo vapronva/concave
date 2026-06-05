@@ -31,6 +31,17 @@ spec:
                     operator: In
                     values:
                       - {{ .Values.ha.preferredNode }}
+          {{- if .Values.funrun.nodes }}
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      {{- range .Values.funrun.nodes }}
+                      - {{ . }}
+                      {{- end }}
+          {{- end }}
         podAntiAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
             - weight: 1
@@ -76,8 +87,10 @@ spec:
             preStop:
               exec:
                 command: ["sh", "-c", "sleep 3"]
+          {{- with .Values.resources.funrun }}
           resources:
-            {{- toYaml .Values.resources.funrun | nindent 12 }}
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           securityContext:
             runAsNonRoot: true
             runAsUser: 1001

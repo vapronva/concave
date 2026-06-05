@@ -46,6 +46,17 @@ spec:
                     operator: In
                     values:
                       - {{ $u.preferredNode }}
+          {{- if $u.nodes }}
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      {{- range $u.nodes }}
+                      - {{ . }}
+                      {{- end }}
+          {{- end }}
         podAntiAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
             - weight: 1
@@ -78,8 +89,10 @@ spec:
             tcpSocket: { port: http }
             initialDelaySeconds: 2
             periodSeconds: 10
+          {{- with $u.resources }}
           resources:
-            {{- toYaml $u.resources | nindent 12 }}
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
       volumes:
         - name: config
           configMap:

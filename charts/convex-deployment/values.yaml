@@ -57,6 +57,7 @@ funrun:
   enabled: true
   replicas: 2
   listen: ":8090"
+  nodes: []
   hpa:
     enabled: true
     minReplicas: 2
@@ -66,6 +67,7 @@ funrun:
 dashboard:
   enabled: true
   port: 6791
+  nodes: []
   adminKeyRef:
     name: ""
     key: admin-key
@@ -77,31 +79,7 @@ ingress:
     port: 8080
 
 resources:
-  leader:
-    requests:
-      cpu: 500m
-      memory: 1Gi
-    limits:
-      cpu: "6"
-      memory: 6Gi
-  follower:
-    requests:
-      cpu: 250m
-      memory: 512Mi
-    limits:
-      cpu: "2"
-      memory: 3Gi
-  funrun:
-    requests:
-      cpu: 250m
-      memory: 512Mi
-    limits:
-      cpu: "4"
-      memory: 4Gi
-  dashboard:
-    requests:
-      cpu: 100m
-      memory: 256Mi
-    limits:
-      cpu: "2"
-      memory: 1Gi
+  leader: {}
+  follower: {}
+  funrun: {}
+  dashboard: {}
