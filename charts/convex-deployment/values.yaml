@@ -60,6 +60,9 @@ controlPlane:
     name: ""
     key: control-plane-token
 
+backend:
+  extraEnv: []
+
 funrun:
   enabled: true
   replicas: 2
@@ -67,6 +70,7 @@ funrun:
   healthListen: ":8091"
   maxSnapshotLagSeconds: 30
   nodes: []
+  extraEnv: []
   hpa:
     enabled: true
     minReplicas: 2

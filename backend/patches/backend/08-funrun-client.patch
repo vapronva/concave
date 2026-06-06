@@ -350,16 +350,23 @@ index 000000000..17e83f819
 +}
 diff --git a/crates/function_runner/src/remote.rs b/crates/function_runner/src/remote.rs
 new file mode 100644
-index 000000000..defb48471
+index 000000000..0926a1d26
 --- /dev/null
 +++ b/crates/function_runner/src/remote.rs
-@@ -0,0 +1,653 @@
+@@ -0,0 +1,734 @@
 +use std::{
 +    collections::{
 +        BTreeMap,
 +        BTreeSet,
 +    },
-+    sync::Arc,
++    net::SocketAddr,
++    sync::{
++        atomic::{
++            AtomicUsize,
++            Ordering,
++        },
++        Arc,
++    },
 +    time::Duration,
 +};
 +
@@ -417,12 +424,16 @@ index 000000000..defb48471
 +    },
 +    udf_config::types::UdfConfig,
 +};
++use parking_lot::RwLock;
 +use pb::error_metadata::ErrorMetadataStatusExt;
 +use sync_types::{
 +    CanonicalizedModulePath,
 +    Timestamp,
 +};
-+use tokio::sync::mpsc;
++use tokio::{
++    net::lookup_host,
++    sync::mpsc,
++};
 +use tonic::transport::{
 +    Certificate,
 +    Channel,
@@ -486,8 +497,42 @@ index 000000000..defb48471
 +    Ok(Some(config))
 +}
 +
++fn parse_funrun_target(addr: &str) -> anyhow::Result<(bool, String, u16)> {
++    let (is_https, rest) = match addr.strip_prefix("https://") {
++        Some(rest) => (true, rest),
++        None => (
++            false,
++            addr.strip_prefix("http://").with_context(|| {
++                format!("CONVEX_FUNRUN_ADDR must start with http:// or https://: {addr}")
++            })?,
++        ),
++    };
++    let rest = rest.trim_end_matches('/');
++    let (host, port) = rest
++        .rsplit_once(':')
++        .with_context(|| format!("CONVEX_FUNRUN_ADDR must include a port: {addr}"))?;
++    let port: u16 = port
++        .parse()
++        .with_context(|| format!("invalid funrun port in {addr}"))?;
++    anyhow::ensure!(!host.is_empty(), "empty funrun host in {addr}");
++    Ok((is_https, host.to_string(), port))
++}
++
++fn funrun_endpoint(uri: &str, tls_config: &Option<ClientTlsConfig>) -> anyhow::Result<Endpoint> {
++    let mut endpoint = Endpoint::from_shared(uri.to_string())
++        .map_err(|e| anyhow::anyhow!("invalid funrun endpoint {uri}: {e}"))?
++        .tcp_nodelay(true);
++    if let Some(tls_config) = tls_config {
++        endpoint = endpoint
++            .tls_config(tls_config.clone())
++            .map_err(|e| anyhow::anyhow!("invalid funrun client TLS configuration: {e}"))?;
++    }
++    Ok(endpoint)
++}
++
 +pub struct RemoteFunctionRunner<RT: Runtime> {
-+    channel: Channel,
++    channels: Arc<RwLock<Vec<Channel>>>,
++    next: AtomicUsize,
 +    local: FunctionRunnerCore<RT, DeploymentStorage>,
 +    deployment: DeploymentMetadata,
 +    key_broker: KeyBroker,
@@ -506,13 +551,8 @@ index 000000000..defb48471
 +        rt: RT,
 +        storage: DeploymentStorage,
 +    ) -> anyhow::Result<Self> {
-+        let mut endpoint = Endpoint::from_shared(funrun_addr.clone())
-+            .map_err(|e| anyhow::anyhow!("Invalid CONVEX_FUNRUN_ADDR {funrun_addr}: {e}"))?
-+            .tcp_nodelay(true);
-+        if let Some(tls_config) = funrun_client_tls_config()? {
-+            endpoint = endpoint
-+                .tls_config(tls_config)
-+                .map_err(|e| anyhow::anyhow!("invalid funrun client TLS configuration: {e}"))?;
++        let tls_config = funrun_client_tls_config()?;
++        if tls_config.is_some() {
 +            tracing::info!("[funrun] connecting to fleet over mutual TLS");
 +        } else {
 +            tracing::warn!(
@@ -520,10 +560,45 @@ index 000000000..defb48471
 +                 use only for local/dev"
 +            );
 +        }
-+        let channel = endpoint.connect_lazy();
++        let (is_https, host, port) = parse_funrun_target(&funrun_addr)?;
++        let fallback = funrun_endpoint(&funrun_addr, &tls_config)?.connect_lazy();
++        let channels = Arc::new(RwLock::new(vec![fallback]));
++        let refresh_channels = channels.clone();
++        let refresh_rt = rt.clone();
++        rt.spawn_background("funrun_lb_refresh", async move {
++            let scheme = if is_https { "https" } else { "http" };
++            loop {
++                match lookup_host((host.as_str(), port)).await {
++                    Ok(addrs) => {
++                        let unique: BTreeSet<SocketAddr> = addrs.collect();
++                        let mut next_channels = Vec::with_capacity(unique.len());
++                        for addr in &unique {
++                            match funrun_endpoint(&format!("{scheme}://{addr}"), &tls_config) {
++                                Ok(endpoint) => next_channels.push(endpoint.connect_lazy()),
++                                Err(e) => {
++                                    tracing::warn!("[funrun-lb] skipping endpoint {addr}: {e}")
++                                },
++                            }
++                        }
++                        if !next_channels.is_empty() {
++                            let count = next_channels.len();
++                            *refresh_channels.write() = next_channels;
++                            tracing::debug!(
++                                "[funrun-lb] balancing funrun traffic across {count} endpoint(s)"
++                            );
++                        }
++                    },
++                    Err(e) => {
++                        tracing::warn!("[funrun-lb] DNS resolution for {host}:{port} failed: {e}")
++                    },
++                }
++                refresh_rt.wait(Duration::from_secs(10)).await;
++            }
++        });
 +        let local = FunctionRunnerCore::new(rt.clone(), storage, 100)?;
 +        Ok(Self {
-+            channel,
++            channels,
++            next: AtomicUsize::new(0),
 +            local,
 +            deployment,
 +            key_broker,
@@ -531,6 +606,12 @@ index 000000000..defb48471
 +            rt,
 +            instance_secret,
 +        })
++    }
++
++    fn pick_channel(&self) -> Channel {
++        let channels = self.channels.read();
++        let idx = self.next.fetch_add(1, Ordering::Relaxed) % channels.len();
++        channels[idx].clone()
 +    }
 +
 +    fn funrun_auth_header(&self) -> String {
@@ -624,7 +705,7 @@ index 000000000..defb48471
 +        };
 +        let mut initial_attempt = 0;
 +        let mut stream = loop {
-+            let mut client = pb::funrun::funrun_client::FunrunClient::new(self.channel.clone())
++            let mut client = pb::funrun::funrun_client::FunrunClient::new(self.pick_channel())
 +                .max_decoding_message_size(MAX_GRPC_MESSAGE_BYTES)
 +                .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES);
 +            match client
@@ -766,7 +847,7 @@ index 000000000..defb48471
 +            http_request_head: Some(request_head.clone().into()),
 +            http_request_body,
 +        };
-+        let mut client = pb::funrun::funrun_client::FunrunClient::new(self.channel.clone())
++        let mut client = pb::funrun::funrun_client::FunrunClient::new(self.pick_channel())
 +            .max_decoding_message_size(MAX_GRPC_MESSAGE_BYTES)
 +            .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES);
 +        let mut stream = client

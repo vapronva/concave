@@ -46,6 +46,9 @@ spec:
             {{- if .Values.insights.enabled }}
             {{- include "convex.usageSinkEnv" . | nindent 12 }}
             {{- end }}
+            {{- with .Values.backend.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           volumeMounts:
             {{- include "convex.dataVolumeMount" . | nindent 12 }}
           readinessProbe:

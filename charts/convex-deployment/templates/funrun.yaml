@@ -81,6 +81,9 @@ spec:
             {{- end }}
             - name: STORAGE_DIR
               value: {{ include "convex.storageDir" . | quote }}
+            {{- with .Values.funrun.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           volumeMounts:
             {{- include "convex.dataVolumeMount" . | nindent 12 }}
           readinessProbe:
@@ -123,6 +126,7 @@ metadata:
     {{- include "convex.componentLabels" (dict "ctx" . "component" "funrun") | nindent 4 }}
 
 spec:
+  clusterIP: None
   selector:
     {{- include "convex.componentSelectorLabels" (dict "ctx" . "component" "funrun") | nindent 4 }}
   ports:
