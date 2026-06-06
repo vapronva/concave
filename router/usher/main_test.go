@@ -208,7 +208,7 @@ func TestServeHTTP_UpgradeKeepsHijacker(t *testing.T) {
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		_, _ = rw.WriteString("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: test\r\n\r\n")
 		_ = rw.Flush()
 	}))
@@ -226,7 +226,7 @@ func TestServeHTTP_UpgradeKeepsHijacker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 	_, _ = io.WriteString(
 		conn,
