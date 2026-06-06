@@ -3,17 +3,9 @@ package election
 import "time"
 
 type action struct {
-	pod  string
-	url  string
-	kind actionKind
+	pod string
+	url string
 }
-
-type actionKind int
-
-const (
-	actPromote actionKind = iota
-	actDemote
-)
 
 type decision struct {
 	leaderPod       string
@@ -40,39 +32,26 @@ func claimedLeaders(obs []observation) []observation {
 	return out
 }
 
-func freshestLeaseTS(claims []observation) (uint64, bool) {
-	var freshest uint64
-	var found bool
-	for _, o := range claims {
-		if o.status.LeaseTS == nil {
-			continue
-		}
-		if !found || *o.status.LeaseTS > freshest {
-			freshest, found = *o.status.LeaseTS, true
-		}
-	}
-	return freshest, found
-}
-
 func pickLeader(claims []observation, incumbent string) (observation, bool) {
 	if len(claims) == 0 {
 		return observation{}, false
-	}
-	freshTS, haveFresh := freshestLeaseTS(claims)
-	for _, o := range claims {
-		if o.be.Pod != incumbent {
-			continue
-		}
-		if haveFresh && (o.status.LeaseTS == nil || *o.status.LeaseTS < freshTS) {
-			break
-		}
-		return o, true
 	}
 	best := claims[0]
 	for _, o := range claims[1:] {
 		if betterLeader(o, best) {
 			best = o
 		}
+	}
+	for _, o := range claims {
+		if o.be.Pod != incumbent {
+			continue
+		}
+		bestLease, bestHasLease := leaseOf(best)
+		incumbentLease, incumbentHasLease := leaseOf(o)
+		if bestHasLease && (!incumbentHasLease || incumbentLease < bestLease) {
+			break
+		}
+		return o, true
 	}
 	return best, true
 }
@@ -97,14 +76,11 @@ func leaseOf(o observation) (uint64, bool) {
 	return *o.status.LeaseTS, true
 }
 
-func bestCandidate(obs []observation, skip map[string]bool) (observation, bool) {
+func bestCandidate(obs []observation) (observation, bool) {
 	var best observation
 	var found bool
 	for _, o := range obs {
 		if !o.reach || !o.be.Ready || o.status.IsLeader {
-			continue
-		}
-		if skip[o.be.Pod] {
 			continue
 		}
 		if !found || morePreferredCandidate(o, best) {
@@ -134,16 +110,15 @@ type failbackParams struct {
 }
 
 type decideParams struct {
-	incumbent   string
-	skipPromote map[string]bool
-	failback    failbackParams
+	incumbent string
+	failback  failbackParams
 }
 
 func decide(obs []observation, p decideParams) decision {
 	claims := claimedLeaders(obs)
 	d := decision{liveLeaderCount: len(claims)}
 	if len(claims) == 0 {
-		if cand, ok := bestCandidate(obs, p.skipPromote); ok {
+		if cand, ok := bestCandidate(obs); ok {
 			c := cand
 			d.promoteTarget = &c
 		}
@@ -156,11 +131,11 @@ func decide(obs []observation, p decideParams) decision {
 	d.leaderPod, d.leaderURL = leader.be.Pod, leader.be.URL
 	for _, o := range claims {
 		if o.be.Pod != leader.be.Pod {
-			d.demotes = append(d.demotes, action{pod: o.be.Pod, url: o.be.URL, kind: actDemote})
+			d.demotes = append(d.demotes, action{pod: o.be.Pod, url: o.be.URL})
 		}
 	}
 	if len(claims) == 1 {
-		fb, st := evaluateFailback(obs, leader, p.skipPromote, p.failback)
+		fb, st := evaluateFailback(obs, leader, p.failback)
 		d.failbackTarget = fb
 		d.failbackState = st
 	}
@@ -170,13 +145,12 @@ func decide(obs []observation, p decideParams) decision {
 func evaluateFailback(
 	obs []observation,
 	leader observation,
-	skip map[string]bool,
 	p failbackParams,
 ) (*observation, failbackState) {
 	if !p.enabled {
 		return nil, failbackState{}
 	}
-	cand, ok := bestFailbackCandidate(obs, leader, skip, p.warmthLagNs)
+	cand, ok := bestFailbackCandidate(obs, leader, p.warmthLagNs)
 	if !ok {
 		return nil, failbackState{}
 	}
@@ -195,7 +169,6 @@ func evaluateFailback(
 func bestFailbackCandidate(
 	obs []observation,
 	leader observation,
-	skip map[string]bool,
 	warmthLagNs uint64,
 ) (observation, bool) {
 	var best observation
@@ -205,9 +178,6 @@ func bestFailbackCandidate(
 			continue
 		}
 		if o.be.Pod == leader.be.Pod {
-			continue
-		}
-		if skip[o.be.Pod] {
 			continue
 		}
 		if o.be.Priority <= leader.be.Priority {

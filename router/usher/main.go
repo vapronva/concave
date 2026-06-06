@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"path"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -22,37 +23,33 @@ import (
 )
 
 const (
-	bodyReadLimit        = 4096
-	streamBufferMax      = 1 << 16
-	httpClientTimeout    = 3 * time.Second
-	backendQueryTimeout  = 2 * time.Second
-	resolveTimeout       = 3 * time.Second
-	resolveInterval      = 5 * time.Second
-	readHeaderTimeout    = 10 * time.Second
-	idleTimeout          = 120 * time.Second
-	shutdownTimeout      = 10 * time.Second
-	streamBackoffInitial = 1 * time.Second
-	streamBackoffCap     = 15 * time.Second
-	instancePrefix       = "/instance"
-	sitePort             = "3211"
-	routesPerDeployment  = 2
+	bodyReadLimit         = 4096
+	maxRequestBodyBytes   = 128 * 1024 * 1024
+	streamBufferMax       = 1 << 16
+	httpClientTimeout     = 3 * time.Second
+	resolveTimeout        = 3 * time.Second
+	resolveInterval       = 60 * time.Second
+	forcedResolveInterval = 1 * time.Second
+	readHeaderTimeout     = 10 * time.Second
+	idleTimeout           = 120 * time.Second
+	shutdownTimeout       = 10 * time.Second
+	streamBackoffInitial  = 1 * time.Second
+	streamBackoffCap      = 15 * time.Second
+	streamHealthyAfter    = 30 * time.Second
+	instancePrefix        = "/instance"
+	sitePort              = "3211"
+	routesPerDeployment   = 2
+	maxHeaderBytes        = 64 * 1024
 )
 
 type deploymentCfg struct {
-	Host     string   `json:"host"`
-	SiteHost string   `json:"siteHost"`
-	Name     string   `json:"name"`
-	Backends []string `json:"backends"`
+	Host     string `json:"host"`
+	SiteHost string `json:"siteHost"`
+	Name     string `json:"name"`
 }
 
 type config struct {
 	Deployments []deploymentCfg `json:"deployments"`
-}
-
-type leadership struct {
-	Role     string `json:"role"`
-	IsLeader bool   `json:"is_leader"`
-	LatestTS int64  `json:"latest_ts"`
 }
 
 type leaderResponse struct {
@@ -67,53 +64,110 @@ type route struct {
 }
 
 type tracker struct {
-	host        string
-	siteHost    string
-	name        string
-	backends    []string
-	bigbrainURL string
-	client      *http.Client
-	mu          sync.RWMutex
-	leaderURL   string
-	proxy       *httputil.ReverseProxy
-	siteProxy   *httputil.ReverseProxy
+	host           string
+	siteHost       string
+	name           string
+	bigbrainURL    string
+	client         *http.Client
+	streamClient   *http.Client
+	proxyTransport *http.Transport
+	resolveCh      chan struct{}
+	resolveMu      sync.Mutex
+	nextResolve    time.Time
+	mu             sync.RWMutex
+	leaderURL      string
+	proxy          *httputil.ReverseProxy
+	siteProxy      *httputil.ReverseProxy
 }
 
-func newReverseProxy(u *url.URL) *httputil.ReverseProxy {
+func clonedDefaultTransport() *http.Transport {
+	if dt, ok := http.DefaultTransport.(*http.Transport); ok {
+		return dt.Clone()
+	}
+	return &http.Transport{}
+}
+
+func newProxyTransport() *http.Transport {
+	tr := clonedDefaultTransport()
+	tr.Proxy = nil
+	tr.MaxIdleConns = 256
+	tr.MaxIdleConnsPerHost = 64
+	return tr
+}
+
+func newReverseProxy(u *url.URL, nudge func(), tr *http.Transport) *httputil.ReverseProxy {
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(u)
+			pr.SetXForwarded()
+			pr.Out.Host = pr.In.Host
 		},
+		Transport:     tr,
 		FlushInterval: -1,
-		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
+		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			log.Printf("usher: upstream error: %v", err)
+			var maxBytesError *http.MaxBytesError
+			if errors.As(err, &maxBytesError) {
+				http.Error(w, "request entity too large", http.StatusRequestEntityTooLarge)
+				return
+			}
+			if r.Context().Err() == nil {
+				nudge()
+			}
 			http.Error(w, "bad gateway", http.StatusBadGateway)
+		},
+		ModifyResponse: func(resp *http.Response) error {
+			if resp.StatusCode != http.StatusMisdirectedRequest {
+				return nil
+			}
+			_ = resp.Body.Close()
+			body := []byte("service unavailable\n")
+			resp.StatusCode = http.StatusServiceUnavailable
+			resp.Status = http.StatusText(http.StatusServiceUnavailable)
+			resp.Header = make(http.Header)
+			resp.Header.Set("Content-Type", "text/plain; charset=utf-8")
+			resp.Header.Set("Content-Length", strconv.Itoa(len(body)))
+			resp.Header.Set("Retry-After", "1")
+			resp.ContentLength = int64(len(body))
+			resp.Body = io.NopCloser(strings.NewReader(string(body)))
+			resp.Trailer = nil
+			resp.TransferEncoding = nil
+			nudge()
+			return nil
 		},
 	}
 	return rp
 }
 
 func (t *tracker) setLeader(leaderURL string) bool {
+	var u *url.URL
+	var err error
+	if leaderURL != "" {
+		u, err = url.ParseRequestURI(leaderURL)
+		if err != nil || u.Scheme == "" || u.Host == "" {
+			log.Printf("usher: %s bad leader url %q: %v", t.host, leaderURL, err)
+			return false
+		}
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if leaderURL == t.leaderURL {
 		return false
 	}
+	if t.proxyTransport == nil {
+		t.proxyTransport = newProxyTransport()
+	}
+	t.proxyTransport.CloseIdleConnections()
 	if leaderURL == "" {
 		t.leaderURL, t.proxy, t.siteProxy = "", nil, nil
 		log.Printf("usher: %s leader cleared (none available)", t.host)
 		return true
 	}
-	u, err := url.Parse(leaderURL)
-	if err != nil {
-		log.Printf("usher: %s bad leader url %q: %v", t.host, leaderURL, err)
-		return false
-	}
-	t.leaderURL, t.proxy = leaderURL, newReverseProxy(u)
+	t.leaderURL, t.proxy = leaderURL, newReverseProxy(u, t.nudgeResolve, t.proxyTransport)
 	if t.siteHost != "" {
 		su := *u
 		su.Host = net.JoinHostPort(u.Hostname(), sitePort)
-		t.siteProxy = newReverseProxy(&su)
+		t.siteProxy = newReverseProxy(&su, t.nudgeResolve, t.proxyTransport)
 		log.Printf("usher: %s leader -> %s (site %s -> %s)", t.host, leaderURL, t.siteHost, su.String())
 	} else {
 		log.Printf("usher: %s leader -> %s", t.host, leaderURL)
@@ -131,13 +185,7 @@ func (t *tracker) currentLeader(site bool) *httputil.ReverseProxy {
 }
 
 func (t *tracker) resolveOnce(ctx context.Context) {
-	if t.bigbrainURL != "" {
-		if leader, ok := t.queryBigbrain(ctx); ok {
-			t.setLeader(leader)
-			return
-		}
-	}
-	if leader, ok := t.pollBackends(ctx); ok {
+	if leader, ok := t.queryBigbrain(ctx); ok {
 		t.setLeader(leader)
 	}
 }
@@ -148,7 +196,7 @@ func (t *tracker) queryBigbrain(ctx context.Context) (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	resp, err := t.client.Do(req) //nolint:bodyclose // closed via drainClose
+	resp, err := t.client.Do(req) //nolint:bodyclose // drainClose drains and closes the body
 	if err != nil {
 		return "", false
 	}
@@ -163,47 +211,17 @@ func (t *tracker) queryBigbrain(ctx context.Context) (string, bool) {
 	return lr.LeaderURL, true
 }
 
-func (t *tracker) pollBackends(ctx context.Context) (string, bool) {
-	best, bestTS := "", int64(-1)
-	for _, b := range t.backends {
-		l, ok := fetchLeadership(ctx, t.client, b)
-		if ok && l.IsLeader && l.LatestTS > bestTS {
-			best, bestTS = b, l.LatestTS
-		}
-	}
-	return best, best != ""
-}
-
-func fetchLeadership(ctx context.Context, client *http.Client, base string) (leadership, bool) {
-	rctx, cancel := context.WithTimeout(ctx, backendQueryTimeout)
-	defer cancel()
-	req, err := http.NewRequestWithContext(rctx, http.MethodGet, base+"/instance/leadership", nil)
-	if err != nil {
-		return leadership{}, false
-	}
-	resp, err := client.Do(req) //nolint:bodyclose // closed via drainClose
-	if err != nil {
-		return leadership{}, false
-	}
-	defer drainClose(resp.Body)
-	var l leadership
-	if json.NewDecoder(io.LimitReader(resp.Body, bodyReadLimit)).Decode(&l) != nil {
-		return leadership{}, false
-	}
-	return l, true
-}
-
 func (t *tracker) streamBigbrain(ctx context.Context) {
-	if t.bigbrainURL == "" {
-		return
-	}
 	u := strings.TrimRight(t.bigbrainURL, "/") + "/registry/deployments/" + t.name + "/leader-stream"
 	backoff := streamBackoffInitial
 	for {
 		if ctx.Err() != nil {
 			return
 		}
-		t.consumeStream(ctx, u)
+		healthy := t.consumeStream(ctx, u)
+		if healthy {
+			backoff = streamBackoffInitial
+		}
 		select {
 		case <-ctx.Done():
 			return
@@ -215,19 +233,20 @@ func (t *tracker) streamBigbrain(ctx context.Context) {
 	}
 }
 
-func (t *tracker) consumeStream(ctx context.Context, u string) {
+func (t *tracker) consumeStream(ctx context.Context, u string) bool {
+	started := time.Now()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
-		return
+		return false
 	}
 	req.Header.Set("Accept", "text/event-stream")
-	resp, err := (&http.Client{}).Do(req) //nolint:bodyclose // closed via drainClose
+	resp, err := t.streamClient.Do(req) //nolint:bodyclose // drainClose drains and closes the body
 	if err != nil {
-		return
+		return false
 	}
 	defer drainClose(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return
+		return false
 	}
 	sc := bufio.NewScanner(resp.Body)
 	sc.Buffer(make([]byte, 0, bodyReadLimit), streamBufferMax)
@@ -243,11 +262,12 @@ func (t *tracker) consumeStream(ctx context.Context, u string) {
 		}
 		t.setLeader(ev.LeaderURL)
 	}
+	return time.Since(started) >= streamHealthyAfter
 }
 
 func isBlockedControlPath(p string) bool {
-	c := path.Clean("/" + strings.TrimSuffix(p, "/"))
-	return c == instancePrefix || strings.HasPrefix(c, instancePrefix+"/") || strings.HasPrefix(c, instancePrefix+"_")
+	c := strings.ToLower(path.Clean("/" + strings.TrimSuffix(p, "/")))
+	return c == instancePrefix || strings.HasPrefix(c, instancePrefix+"/")
 }
 
 func (t *tracker) serveHTTP(w http.ResponseWriter, r *http.Request, site bool) {
@@ -255,51 +275,37 @@ func (t *tracker) serveHTTP(w http.ResponseWriter, r *http.Request, site bool) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
+	if !allowedMethod(r.Method) {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if r.ContentLength > maxRequestBodyBytes {
+		http.Error(w, "request entity too large", http.StatusRequestEntityTooLarge)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 	p := t.currentLeader(site)
 	if p == nil {
 		log.Printf("usher: %s no leader available", t.host)
 		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	mw := &misdirectWriter{ResponseWriter: w}
-	p.ServeHTTP(mw, r)
-	if mw.misdirected {
-		log.Printf("usher: %s upstream 421; re-resolving leader", t.host)
-		ctx, cancel := context.WithTimeout(context.Background(), resolveTimeout)
-		t.resolveOnce(ctx)
-		cancel()
-	}
+	p.ServeHTTP(w, r)
 }
 
-type misdirectWriter struct {
-	http.ResponseWriter
-
-	misdirected bool
-	wroteHeader bool
-}
-
-func (m *misdirectWriter) WriteHeader(code int) {
-	if m.wroteHeader {
-		return
+func allowedMethod(method string) bool {
+	switch method {
+	case http.MethodGet,
+		http.MethodHead,
+		http.MethodPost,
+		http.MethodPut,
+		http.MethodPatch,
+		http.MethodDelete,
+		http.MethodOptions:
+		return true
+	default:
+		return false
 	}
-	m.wroteHeader = true
-	if code == http.StatusMisdirectedRequest {
-		m.misdirected = true
-		m.ResponseWriter.Header().Set("Retry-After", "1")
-		m.ResponseWriter.WriteHeader(http.StatusServiceUnavailable)
-		return
-	}
-	m.ResponseWriter.WriteHeader(code)
-}
-
-func (m *misdirectWriter) Write(b []byte) (int, error) {
-	if !m.wroteHeader {
-		m.WriteHeader(http.StatusOK)
-	}
-	if m.misdirected {
-		return len(b), nil
-	}
-	return m.ResponseWriter.Write(b)
 }
 
 func startTracker(ctx context.Context, client *http.Client, bigbrainURL string, d deploymentCfg) *tracker {
@@ -308,22 +314,21 @@ func startTracker(ctx context.Context, client *http.Client, bigbrainURL string, 
 		name = firstLabel(d.Host)
 	}
 	t := &tracker{
-		host:        d.Host,
-		siteHost:    d.SiteHost,
-		name:        name,
-		backends:    d.Backends,
-		bigbrainURL: bigbrainURL,
-		client:      client,
+		host:           d.Host,
+		siteHost:       d.SiteHost,
+		name:           name,
+		bigbrainURL:    bigbrainURL,
+		client:         client,
+		streamClient:   &http.Client{Transport: newStreamTransport()},
+		proxyTransport: newProxyTransport(),
+		resolveCh:      make(chan struct{}, 1),
 	}
 	initCtx, cancel := context.WithTimeout(ctx, resolveTimeout)
 	t.resolveOnce(initCtx)
 	cancel()
 	go t.resolveLoop(ctx)
 	go t.streamBigbrain(ctx)
-	log.Printf(
-		"usher: configured host=%s siteHost=%q name=%s bigbrain=%q fallback=%v",
-		d.Host, d.SiteHost, name, bigbrainURL, d.Backends,
-	)
+	log.Printf("usher: configured host=%s siteHost=%q name=%s bigbrain=%q", d.Host, d.SiteHost, name, bigbrainURL)
 	return t
 }
 
@@ -334,12 +339,40 @@ func (t *tracker) resolveLoop(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
+		case <-t.resolveCh:
+			rctx, rcancel := context.WithTimeout(ctx, resolveTimeout)
+			t.resolveOnce(rctx)
+			rcancel()
 		case <-tick.C:
 			rctx, rcancel := context.WithTimeout(ctx, resolveTimeout)
 			t.resolveOnce(rctx)
 			rcancel()
 		}
 	}
+}
+
+func (t *tracker) nudgeResolve() {
+	t.resolveMu.Lock()
+	if time.Now().Before(t.nextResolve) {
+		t.resolveMu.Unlock()
+		return
+	}
+	t.nextResolve = time.Now().Add(forcedResolveInterval)
+	t.resolveMu.Unlock()
+	select {
+	case t.resolveCh <- struct{}{}:
+	default:
+	}
+}
+
+func newStreamTransport() *http.Transport {
+	tr := clonedDefaultTransport()
+	tr.Proxy = nil
+	tr.ResponseHeaderTimeout = resolveTimeout
+	tr.MaxIdleConns = 16
+	tr.MaxIdleConnsPerHost = 4
+	tr.IdleConnTimeout = idleTimeout
+	return tr
 }
 
 func main() {
@@ -358,6 +391,9 @@ func main() {
 	var cfg config
 	if err = json.Unmarshal(data, &cfg); err != nil {
 		log.Fatalf("parse config: %v", err)
+	}
+	if err = validateConfig(cfg, *bigbrainURL); err != nil {
+		log.Fatalf("invalid config: %v", err)
 	}
 	client := &http.Client{Timeout: httpClientTimeout}
 	routes := make(map[string]route, len(cfg.Deployments)*routesPerDeployment)
@@ -379,13 +415,19 @@ func main() {
 		host := stripPort(r.Host)
 		rt, ok := routes[host]
 		if !ok {
-			http.Error(w, "usher: unknown deployment host "+host, http.StatusNotFound)
+			http.Error(w, "unknown deployment host", http.StatusNotFound)
 			return
 		}
 		rt.tracker.serveHTTP(w, r, rt.site)
 	})
 	log.Printf("usher listening on %s, %d deployment(s), bigbrain=%q", *addr, len(cfg.Deployments), *bigbrainURL)
-	srv := &http.Server{Addr: *addr, Handler: mux, ReadHeaderTimeout: readHeaderTimeout, IdleTimeout: idleTimeout}
+	srv := &http.Server{
+		Addr:              *addr,
+		Handler:           mux,
+		ReadHeaderTimeout: readHeaderTimeout,
+		IdleTimeout:       idleTimeout,
+		MaxHeaderBytes:    maxHeaderBytes,
+	}
 	go func() {
 		if serr := srv.ListenAndServe(); serr != nil && !errors.Is(serr, http.ErrServerClosed) {
 			log.Printf("usher: serve: %v", serr)
@@ -399,6 +441,32 @@ func main() {
 	if serr := srv.Shutdown(shutCtx); serr != nil {
 		log.Printf("usher: shutdown: %v", serr)
 	}
+}
+
+func validateConfig(cfg config, bigbrainURL string) error {
+	if len(cfg.Deployments) == 0 {
+		return errors.New("at least one deployment must be configured")
+	}
+	u, err := url.ParseRequestURI(bigbrainURL)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return errors.New("USHER_BIGBRAIN_URL must be an absolute URL when deployments are configured")
+	}
+	hosts := make(map[string]struct{}, len(cfg.Deployments)*routesPerDeployment)
+	for _, d := range cfg.Deployments {
+		if d.Host == "" {
+			return errors.New("deployment host must not be empty")
+		}
+		for _, host := range []string{d.Host, d.SiteHost} {
+			if host == "" {
+				continue
+			}
+			if _, exists := hosts[host]; exists {
+				return errors.New("deployment hosts must be unique")
+			}
+			hosts[host] = struct{}{}
+		}
+	}
+	return nil
 }
 
 func env(k, d string) string {

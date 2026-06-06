@@ -6,6 +6,7 @@ import (
 	"errors"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -21,7 +22,6 @@ const (
 	dayLookbackHours           = 24
 	occKeyPartsCount           = 3
 	readKeyPartsCount          = 2
-	statusFailure              = "failure"
 	kindOCC                    = "occ"
 	kindRead                   = "read"
 	kindOCCRetried             = "occRetried"
@@ -34,6 +34,7 @@ const (
 	eventInsightReadLimit      = "InsightReadLimit"
 	fieldRequestID             = "request_id"
 	fieldOCCRetryCount         = "occ_retry_count"
+	fieldOCCFailedPermanently  = "occ_failed_permanently"
 	fieldCalls                 = "calls"
 	fieldSuccess               = "success"
 )
@@ -43,20 +44,20 @@ var ErrBadDateRange = errors.New("from/to must be YYYY-MM-DD and from < to")
 var dateRE = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
 
 type Row struct {
-	Deployment     string
-	TS             time.Time
-	Kind           string
-	UDFID          string
-	ComponentPath  *string
-	RequestID      string
-	ExecutionID    string
-	OCCTableName   *string
-	OCCDocumentID  *string
-	OCCWriteSource *string
-	OCCRetryCount  int
-	Status         *string
-	Success        *bool
-	Calls          []Call
+	Deployment           string
+	TS                   time.Time
+	Kind                 string
+	UDFID                string
+	ComponentPath        *string
+	RequestID            string
+	ExecutionID          string
+	OCCTableName         *string
+	OCCDocumentID        *string
+	OCCWriteSource       *string
+	OCCRetryCount        int
+	OCCFailedPermanently bool
+	Success              *bool
+	Calls                []Call
 }
 
 type Call struct {
@@ -67,15 +68,21 @@ type Call struct {
 
 type Insights struct {
 	memMu sync.Mutex
-	mem   map[string][]Row
+	mem   map[string]*deploymentRows
 	cap   int
+}
+
+type deploymentRows struct {
+	rows  []Row
+	start int
+	size  int
 }
 
 func New(ringCap int) *Insights {
 	if ringCap <= 0 {
 		ringCap = defaultRingCap
 	}
-	return &Insights{mem: make(map[string][]Row), cap: ringCap}
+	return &Insights{mem: make(map[string]*deploymentRows), cap: ringCap}
 }
 
 type AnyEvent map[string]map[string]any
@@ -98,10 +105,18 @@ func (i *Insights) Ingest(_ context.Context, deployment string, events []AnyEven
 func (i *Insights) store(r Row) {
 	i.memMu.Lock()
 	defer i.memMu.Unlock()
-	i.mem[r.Deployment] = append(i.mem[r.Deployment], r)
-	if dep := i.mem[r.Deployment]; len(dep) > i.cap {
-		i.mem[r.Deployment] = dep[len(dep)-i.cap:]
+	dep := i.mem[r.Deployment]
+	if dep == nil {
+		dep = &deploymentRows{rows: make([]Row, i.cap)}
+		i.mem[r.Deployment] = dep
 	}
+	if dep.size < len(dep.rows) {
+		dep.rows[(dep.start+dep.size)%len(dep.rows)] = r
+		dep.size++
+		return
+	}
+	dep.rows[dep.start] = r
+	dep.start = (dep.start + 1) % len(dep.rows)
 }
 
 func (i *Insights) MemLen() int {
@@ -109,7 +124,7 @@ func (i *Insights) MemLen() int {
 	defer i.memMu.Unlock()
 	total := 0
 	for _, dep := range i.mem {
-		total += len(dep)
+		total += dep.size
 	}
 	return total
 }
@@ -118,7 +133,12 @@ func (i *Insights) rows(deployment string, fromMs, toMs int64) []Row {
 	i.memMu.Lock()
 	defer i.memMu.Unlock()
 	var out []Row
-	for _, r := range i.mem[deployment] {
+	dep := i.mem[deployment]
+	if dep == nil {
+		return nil
+	}
+	for n := range dep.size {
+		r := dep.rows[(dep.start+n)%len(dep.rows)]
 		ms := r.TS.UnixMilli()
 		if ms >= fromMs && ms < toMs {
 			out = append(out, r)
@@ -167,7 +187,7 @@ func aggregateOCC(rows []Row) [][]any {
 func buildOCCRow(udfID, comp, occTable string, grp []Row) []any {
 	permanently := false
 	for _, r := range grp {
-		if r.Status != nil && *r.Status == statusFailure {
+		if r.OCCFailedPermanently {
 			permanently = true
 			break
 		}
@@ -347,25 +367,25 @@ func bucket(times []time.Time) []map[string]any {
 }
 
 func makeRow(deployment, kind string, p map[string]any) (Row, bool) {
-	now := time.Now().UTC()
+	now := eventTime(p)
 	switch kind {
 	case eventFunctionCall:
 		if isOCC, _ := p["is_occ"].(bool); !isOCC {
 			return Row{}, false
 		}
 		return Row{
-			Deployment:     deployment,
-			TS:             now,
-			Kind:           kindOCC,
-			UDFID:          getString(p, "udf_id"),
-			ComponentPath:  getStringPtr(p, "component_path"),
-			RequestID:      getString(p, fieldRequestID),
-			ExecutionID:    getString(p, "id"),
-			OCCTableName:   getStringPtr(p, "occ_table_name"),
-			OCCDocumentID:  getStringPtr(p, "occ_document_id"),
-			OCCWriteSource: getStringPtr(p, "occ_write_source"),
-			OCCRetryCount:  getInt(p, fieldOCCRetryCount),
-			Status:         getStringPtr(p, "status"),
+			Deployment:           deployment,
+			TS:                   now,
+			Kind:                 kindOCC,
+			UDFID:                getString(p, "udf_id"),
+			ComponentPath:        getStringPtr(p, "component_path"),
+			RequestID:            getString(p, fieldRequestID),
+			ExecutionID:          getString(p, "id"),
+			OCCTableName:         getStringPtr(p, "occ_table_name"),
+			OCCDocumentID:        getStringPtr(p, "occ_document_id"),
+			OCCWriteSource:       getStringPtr(p, "occ_write_source"),
+			OCCRetryCount:        getInt(p, fieldOCCRetryCount),
+			OCCFailedPermanently: getBool(p, fieldOCCFailedPermanently),
 		}, true
 	case eventInsightReadLimit:
 		return Row{
@@ -381,6 +401,15 @@ func makeRow(deployment, kind string, p map[string]any) (Row, bool) {
 		}, true
 	}
 	return Row{}, false
+}
+
+func eventTime(p map[string]any) time.Time {
+	if v, ok := p["timestamp"].(json.Number); ok {
+		if ms, err := v.Int64(); err == nil {
+			return time.UnixMilli(ms).UTC()
+		}
+	}
+	return time.Now().UTC()
 }
 
 func getString(m map[string]any, k string) string {
@@ -406,6 +435,11 @@ func getBoolPtr(m map[string]any, k string) *bool {
 	return nil
 }
 
+func getBool(m map[string]any, k string) bool {
+	v, _ := m[k].(bool)
+	return v
+}
+
 func getInt(m map[string]any, k string) int {
 	switch v := m[k].(type) {
 	case int:
@@ -414,6 +448,10 @@ func getInt(m map[string]any, k string) int {
 		return int(v)
 	case float64:
 		return int(v)
+	case json.Number:
+		if n, err := strconv.ParseInt(v.String(), 10, 64); err == nil {
+			return int(n)
+		}
 	}
 	return 0
 }

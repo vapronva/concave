@@ -39,15 +39,18 @@ hosts:
 
 ha:
   standbyReplicas: 1
-  leaderNode: bho-core-v2
-  followerNode: unnecessary-addition
-  preferredNode: bho-core-v2
+  preferredNode: ""
   leaderPriority: 100
   followerPriority: 0
+  leader:
+    nodeSelector: {}
+  follower:
+    nodeSelector: {}
 
 insights:
   enabled: false
   sinkUrl: ""
+  queryUrl: ""
   tokenRef:
     name: ""
     key: usage-token
@@ -61,6 +64,8 @@ funrun:
   enabled: true
   replicas: 2
   listen: ":8090"
+  healthListen: ":8091"
+  maxSnapshotLagSeconds: 30
   nodes: []
   hpa:
     enabled: true

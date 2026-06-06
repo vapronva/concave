@@ -1,5 +1,9 @@
 {{- if .Values.usher.enabled }}
 {{- $u := .Values.usher -}}
+{{- $deployments := required "deployments is required when usher.enabled" .Values.deployments -}}
+{{- if eq (len $deployments) 0 -}}
+{{- fail "deployments must contain at least one entry when usher.enabled" -}}
+{{- end -}}
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -12,7 +16,7 @@ metadata:
 
 data:
   config.json: |
-    {{ toJson (dict "deployments" $u.config.deployments) | nindent 4 }}
+    {{ toJson (dict "deployments" $deployments) | nindent 4 }}
 
 ---
 apiVersion: apps/v1
@@ -34,18 +38,20 @@ spec:
       labels:
         {{- include "convex.componentLabels" (dict "ctx" . "component" "usher") | nindent 8 }}
       annotations:
-        checksum/config: {{ toJson (dict "deployments" $u.config.deployments) | sha256sum }}
+        checksum/config: {{ toJson (dict "deployments" $deployments) | sha256sum }}
     spec:
       affinity:
         nodeAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
+            {{- with $u.preferredNode }}
             - weight: 1
               preference:
                 matchExpressions:
                   - key: kubernetes.io/hostname
                     operator: In
                     values:
-                      - {{ $u.preferredNode }}
+                      - {{ . }}
+            {{- end }}
           {{- if $u.nodes }}
           requiredDuringSchedulingIgnoredDuringExecution:
             nodeSelectorTerms:

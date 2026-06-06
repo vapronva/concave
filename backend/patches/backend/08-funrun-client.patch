@@ -10,24 +10,82 @@ index bbdcaec82..9db9f167f 100644
      },
      module_paths::CanonicalizedComponentModulePath,
      reference::Reference,
+diff --git a/crates/common/src/http/mod.rs b/crates/common/src/http/mod.rs
+index 48a574cf1..e70b22e0b 100644
+--- a/crates/common/src/http/mod.rs
++++ b/crates/common/src/http/mod.rs
+@@ -217,8 +217,7 @@ impl From<HttpRequest> for HttpRequestStream {
+     }
+ }
+ 
+-impl HttpRequestStream {
+-}
++impl HttpRequestStream {}
+ 
+ impl HeapSize for HttpRequest {
+     fn heap_size(&self) -> usize {
+@@ -650,7 +649,6 @@ impl ConvexHttpService {
+             .await
+         }
+     }
+-
+ }
+ 
+ /// Serves an HTTP server using the given service.
+@@ -1010,6 +1008,11 @@ where
+ 
+ #[allow(clippy::declare_interior_mutable_const)]
+ pub const CONVEX_REQUEST_ID_HEADER: HeaderName = HeaderName::from_static("convex-request-id");
++pub const CONVEX_ACTIONS_CALLBACK_TOKEN_HEADER: &str = "Convex-Action-Callback-Token";
++pub const CONVEX_EXECUTION_ID_HEADER: &str = "Convex-Execution-Id";
++pub const CONVEX_ROOT_REQUEST_HEADER: &str = "Convex-Root-Request";
++pub const CONVEX_ACTION_FUNCTION_NAME_HEADER: &str = "Convex-Action-Function-Name";
++pub const STATUS_CODE_UDF_FAILED: u16 = 560;
+ 
+ pub struct ExtractRequestId(pub RequestId);
+ 
+@@ -1324,23 +1327,6 @@ impl<T: fmt::Display> fmt::Display for LogOptFmt<T> {
+     }
+ }
+ 
+-/// CLI endpoints can be used from browser IDEs (e.g. StackBlitz), which send
+-/// different headers.
+-pub fn cli_cors() -> CorsLayer {
+-    CorsLayer::new()
+-        .allow_headers(AllowHeaders::mirror_request())
+-        .allow_credentials(true)
+-        .allow_methods(vec![
+-            Method::GET,
+-            Method::POST,
+-            Method::PUT,
+-            Method::OPTIONS,
+-            Method::DELETE,
+-        ])
+-        .allow_origin(AllowOrigin::mirror_request())
+-        .max_age(Duration::from_secs(86400))
+-}
+-
+ /// Platform APIs dont' accept cookies so there's minimal risk (and plenty of
+ /// convenience) from allowing browsers to make these requests.
+ pub fn platform_api_cors() -> CorsLayer {
 diff --git a/crates/common/src/knobs.rs b/crates/common/src/knobs.rs
-index 8f0960f9a..5849dbdc2 100644
+index 8f0960f9a..3d2b2f741 100644
 --- a/crates/common/src/knobs.rs
 +++ b/crates/common/src/knobs.rs
-@@ -1126,6 +1126,11 @@ pub static FUNRUN_INDEX_READS_TO_CONDUCTOR_PERCENT: LazyLock<usize> =
- pub static FUNRUN_ISOLATE_ACTIVE_THREADS: LazyLock<usize> =
-     LazyLock::new(|| env_config("FUNRUN_ISOLATE_ACTIVE_THREADS", 0));
+@@ -409,6 +409,11 @@ pub static MAX_REPEATABLE_TIMESTAMP_IDLE_FREQUENCY: LazyLock<Duration> = LazyLoc
+ pub static MAX_REPEATABLE_TIMESTAMP_COMMIT_DELAY: LazyLock<Duration> =
+     LazyLock::new(|| Duration::from_secs(env_config("MAX_REPEATABLE_TIMESTAMP_COMMIT_DELAY", 5)));
  
-+/// Per-client cap on the shared isolate pool, as a percent of total capacity.
-+/// `0` (the default) means auto: `max(10, 100 / number_of_configured_tenants)`.
-+pub static FUNRUN_MAX_PERCENT_PER_CLIENT: LazyLock<usize> =
-+    LazyLock::new(|| env_config("FUNRUN_MAX_PERCENT_PER_CLIENT", 0));
++/// How often a dynamic-role leader verifies that it still owns the persistence
++/// lease.
++pub static LEASE_WATCH_POLL_INTERVAL: LazyLock<Duration> =
++    LazyLock::new(|| Duration::from_millis(env_config("LEASE_WATCH_POLL_INTERVAL_MS", 1500)));
 +
- /// The maximum length of time to wait to start running a function (when the
- /// FUNRUN_ISOLATE_ACTIVE_THREADS limit is reached).
- pub static FUNRUN_INITIAL_PERMIT_TIMEOUT: LazyLock<Duration> =
+ /// The maximum delay between runs of retention, this is now only used for error
+ /// backoff and the initial delay when backend is started.
+ pub static MAX_RETENTION_DELAY_SECONDS: LazyLock<Duration> =
 diff --git a/crates/function_runner/Cargo.toml b/crates/function_runner/Cargo.toml
-index e02daa22b..c0d3fc7fe 100644
+index e02daa22b..d1d9b6348 100644
 --- a/crates/function_runner/Cargo.toml
 +++ b/crates/function_runner/Cargo.toml
 @@ -32,6 +32,7 @@ tracy-tracing = ["common/tracy-tracing"]
@@ -38,7 +96,7 @@ index e02daa22b..c0d3fc7fe 100644
  common = { workspace = true }
  database = { workspace = true }
  errors = { workspace = true }
-@@ -45,15 +46,20 @@ metrics = { workspace = true }
+@@ -45,15 +46,19 @@ metrics = { workspace = true }
  model = { workspace = true }
  moka = { workspace = true }
  parking_lot = { workspace = true }
@@ -46,7 +104,6 @@ index e02daa22b..c0d3fc7fe 100644
  prometheus = { workspace = true }
  proptest = { workspace = true, optional = true }
  proptest-derive = { workspace = true, optional = true }
-+prost = { workspace = true }
  rand = { workspace = true }
  runtime = { workspace = true }
 +search = { workspace = true }
@@ -293,16 +350,17 @@ index 000000000..17e83f819
 +}
 diff --git a/crates/function_runner/src/remote.rs b/crates/function_runner/src/remote.rs
 new file mode 100644
-index 000000000..a0960ed59
+index 000000000..defb48471
 --- /dev/null
 +++ b/crates/function_runner/src/remote.rs
-@@ -0,0 +1,623 @@
+@@ -0,0 +1,653 @@
 +use std::{
 +    collections::{
 +        BTreeMap,
 +        BTreeSet,
 +    },
 +    sync::Arc,
++    time::Duration,
 +};
 +
 +use anyhow::Context as _;
@@ -333,7 +391,12 @@ index 000000000..a0960ed59
 +        UdfType,
 +    },
 +};
-+use futures::StreamExt;
++use errors::ErrorMetadata;
++use futures::{
++    select_biased,
++    FutureExt,
++    StreamExt,
++};
 +use keybroker::{
 +    funrun_auth_header,
 +    DeploymentSecret,
@@ -362,6 +425,7 @@ index 000000000..a0960ed59
 +use tokio::sync::mpsc;
 +use tonic::transport::{
 +    Certificate,
++    Channel,
 +    ClientTlsConfig,
 +    Endpoint,
 +    Identity as TlsIdentity,
@@ -423,7 +487,7 @@ index 000000000..a0960ed59
 +}
 +
 +pub struct RemoteFunctionRunner<RT: Runtime> {
-+    endpoint: Endpoint,
++    channel: Channel,
 +    local: FunctionRunnerCore<RT, DeploymentStorage>,
 +    deployment: DeploymentMetadata,
 +    key_broker: KeyBroker,
@@ -456,9 +520,10 @@ index 000000000..a0960ed59
 +                 use only for local/dev"
 +            );
 +        }
++        let channel = endpoint.connect_lazy();
 +        let local = FunctionRunnerCore::new(rt.clone(), storage, 100)?;
 +        Ok(Self {
-+            endpoint,
++            channel,
 +            local,
 +            deployment,
 +            key_broker,
@@ -471,6 +536,24 @@ index 000000000..a0960ed59
 +    fn funrun_auth_header(&self) -> String {
 +        let unix_seconds = self.rt.unix_timestamp().as_secs();
 +        funrun_auth_header(&self.instance_secret, &self.deployment.name, unix_seconds)
++    }
++
++    fn authenticated_request<T>(&self, message: T) -> anyhow::Result<tonic::Request<T>> {
++        let mut request = tonic::Request::new(message);
++        request.metadata_mut().insert(
++            FUNRUN_AUTH_METADATA_KEY,
++            self.funrun_auth_header()
++                .parse()
++                .map_err(|e| anyhow::anyhow!("invalid funrun auth header: {e}"))?,
++        );
++        Ok(request)
++    }
++
++    fn is_retryable_initial_rpc(status: &tonic::Status) -> bool {
++        matches!(
++            status.code(),
++            tonic::Code::Unavailable | tonic::Code::DeadlineExceeded | tonic::Code::Unknown
++        )
 +    }
 +
 +    async fn run_function_remote(
@@ -539,28 +622,29 @@ index 000000000..a0960ed59
 +            callback_token: Some(callback_token),
 +            auth_header,
 +        };
-+        let mut request = tonic::Request::new(request);
-+        request.metadata_mut().insert(
-+            FUNRUN_AUTH_METADATA_KEY,
-+            self.funrun_auth_header()
-+                .parse()
-+                .map_err(|e| anyhow::anyhow!("invalid funrun auth header: {e}"))?,
-+        );
-+        let channel = self.endpoint.connect().await.map_err(|e| {
-+            anyhow::anyhow!(
-+                "Failed to connect to funrun fleet at {:?}: {e}",
-+                self.endpoint.uri()
-+            )
-+        })?;
-+        let mut client = pb::funrun::funrun_client::FunrunClient::new(channel)
-+            .max_decoding_message_size(MAX_GRPC_MESSAGE_BYTES)
-+            .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES);
-+        let mut stream = client
-+            .run_function(request)
-+            .await
-+            .map_err(|status| status.into_anyhow())
-+            .context("funrun RunFunction failed")?
-+            .into_inner();
++        let mut initial_attempt = 0;
++        let mut stream = loop {
++            let mut client = pb::funrun::funrun_client::FunrunClient::new(self.channel.clone())
++                .max_decoding_message_size(MAX_GRPC_MESSAGE_BYTES)
++                .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES);
++            match client
++                .run_function(self.authenticated_request(request.clone())?)
++                .await
++            {
++                Ok(response) => break response.into_inner(),
++                Err(status)
++                    if udf_type == UdfType::Query
++                        && initial_attempt == 0
++                        && Self::is_retryable_initial_rpc(&status) =>
++                {
++                    initial_attempt += 1;
++                    self.rt.wait(Duration::from_millis(100)).await;
++                },
++                Err(status) => {
++                    return Err(status.into_anyhow()).context("funrun RunFunction failed");
++                },
++            }
++        };
 +        let mut result: Option<pb::funrun::RunFunctionResult> = None;
 +        while let Some(part) = stream
 +            .message()
@@ -637,7 +721,13 @@ index 000000000..a0960ed59
 +            Some(mut body) => {
 +                let mut buf = Vec::new();
 +                while let Some(chunk) = body.next().await {
-+                    buf.extend_from_slice(&chunk?);
++                    let chunk = chunk?;
++                    anyhow::ensure!(
++                        buf.len().saturating_add(chunk.len()) <= udf::HTTP_ACTION_BODY_LIMIT,
++                        "HTTP action request body exceeds {} byte limit",
++                        udf::HTTP_ACTION_BODY_LIMIT
++                    );
++                    buf.extend_from_slice(&chunk);
 +                }
 +                Some(buf)
 +            },
@@ -676,35 +766,30 @@ index 000000000..a0960ed59
 +            http_request_head: Some(request_head.clone().into()),
 +            http_request_body,
 +        };
-+        let mut request = tonic::Request::new(request);
-+        request.metadata_mut().insert(
-+            FUNRUN_AUTH_METADATA_KEY,
-+            self.funrun_auth_header()
-+                .parse()
-+                .map_err(|e| anyhow::anyhow!("invalid funrun auth header: {e}"))?,
-+        );
-+        let channel = self.endpoint.connect().await.map_err(|e| {
-+            anyhow::anyhow!(
-+                "Failed to connect to funrun fleet at {:?}: {e}",
-+                self.endpoint.uri()
-+            )
-+        })?;
-+        let mut client = pb::funrun::funrun_client::FunrunClient::new(channel)
++        let mut client = pb::funrun::funrun_client::FunrunClient::new(self.channel.clone())
 +            .max_decoding_message_size(MAX_GRPC_MESSAGE_BYTES)
 +            .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES);
 +        let mut stream = client
-+            .run_http_action(request)
++            .run_http_action(self.authenticated_request(request)?)
 +            .await
 +            .map_err(|status| status.into_anyhow())
 +            .context("funrun RunHttpAction failed")?
 +            .into_inner();
 +        let mut result: Option<pb::funrun::RunFunctionResult> = None;
-+        while let Some(part) = stream
-+            .message()
-+            .await
-+            .map_err(|status| status.into_anyhow())
-+            .context("funrun RunHttpAction stream error")?
-+        {
++        loop {
++            let message = stream.message().fuse();
++            futures::pin_mut!(message);
++            let part = select_biased! {
++                _ = http_response_streamer.sender.closed().fuse() => {
++                    anyhow::bail!(ErrorMetadata::client_disconnect());
++                },
++                part = message => part
++                    .map_err(|status| status.into_anyhow())
++                    .context("funrun RunHttpAction stream error")?,
++            };
++            let Some(part) = part else {
++                break;
++            };
 +            match part.part {
 +                Some(pb::funrun::http_action_response_part::Part::LogLine(log_line)) => {
 +                    let log_line = LogLine::try_from(log_line)?;
@@ -714,7 +799,9 @@ index 000000000..a0960ed59
 +                },
 +                Some(pb::funrun::http_action_response_part::Part::Response(response)) => {
 +                    let part = http_action_response_part_from_proto(response)?;
-+                    let _ = http_response_streamer.send_part(part)?;
++                    if http_response_streamer.send_part(part)?.is_err() {
++                        anyhow::bail!(ErrorMetadata::client_disconnect());
++                    }
 +                },
 +                Some(pb::funrun::http_action_response_part::Part::Result(r)) => {
 +                    anyhow::ensure!(
@@ -921,10 +1008,10 @@ index 000000000..a0960ed59
 +    fn set_action_callbacks(&self, _action_callbacks: Arc<dyn ActionCallbacks>) {}
 +}
 diff --git a/crates/function_runner/src/server.rs b/crates/function_runner/src/server.rs
-index 3ed5f6694..ceda6e0b6 100644
+index 3ed5f6694..d32e0ceb1 100644
 --- a/crates/function_runner/src/server.rs
 +++ b/crates/function_runner/src/server.rs
-@@ -188,6 +188,52 @@ pub struct FunctionRunnerCore<RT: Runtime, S: StorageForDeployment<RT>> {
+@@ -188,6 +188,43 @@ pub struct FunctionRunnerCore<RT: Runtime, S: StorageForDeployment<RT>> {
      isolate_client: IsolateClient<RT>,
  }
  
@@ -963,21 +1050,12 @@ index 3ed5f6694..ceda6e0b6 100644
 +    pub fn max_isolate_workers(&self) -> usize {
 +        self.isolate_client.max_workers()
 +    }
-+
-+    pub async fn shutdown(&self) -> anyhow::Result<()> {
-+        self.isolate_client.shutdown().await
-+    }
-+
-+    #[doc(hidden)]
-+    pub fn shared_pool_id(&self) -> usize {
-+        self.isolate_client.shared_scheduler_ptr()
-+    }
 +}
 +
  impl<RT: Runtime, S: StorageForDeployment<RT>> Clone for FunctionRunnerCore<RT, S> {
      fn clone(&self) -> Self {
          Self {
-@@ -232,24 +278,29 @@ impl<RT: Runtime, S: StorageForDeployment<RT>> FunctionRunnerCore<RT, S> {
+@@ -232,24 +269,29 @@ impl<RT: Runtime, S: StorageForDeployment<RT>> FunctionRunnerCore<RT, S> {
          max_percent_per_client: usize,
          max_isolate_workers: usize,
      ) -> anyhow::Result<Self> {
@@ -1014,119 +1092,31 @@ index 3ed5f6694..ceda6e0b6 100644
      }
  
      pub fn concurrency_limiter(&self) -> &isolate::ConcurrencyLimiter {
-@@ -264,6 +315,11 @@ impl<RT: Runtime, S: StorageForDeployment<RT>> FunctionRunnerCore<RT, S> {
-         self.isolate_client.max_workers()
-     }
- 
-+    #[doc(hidden)]
-+    pub fn shared_pool_id(&self) -> usize {
-+        self.isolate_client.shared_scheduler_ptr()
-+    }
-+
-     pub async fn shutdown(&self) -> anyhow::Result<()> {
-         self.isolate_client.shutdown().await
-     }
-@@ -582,3 +638,71 @@ impl<RT: Runtime, S: StorageForDeployment<RT>> FunctionRunnerCore<RT, S> {
-             .await
-     }
- }
-+
-+#[cfg(test)]
-+mod tests {
-+    use std::sync::Arc;
-+
-+    use async_trait::async_trait;
-+    use common::runtime::Runtime;
-+    use database::Transaction;
-+    use runtime::prod::ProdRuntime;
-+    use storage::{
-+        Storage,
-+        StorageUseCase,
-+    };
-+
-+    use super::{
-+        FunctionRunnerCore,
-+        SharedIsolateResources,
-+        StorageForDeployment,
-+    };
-+
-+    #[derive(Clone, Debug)]
-+    struct NoStorage;
-+
-+    #[async_trait]
-+    impl<RT: Runtime> StorageForDeployment<RT> for NoStorage {
-+        async fn storage_for_deployment(
-+            &self,
-+            _transaction: &mut Transaction<RT>,
-+            _use_case: StorageUseCase,
-+        ) -> anyhow::Result<Arc<dyn Storage>> {
-+            anyhow::bail!("NoStorage is never asked for storage in these tests")
-+        }
-+    }
-+
-+    #[test]
-+    fn cores_from_one_shared_bundle_share_the_pool() -> anyhow::Result<()> {
-+        let tokio = ProdRuntime::init_tokio()?;
-+        let rt = ProdRuntime::new(&tokio);
-+        rt.block_on("test", async {
-+            let shared = SharedIsolateResources::new(rt.clone(), 100)?;
-+            let pool_id = shared.shared_pool_id();
-+            let core_a =
-+                FunctionRunnerCore::new_with_isolate_client(rt.clone(), NoStorage, shared.clone());
-+            let core_b =
-+                FunctionRunnerCore::new_with_isolate_client(rt.clone(), NoStorage, shared.clone());
-+            assert_eq!(core_a.shared_pool_id(), pool_id);
-+            assert_eq!(core_b.shared_pool_id(), pool_id);
-+            assert_eq!(core_a.shared_pool_id(), core_b.shared_pool_id());
-+            assert_eq!(core_a.clone().shared_pool_id(), pool_id);
-+            shared.shutdown().await?;
-+            anyhow::Ok(())
-+        })
-+    }
-+
-+    #[test]
-+    fn independent_bundles_have_distinct_pools() -> anyhow::Result<()> {
-+        let tokio = ProdRuntime::init_tokio()?;
-+        let rt = ProdRuntime::new(&tokio);
-+        rt.block_on("test", async {
-+            let a = SharedIsolateResources::new(rt.clone(), 100)?;
-+            let b = SharedIsolateResources::new(rt.clone(), 100)?;
-+            assert_ne!(a.shared_pool_id(), b.shared_pool_id());
-+            a.shutdown().await?;
-+            b.shutdown().await?;
-+            anyhow::Ok(())
-+        })
-+    }
-+}
 diff --git a/crates/isolate/src/client.rs b/crates/isolate/src/client.rs
-index 05ebfbbf5..1465cb5b0 100644
+index 05ebfbbf5..32a0d4b1a 100644
 --- a/crates/isolate/src/client.rs
 +++ b/crates/isolate/src/client.rs
-@@ -627,6 +627,11 @@ impl<RT: Runtime> IsolateClient<RT> {
-         total
+@@ -195,7 +195,6 @@ impl IsolateConfig {
+             limiter,
+         }
      }
+-
+ }
  
-+    #[doc(hidden)]
-+    pub fn shared_scheduler_ptr(&self) -> usize {
-+        Arc::as_ptr(&self.scheduler) as *const () as usize
-+    }
-+
-     #[fastrace::trace]
-     pub async fn execute_udf(
-         &self,
+ pub struct UdfRequest<RT: Runtime> {
 diff --git a/crates/keybroker/src/funrun_auth.rs b/crates/keybroker/src/funrun_auth.rs
 new file mode 100644
-index 000000000..7f424b8b4
+index 000000000..a36670eed
 --- /dev/null
 +++ b/crates/keybroker/src/funrun_auth.rs
-@@ -0,0 +1,154 @@
+@@ -0,0 +1,153 @@
 +use aws_lc_rs::hmac;
 +
 +use crate::DeploymentSecret;
 +
 +const DOMAIN: &[u8] = b"convex-funrun-auth-v2";
 +
-+pub const WINDOW_SECONDS: u64 = 30;
++const WINDOW_SECONDS: u64 = 30;
 +
 +pub const FUNRUN_AUTH_METADATA_KEY: &str = "authorization";
 +
@@ -1150,11 +1140,7 @@ index 000000000..7f424b8b4
 +    hex::encode(tag.as_ref())
 +}
 +
-+pub fn funrun_auth_token(
-+    secret: &DeploymentSecret,
-+    instance_name: &str,
-+    unix_seconds: u64,
-+) -> String {
++fn funrun_auth_token(secret: &DeploymentSecret, instance_name: &str, unix_seconds: u64) -> String {
 +    funrun_auth_token_for_window(secret, instance_name, window_for(unix_seconds))
 +}
 +
@@ -1182,20 +1168,16 @@ index 000000000..7f424b8b4
 +    let expected_current = funrun_auth_token_for_window(secret, instance_name, current);
 +    let expected_prev =
 +        funrun_auth_token_for_window(secret, instance_name, current.wrapping_sub(1));
++    let expected_next =
++        funrun_auth_token_for_window(secret, instance_name, current.wrapping_add(1));
 +    let m_current = constant_time_eq(token.as_bytes(), expected_current.as_bytes());
 +    let m_prev = constant_time_eq(token.as_bytes(), expected_prev.as_bytes());
-+    m_current | m_prev
++    let m_next = constant_time_eq(token.as_bytes(), expected_next.as_bytes());
++    m_current | m_prev | m_next
 +}
 +
-+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-+    if a.len() != b.len() {
-+        return false;
-+    }
-+    let mut diff: u8 = 0;
-+    for (x, y) in a.iter().zip(b.iter()) {
-+        diff |= x ^ y;
-+    }
-+    diff == 0
++pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
++    aws_lc_rs::constant_time::verify_slices_are_equal(a, b).is_ok()
 +}
 +
 +#[cfg(test)]
@@ -1272,10 +1254,17 @@ index 000000000..7f424b8b4
 +            "carnitas",
 +            base
 +        ));
++        let next_window_header = funrun_auth_header(&secret, "carnitas", base + WINDOW_SECONDS);
++        assert!(verify_funrun_auth_header(
++            &next_window_header,
++            &secret,
++            "carnitas",
++            base
++        ));
 +    }
 +}
 diff --git a/crates/keybroker/src/lib.rs b/crates/keybroker/src/lib.rs
-index eeeab09e9..bc7996e40 100644
+index eeeab09e9..b8e90f4eb 100644
 --- a/crates/keybroker/src/lib.rs
 +++ b/crates/keybroker/src/lib.rs
 @@ -4,6 +4,7 @@
@@ -1286,24 +1275,39 @@ index eeeab09e9..bc7996e40 100644
  mod legacy_encryptor;
  mod metrics;
  mod operations;
-@@ -11,6 +12,12 @@ mod secret;
- pub use pb::convex_identity::DeploymentOperation;
- pub use sync_types::UserIdentityAttributes;
- 
-+pub use self::funrun_auth::{
-+    funrun_auth_header,
-+    funrun_auth_token,
-+    verify_funrun_auth_header,
-+    FUNRUN_AUTH_METADATA_KEY,
-+};
- pub use self::{
-     broker::{
-         AdminIdentity,
+@@ -27,6 +28,12 @@ pub use self::{
+         UserIdentity,
+     },
+     encryptor::Encryptor,
++    funrun_auth::{
++        constant_time_eq,
++        funrun_auth_header,
++        verify_funrun_auth_header,
++        FUNRUN_AUTH_METADATA_KEY,
++    },
+     legacy_encryptor::LegacyEncryptor,
+     operations::{
+         bad_admin_key_error,
 diff --git a/crates/search/src/query.rs b/crates/search/src/query.rs
-index 4afa10e79..d812dd52a 100644
+index 4afa10e79..ef5272a6b 100644
 --- a/crates/search/src/query.rs
 +++ b/crates/search/src/query.rs
-@@ -688,6 +688,116 @@ impl HeapSize for QueryReads {
+@@ -600,12 +600,8 @@ impl TextQueryTermRead {
+ // code.
+ #[derive(Debug, Clone, PartialEq, Eq)]
+ pub enum TextQueryTerm {
+-    Exact(
+-        String,
+-    ),
+-    Prefix(
+-        String,
+-    ),
++    Exact(String),
++    Prefix(String),
+ }
+ 
+ impl TextQueryTerm {
+@@ -688,6 +684,116 @@ impl HeapSize for QueryReads {
      }
  }
  
@@ -1420,7 +1424,7 @@ index 4afa10e79..d812dd52a 100644
  #[derive(Debug, Clone, Default)]
  struct SearchTermTries<T: Clone + Ord> {
      terms: BTreeMap<FieldPath, Tries<T>>,
-@@ -1031,3 +1141,44 @@ pub fn tokenize(value: ConvexString) -> SearchValueTokens {
+@@ -1031,3 +1137,44 @@ pub fn tokenize(value: ConvexString) -> SearchValueTokens {
  
      SearchValueTokens::from(tokens)
  }

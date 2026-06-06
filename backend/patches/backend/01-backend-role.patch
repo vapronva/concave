@@ -1,9 +1,9 @@
 diff --git a/crates/common/src/types/backend_role.rs b/crates/common/src/types/backend_role.rs
 new file mode 100644
-index 000000000..74239dfa7
+index 000000000..fdc1f9de5
 --- /dev/null
 +++ b/crates/common/src/types/backend_role.rs
-@@ -0,0 +1,23 @@
+@@ -0,0 +1,19 @@
 +#[derive(Copy, Clone, Debug, PartialEq, Eq, Default, clap::ValueEnum)]
 +pub enum BackendRole {
 +    #[default]
@@ -14,10 +14,6 @@ index 000000000..74239dfa7
 +impl BackendRole {
 +    pub fn is_leader(&self) -> bool {
 +        matches!(self, BackendRole::Leader)
-+    }
-+
-+    pub fn is_follower(&self) -> bool {
-+        matches!(self, BackendRole::Follower)
 +    }
 +
 +    pub fn as_str(&self) -> &'static str {

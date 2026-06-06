@@ -52,14 +52,13 @@ type Controller struct {
 	log     *slog.Logger
 	mu      sync.Mutex
 	state   map[string]*deploymentState
+	actWG   sync.WaitGroup
 }
 
 type deploymentState struct {
 	leaderlessStreak int
 	incumbentPod     string
-	incumbentURL     string
 	inflight         bool
-	unpromotable     map[string]bool
 	failback         failbackState
 }
 
@@ -87,6 +86,7 @@ func (c *Controller) Run(ctx context.Context) {
 		}(name)
 	}
 	wg.Wait()
+	c.actWG.Wait()
 }
 
 func (c *Controller) runDeployment(ctx context.Context, name string) {
@@ -124,24 +124,16 @@ type observation struct {
 
 type stateSnapshot struct {
 	incumbentPod     string
-	incumbentURL     string
 	leaderlessStreak int
-	unpromotable     map[string]bool
 	failback         failbackState
 }
 
 func (c *Controller) snapshotState(st *deploymentState) stateSnapshot {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	skip := make(map[string]bool, len(st.unpromotable))
-	for pod := range st.unpromotable {
-		skip[pod] = true
-	}
 	return stateSnapshot{
 		incumbentPod:     st.incumbentPod,
-		incumbentURL:     st.incumbentURL,
 		leaderlessStreak: st.leaderlessStreak,
-		unpromotable:     skip,
 		failback:         st.failback,
 	}
 }
@@ -159,12 +151,14 @@ func (c *Controller) reconcile(ctx context.Context, name string) {
 		c.log.WarnContext(ctx, "election: discovery failed", "deployment", name, "err", err)
 		return
 	}
+	if len(pods) == 0 {
+		c.log.WarnContext(ctx, "election: discovery returned no backend pods",
+			"deployment", name, "namespace", ns)
+	}
 	snap := c.snapshotState(st)
-	obs := c.pollAll(ctx, pods)
-	states := backendStates(obs)
+	obs := c.pollAll(ctx, name, pods)
 	dec := decide(obs, decideParams{
-		incumbent:   snap.incumbentPod,
-		skipPromote: snap.unpromotable,
+		incumbent: snap.incumbentPod,
 		failback: failbackParams{
 			enabled:         c.cfg.FailbackEnabled,
 			stabilityWindow: c.cfg.FailbackStability,
@@ -174,7 +168,7 @@ func (c *Controller) reconcile(ctx context.Context, name string) {
 		},
 	})
 	streak := c.commitState(st, snap, dec, len(pods) == 0)
-	c.act(ctx, name, st, states, dec, streak)
+	c.act(ctx, name, st, dec, streak)
 }
 
 func (c *Controller) commitState(st *deploymentState, snap stateSnapshot, dec decision, emptyList bool) int {
@@ -187,21 +181,11 @@ func (c *Controller) commitState(st *deploymentState, snap stateSnapshot, dec de
 		}
 	} else {
 		st.leaderlessStreak = 0
-		st.unpromotable = nil
 	}
 	return st.leaderlessStreak
 }
 
-func backendStates(obs []observation) []registry.BackendState {
-	states := make([]registry.BackendState, 0, len(obs))
-	now := time.Now()
-	for _, o := range obs {
-		states = append(states, registry.BackendStateFrom(o.be, o.status, o.reach, now))
-	}
-	return states
-}
-
-func (c *Controller) pollAll(ctx context.Context, pods []k8sclient.Backend) []observation {
+func (c *Controller) pollAll(ctx context.Context, name string, pods []k8sclient.Backend) []observation {
 	obs := make([]observation, len(pods))
 	var wg sync.WaitGroup
 	for i := range pods {
@@ -210,7 +194,7 @@ func (c *Controller) pollAll(ctx context.Context, pods []k8sclient.Backend) []ob
 			defer wg.Done()
 			pctx, cancel := context.WithTimeout(ctx, pollTimeout)
 			defer cancel()
-			l, err := c.backend.Leadership(pctx, pods[i].URL)
+			l, err := c.backend.Leadership(pctx, name, pods[i].URL)
 			obs[i] = observation{be: pods[i], status: l, reach: err == nil}
 		}(i)
 	}

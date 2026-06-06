@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -30,6 +31,9 @@ const (
 	defaultFailbackWarmthLag = 5_000_000_000
 	defaultInsightsRingCap   = 50_000
 	readHeaderTimeout        = 10 * time.Second
+	readTimeout              = 15 * time.Second
+	idleTimeout              = 60 * time.Second
+	maxHeaderBytes           = 64 * 1024
 	shutdownTimeout          = 10 * time.Second
 )
 
@@ -60,26 +64,24 @@ func main() {
 	failbackWarmthLag := flag.Uint64("failback-warmth-lag",
 		envUint64("BIGBRAIN_FAILBACK_WARMTH_LAG", defaultFailbackWarmthLag),
 		"max latest_ts lag for the candidate to count as warm/caught-up")
-	controlPlaneToken := flag.String("control-plane-token", env("BIGBRAIN_CONTROL_PLANE_TOKEN", ""),
-		"if set, sent as the X-Convex-Control-Plane-Token header on promote/demote requests")
 	insightsRingCap := flag.Int("insights-ring-cap", envInt("INSIGHTS_RING_CAP", defaultInsightsRingCap),
 		"in-memory insights ring-buffer capacity (rows retained per process)")
-	usageToken := flag.String("usage-token", env("BIGBRAIN_USAGE_TOKEN", ""),
-		"if set, required as the bearer token on /internal/usage and the dashboard usage query (fail closed)")
 	flag.Parse()
 	log := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(log)
 	reg := registry.New()
-	for _, d := range parseDeployments(*bootstrap) {
-		reg.EnsureDeployment(d.name, d.namespace)
-		log.Info("bigbrain: registered bootstrap deployment", "name", d.name, "namespace", d.namespace)
+	deployments := parseDeployments(*bootstrap)
+	controlPlaneTokens, usageTokens := loadDeploymentTokens(reg, deployments, log)
+	if len(reg.Names()) == 0 {
+		log.Error("bigbrain: refusing to start without registered deployments")
+		os.Exit(1)
 	}
 	var ctrl *election.Controller
 	k8s, err := k8sclient.New(*kubeconfig, *labelPrefix)
 	if err != nil {
 		log.Error("bigbrain: kubernetes client unavailable, running WITHOUT election", "err", err)
 	} else {
-		be := backend.New(*controlPlaneToken)
+		be := backend.New(controlPlaneTokens)
 		ctrl = election.New(election.Config{
 			Interval:            *interval,
 			PromoteDebounce:     *debounce,
@@ -89,19 +91,31 @@ func main() {
 		}, k8s, be, reg, log)
 	}
 	ins := insights.New(*insightsRingCap)
-	srv := server.New(reg, ins, *usageToken, log)
-	log.Info("bigbrain: insights enabled", "ringCap", *insightsRingCap, "usageTokenSet", *usageToken != "")
+	srv := server.New(reg, ins, usageTokens, log)
+	if len(usageTokens) == 0 {
+		log.Warn("bigbrain: insights disabled because no deployment usage tokens are configured")
+	} else {
+		log.Info("bigbrain: insights enabled", "deployments", len(usageTokens), "ringCap", *insightsRingCap)
+	}
 	httpSrv := &http.Server{
 		Addr:              *addr,
 		Handler:           srv.Handler(),
 		ReadHeaderTimeout: readHeaderTimeout,
+		ReadTimeout:       readTimeout,
+		IdleTimeout:       idleTimeout,
+		MaxHeaderBytes:    maxHeaderBytes,
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	var ctrlDone chan struct{}
 	if ctrl != nil {
-		go ctrl.Run(ctx)
+		ctrlDone = make(chan struct{})
+		go func() {
+			defer close(ctrlDone)
+			ctrl.Run(ctx)
+		}()
 		log.Info("bigbrain: election controller started",
-			"interval", interval.String(), "promoteDebounce", *debounce,
+			"deployments", len(reg.Names()), "interval", interval.String(), "promoteDebounce", *debounce,
 			"failbackEnabled", *failbackEnabled, "failbackStability", failbackStability.String(),
 			"failbackWarmthLag", *failbackWarmthLag)
 	}
@@ -113,10 +127,47 @@ func main() {
 		}
 	}()
 	<-ctx.Done()
+	shutdown(httpSrv, srv, ctrlDone, log)
+}
+
+func shutdown(httpSrv *http.Server, srv *server.Server, ctrlDone <-chan struct{}, log *slog.Logger) {
 	log.Info("bigbrain: shutting down")
+	srv.Shutdown()
 	shutCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
-	_ = httpSrv.Shutdown(shutCtx)
+	if serr := httpSrv.Shutdown(shutCtx); serr != nil {
+		log.Error("bigbrain: http shutdown failed", "err", serr)
+	}
+	if ctrlDone != nil {
+		select {
+		case <-ctrlDone:
+		case <-shutCtx.Done():
+			log.Error("bigbrain: election shutdown timed out", "err", shutCtx.Err())
+		}
+	}
+}
+
+func loadDeploymentTokens(
+	reg *registry.Registry,
+	deployments []deploymentRef,
+	log *slog.Logger,
+) (map[string]string, map[string]string) {
+	controlPlaneTokens := make(map[string]string, len(deployments))
+	usageTokens := make(map[string]string, len(deployments))
+	for i, d := range deployments {
+		reg.EnsureDeployment(d.name, d.namespace)
+		token := env(fmt.Sprintf("BIGBRAIN_CONTROL_PLANE_TOKEN_%d", i), "")
+		if token == "" {
+			log.Error("bigbrain: missing deployment control-plane token", "name", d.name, "index", i)
+			os.Exit(1)
+		}
+		controlPlaneTokens[d.name] = token
+		if usage := env(fmt.Sprintf("BIGBRAIN_USAGE_TOKEN_%d", i), ""); usage != "" {
+			usageTokens[d.name] = usage
+		}
+		log.Info("bigbrain: registered bootstrap deployment", "name", d.name, "namespace", d.namespace)
+	}
+	return controlPlaneTokens, usageTokens
 }
 
 type deploymentRef struct{ name, namespace string }

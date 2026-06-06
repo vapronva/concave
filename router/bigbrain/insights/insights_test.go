@@ -165,14 +165,15 @@ func TestQueryOCCAggregation(t *testing.T) {
 	}
 }
 
-func TestQueryOCCFailedPermanentlyWhenStatusFailure(t *testing.T) {
+func TestQueryOCCFailedPermanentlyUsesExplicitSignal(t *testing.T) {
 	t.Parallel()
 	i := insights.New(100)
 	_, _ = i.Ingest(context.Background(), "p", []insights.AnyEvent{
 		{"FunctionCall": map[string]any{
 			"is_occ": true, "udf_id": "f", "id": "i",
-			"component_path": "_default",
-			"status":         "failure",
+			"component_path":         "_default",
+			"status":                 "failure",
+			"occ_failed_permanently": true,
 		}},
 	})
 	today := time.Now().UTC().Format("2006-01-02")

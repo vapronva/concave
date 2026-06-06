@@ -27,10 +27,8 @@ type Backend struct {
 	Pod       string
 	Namespace string
 	URL       string
-	Role      string
 	Priority  int
 	Ready     bool
-	Phase     string
 }
 
 type labelKeys struct {
@@ -74,12 +72,11 @@ func NewFromInterface(cs kubernetes.Interface, labelPrefix string) *Client {
 }
 
 func loadConfig(kubeconfigPath string) (*rest.Config, error) {
-	if cfg, err := rest.InClusterConfig(); err == nil {
-		return cfg, nil
-	}
 	rules := clientcmd.NewDefaultClientConfigLoadingRules()
 	if kubeconfigPath != "" {
 		rules.ExplicitPath = kubeconfigPath
+	} else if cfg, err := rest.InClusterConfig(); err == nil {
+		return cfg, nil
 	}
 	cfg, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
 		rules, &clientcmd.ConfigOverrides{},
@@ -110,10 +107,8 @@ func (c *Client) DiscoverBackends(ctx context.Context, ns, name string) ([]Backe
 			Pod:       p.Name,
 			Namespace: p.Namespace,
 			URL:       fmt.Sprintf("http://%s", net.JoinHostPort(p.Status.PodIP, strconv.Itoa(BackendPort))),
-			Role:      role,
 			Priority:  priorityFor(p.Labels[c.labels.leaderPriority], role),
 			Ready:     podReady(p),
-			Phase:     string(p.Status.Phase),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Pod < out[j].Pod })

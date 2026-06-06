@@ -1,3 +1,33 @@
+diff --git a/npm-packages/@convex-dev/design-system/src/Link.tsx b/npm-packages/@convex-dev/design-system/src/Link.tsx
+index 6c018be51..0b891fcc1 100644
+--- a/npm-packages/@convex-dev/design-system/src/Link.tsx
++++ b/npm-packages/@convex-dev/design-system/src/Link.tsx
+@@ -19,7 +19,15 @@ export const Link = forwardRef<
+     }
+   >
+ >(function Link(
+-  { className, children, externalIcon, noUnderline = false, ...props },
++  {
++    className,
++    children,
++    externalIcon,
++    noUnderline = false,
++    target,
++    rel,
++    ...props
++  },
+   ref,
+ ) {
+   const UILink = useContext(UIContext);
+@@ -35,6 +43,8 @@ export const Link = forwardRef<
+         className,
+       )}
+       ref={ref}
++      target={target}
++      rel={target === "_blank" ? rel ?? "noopener noreferrer" : rel}
+       {...props}
+     >
+       {children}
 diff --git a/npm-packages/dashboard-common/package.json b/npm-packages/dashboard-common/package.json
 index 715c4eed5..c3701fe9c 100644
 --- a/npm-packages/dashboard-common/package.json
@@ -321,7 +351,7 @@ index 000000000..10fda8f76
 +};
 diff --git a/npm-packages/dashboard-common/src/features/health/components/EventsForInsight.tsx b/npm-packages/dashboard-common/src/features/health/components/EventsForInsight.tsx
 new file mode 100644
-index 000000000..05d2fb390
+index 000000000..71eb950fa
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/health/components/EventsForInsight.tsx
 @@ -0,0 +1,689 @@
@@ -709,7 +739,7 @@ index 000000000..05d2fb390
 +  );
 +}
 +
-+function EventsTable<T, I extends Insight>({
++function EventsTable<T extends { id: string }, I extends Insight>({
 +  events,
 +  insight,
 +  columns,
@@ -749,9 +779,9 @@ index 000000000..05d2fb390
 +      </div>
 +      <div className="flex max-h-full grow flex-col">
 +        {events &&
-+          events.map((event, idx) => (
++          events.map((event) => (
 +            <div
-+              key={idx}
++              key={event.id}
 +              className="flex min-w-fit animate-fadeInFromLoading gap-2 border-b p-2 text-xs last:border-b-0"
 +            >
 +              {columns.map((col) => (
@@ -776,10 +806,10 @@ index 000000000..05d2fb390
 +                    : 7,
 +              ),
 +            },
-+            (_, i) => i,
-+          ).map((i) => (
++            (_, i) => `loading-event-${i}`,
++          ).map((key) => (
 +            <div
-+              key={i}
++              key={key}
 +              className="flex w-full gap-2 border-b p-2 last:border-b-0"
 +            >
 +              {columns.map((col) => (
@@ -969,9 +999,9 @@ index 000000000..05d2fb390
 +            </div>
 +            <DisclosurePanel>
 +              <ul className="mt-2 flex animate-fadeInFromLoading flex-col gap-1">
-+                {event.events.map((e, idx) => (
++                {event.events.map((e) => (
 +                  <li
-+                    key={idx}
++                    key={e.tableName}
 +                    className="list-inside list-decimal text-xs text-content-secondary"
 +                  >
 +                    <span className="font-semibold">{format(e.count)}</span>{" "}
@@ -1016,10 +1046,10 @@ index 000000000..05d2fb390
 +}
 diff --git a/npm-packages/dashboard-common/src/features/health/components/HealthWithInsights.tsx b/npm-packages/dashboard-common/src/features/health/components/HealthWithInsights.tsx
 new file mode 100644
-index 000000000..12cd99af7
+index 000000000..b7b422b44
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/health/components/HealthWithInsights.tsx
-@@ -0,0 +1,375 @@
+@@ -0,0 +1,345 @@
 +import React, {
 +  useState,
 +  useCallback,
@@ -1039,16 +1069,10 @@ index 000000000..12cd99af7
 +  Insight,
 +  useInsights,
 +  useInsightsPeriod,
++  useIsInsightsNotConfigured,
 +  getInsightPageIdentifier,
 +} from "@common/features/health/lib/insights";
-+import { useCurrentDeployment } from "@common/lib/cloudApiShim";
-+import { useCurrentTeam, useTeamMembers } from "@common/lib/cloudApiShim";
-+import { useCurrentProject } from "@common/lib/cloudApiShim";
-+import {
-+  useHasCustomRolePermission,
-+  useHasProjectAdminPermissions,
-+} from "@common/lib/cloudApiShim";
-+import { deploymentResource } from "@common/lib/cloudApiShim";
++import { DeploymentInfoContext } from "@common/lib/deploymentContext";
 +import { useRouter } from "next/router";
 +import { Link } from "@ui/Link";
 +import {
@@ -1059,7 +1083,6 @@ index 000000000..12cd99af7
 +  functionIdentifierValue,
 +  functionIdentifierFromValue,
 +} from "@common/lib/functions/generateFileTree";
-+import { NoPermissionMessage } from "@common/elements/NoPermissionMessage";
 +import { SmallInsightsSummary } from "./SmallInsightsSummary";
 +import { InsightsSummary } from "./InsightsSummary";
 +import { InsightSummaryBreakdown } from "./InsightsSummaryBreakdown";
@@ -1071,7 +1094,6 @@ index 000000000..12cd99af7
 +      insights?: Insight[];
 +      selectedFunctions: MultiSelectValue;
 +      setSelectedFunctions: (selectedFunctions: MultiSelectValue) => void;
-+      canViewInsights: boolean;
 +    }
 +  | undefined
 +>(undefined);
@@ -1095,26 +1117,24 @@ index 000000000..12cd99af7
 +    useState<MultiSelectValue>("all");
 +  const insights = useInsights();
 +  const { from } = useInsightsPeriod();
++  const {
++    useCurrentDeployment,
++    useCurrentTeam,
++    useTeamMembers,
++    useCurrentProject,
++  } = useContext(DeploymentInfoContext);
 +  const deployment = useCurrentDeployment();
 +  const team = useCurrentTeam();
 +  const project = useCurrentProject();
-+  const teamMembers = useTeamMembers(team?.id);
-+  const insightsResource =
-+    project && deployment && deployment.kind === "cloud"
-+      ? deploymentResource(project, {
-+          id: deployment.id,
-+          deploymentType: deployment.deploymentType,
-+          creator: deployment.creator ?? null,
-+        })
-+      : undefined;
-+  const isAdmin = useHasProjectAdminPermissions(project?.id);
-+  const canViewInsightsCustom = useHasCustomRolePermission(
-+    team?.id,
-+    "deployment:insights:view",
-+    insightsResource,
-+    true,
++  const teamMembers = useTeamMembers(team?.id)?.filter(
++    (
++      member,
++    ): member is {
++      id: number;
++      name?: string | null;
++      email: string;
++    } => member.email !== undefined,
 +  );
-+  const canViewInsights = isAdmin || canViewInsightsCustom !== false;
 +  const selectedInsight = insights?.find(
 +    (insight) => getInsightPageIdentifier(insight) === page,
 +  );
@@ -1126,7 +1146,7 @@ index 000000000..12cd99af7
 +      )}
 +    >
 +      <div className="flex items-center gap-2">
-+        {canViewInsights && page.startsWith("insight") && (
++        {page.startsWith("insight") && (
 +          <Button
 +            icon={<ChevronLeftIcon className="size-5" />}
 +            tip="Back to Health"
@@ -1173,7 +1193,7 @@ index 000000000..12cd99af7
 +          >
 +            Health
 +          </MaybeLink>{" "}
-+          {canViewInsights && page.startsWith("insight") && (
++          {page.startsWith("insight") && (
 +            <>
 +              <span className="animate-fadeInFromLoading">/</span>
 +              <span className="animate-fadeInFromLoading">
@@ -1203,7 +1223,7 @@ index 000000000..12cd99af7
 +              </span>
 +            </>
 +          )}
-+          {canViewInsights && selectedInsight && (
++          {selectedInsight && (
 +            <>
 +              <span className="animate-fadeInFromLoading">/</span>
 +              <div className="flex animate-fadeInFromLoading flex-wrap gap-1 text-content-primary">
@@ -1213,7 +1233,7 @@ index 000000000..12cd99af7
 +          )}
 +        </h3>
 +      </div>
-+      {canViewInsights && page === "insights" && (
++      {page === "insights" && (
 +        <div className="flex animate-fadeInFromLoading flex-wrap items-center gap-4">
 +          <span className="text-sm text-content-secondary">
 +            {new Date(from).toLocaleString([], {
@@ -1250,12 +1270,11 @@ index 000000000..12cd99af7
 +  const providerValue = useMemo(
 +    () => ({
 +      page,
-+      insights: canViewInsights ? insights : undefined,
++      insights,
 +      selectedFunctions,
 +      setSelectedFunctions,
-+      canViewInsights,
 +    }),
-+    [page, insights, selectedFunctions, setSelectedFunctions, canViewInsights],
++    [page, insights, selectedFunctions, setSelectedFunctions],
 +  );
 +  return (
 +    <InsightsContext.Provider value={providerValue}>
@@ -1273,8 +1292,9 @@ index 000000000..12cd99af7
 +}
 +
 +function InsightsWrapper({ children }: { children: React.ReactNode }) {
-+  const { insights, selectedFunctions, page, canViewInsights } =
++  const { insights, selectedFunctions, page } =
 +    useContext(InsightsContext) || {};
++  const notConfigured = useIsInsightsNotConfigured();
 +  return (
 +    <div
 +      className={cn(
@@ -1290,58 +1310,41 @@ index 000000000..12cd99af7
 +        inert={page !== "insights" ? "inert" : undefined}
 +        className="mb-6 flex w-full shrink-0 px-6"
 +      >
-+        {canViewInsights === false ? (
-+          <Sheet className="scrollbar h-fit max-h-full w-full max-w-280 min-w-0 overflow-auto py-12">
-+            <NoPermissionMessage
-+              message="You do not have permission to view insights."
-+              missingPermission="deployment:insights:view"
-+            />
-+          </Sheet>
-+        ) : (
-+          <Sheet
-+            padding={false}
-+            className="scrollbar h-fit max-h-full w-full max-w-280 min-w-0 overflow-auto"
-+          >
-+            <InsightsSummary
-+              insights={insights?.filter((insight) => {
-+                if (!selectedFunctions) return true;
-+                if (selectedFunctions === "all") return true;
-+                return (
-+                  selectedFunctions.includes(
-+                    functionIdentifierValue(
-+                      insight.functionId,
-+                      insight.componentPath ?? undefined,
-+                    ),
-+                  ) || selectedFunctions.includes("_other")
-+                );
-+              })}
-+            />
-+          </Sheet>
-+        )}
++        <Sheet
++          padding={false}
++          className="scrollbar h-fit max-h-full w-full max-w-280 min-w-0 overflow-auto"
++        >
++          <InsightsSummary
++            insights={insights?.filter((insight) => {
++              if (!selectedFunctions) return true;
++              if (selectedFunctions === "all") return true;
++              return (
++                selectedFunctions.includes(
++                  functionIdentifierValue(
++                    insight.functionId,
++                    insight.componentPath ?? undefined,
++                  ),
++                ) || selectedFunctions.includes("_other")
++              );
++            })}
++            notConfigured={notConfigured}
++          />
++        </Sheet>
 +      </div>
 +      <div
 +        // @ts-expect-error https://github.com/facebook/react/issues/17157
 +        inert={!page.startsWith("insight:") ? "inert" : undefined}
 +        className="scrollbar flex w-full shrink-0 overflow-y-auto px-6"
 +      >
-+        {canViewInsights === false ? (
-+          <Sheet className="max-w-3xl py-12">
-+            <NoPermissionMessage
-+              message="You do not have permission to view insights."
-+              missingPermission="deployment:insights:view"
-+            />
-+          </Sheet>
-+        ) : (
-+          <InsightSummaryBreakdown
-+            insight={
-+              insights
-+                ? insights?.find(
-+                    (insight) => getInsightPageIdentifier(insight) === page,
-+                  ) || null
-+                : undefined
-+            }
-+          />
-+        )}
++        <InsightSummaryBreakdown
++          insight={
++            insights
++              ? insights?.find(
++                  (insight) => getInsightPageIdentifier(insight) === page,
++                ) || null
++              : undefined
++          }
++        />
 +      </div>
 +    </div>
 +  );
@@ -1367,7 +1370,7 @@ index 000000000..12cd99af7
 +      { shallow: true },
 +    );
 +  }, [query, push]);
-+  const { page, canViewInsights } = useContext(InsightsContext) || {};
++  const { page } = useContext(InsightsContext) || {};
 +  return (
 +    <div
 +      className="scrollbar flex w-full shrink-0 grow flex-col overflow-y-auto px-6 pb-4"
@@ -1375,10 +1378,7 @@ index 000000000..12cd99af7
 +      inert={page !== "home" ? "inert" : undefined}
 +    >
 +      {children}
-+      <SmallInsightsSummary
-+        onViewAll={onViewAll || (() => {})}
-+        canViewInsights={canViewInsights}
-+      />
++      <SmallInsightsSummary onViewAll={onViewAll || (() => {})} />
 +    </div>
 +  );
 +}
@@ -1397,23 +1397,43 @@ index 000000000..12cd99af7
 +}
 diff --git a/npm-packages/dashboard-common/src/features/health/components/InsightsSummary.tsx b/npm-packages/dashboard-common/src/features/health/components/InsightsSummary.tsx
 new file mode 100644
-index 000000000..4c2d4449c
+index 000000000..48eebad95
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/health/components/InsightsSummary.tsx
-@@ -0,0 +1,66 @@
+@@ -0,0 +1,86 @@
 +import { Insight } from "@common/features/health/lib/insights";
 +import { Loading } from "@ui/Loading";
 +import { EmptySection } from "@common/elements/EmptySection";
-+import { CheckCircledIcon } from "@radix-ui/react-icons";
++import { CheckCircledIcon, InfoCircledIcon } from "@radix-ui/react-icons";
 +import { InsightsSummaryListItem } from "./InsightsSummaryListItem";
++import { getInsightPageIdentifier } from "../lib/insights";
 +
 +export type InsightsSummaryData = Insight;
 +
 +export function InsightsSummary({
 +  insights,
++  notConfigured = false,
 +}: {
 +  insights: InsightsSummaryData[] | undefined;
++  notConfigured?: boolean;
 +}) {
++  if (notConfigured) {
++    return (
++      <div className="py-16">
++        <EmptySection
++          Icon={InfoCircledIcon}
++          header="Insights are not configured"
++          color="none"
++          sheet={false}
++          body="Insights are not configured for this deployment."
++          learnMoreButton={{
++            href: "https://docs.convex.dev/dashboard/deployments/health#insights",
++            children: "Learn more about Insights",
++          }}
++        />
++      </div>
++    );
++  }
 +  const hasAnyInsights = !insights || insights.length > 0;
 +  if (!hasAnyInsights) {
 +    return (
@@ -1442,28 +1462,28 @@ index 000000000..4c2d4449c
 +      </div>
 +      {insights && (
 +        <div className="flex w-full animate-fadeInFromLoading flex-col">
-+          {insights.map((insight, idx) => (
-+            <InsightsSummaryListItem key={idx} insight={insight} />
++          {insights.map((insight) => (
++            <InsightsSummaryListItem
++              key={getInsightPageIdentifier(insight)}
++              insight={insight}
++            />
 +          ))}
 +        </div>
 +      )}
 +      {!insights &&
-+        Array.from(
-+          {
-+            length: 5,
-+          },
-+          (_, i) => i,
-+        ).map((i) => (
-+          <div
-+            key={i}
-+            className="flex w-full items-center gap-2 border-b p-2 last:border-b-0"
-+          >
-+            <Loading className="h-6 w-20" />
-+            <Loading className="h-4 w-72" />
-+            <Loading className="h-9 w-60" />
-+            <Loading className="h-9 w-60" />
-+          </div>
-+        ))}
++        Array.from({ length: 5 }, (_, i) => `loading-insight-${i}`).map(
++          (key) => (
++            <div
++              key={key}
++              className="flex w-full items-center gap-2 border-b p-2 last:border-b-0"
++            >
++              <Loading className="h-6 w-20" />
++              <Loading className="h-4 w-72" />
++              <Loading className="h-9 w-60" />
++              <Loading className="h-9 w-60" />
++            </div>
++          ),
++        )}
 +    </div>
 +  );
 +}
@@ -1888,14 +1908,14 @@ index 000000000..62f51cdd1
 +}
 diff --git a/npm-packages/dashboard-common/src/features/health/components/SmallInsightsSummary.tsx b/npm-packages/dashboard-common/src/features/health/components/SmallInsightsSummary.tsx
 new file mode 100644
-index 000000000..81ee07d5b
+index 000000000..99237bc47
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/health/components/SmallInsightsSummary.tsx
-@@ -0,0 +1,109 @@
-+import { useCurrentDeployment } from "@common/lib/cloudApiShim";
+@@ -0,0 +1,93 @@
 +import {
 +  useInsights,
 +  useInsightsPeriod,
++  useIsInsightsNotConfigured,
 +} from "@common/features/health/lib/insights";
 +import { Button } from "@ui/Button";
 +import { Sheet } from "@ui/Sheet";
@@ -1905,23 +1925,13 @@ index 000000000..81ee07d5b
 +  CrossCircledIcon,
 +  ExclamationTriangleIcon,
 +} from "@radix-ui/react-icons";
-+import { NoPermissionMessage } from "@common/elements/NoPermissionMessage";
 +import { InsightsSummary } from "./InsightsSummary";
 +import { severityForInsightKind } from "./InsightsSummaryListItem";
 +
-+export function SmallInsightsSummary({
-+  onViewAll,
-+  canViewInsights,
-+}: {
-+  onViewAll: () => void;
-+  canViewInsights?: boolean;
-+}) {
-+  const deployment = useCurrentDeployment();
++export function SmallInsightsSummary({ onViewAll }: { onViewAll: () => void }) {
 +  const insights = useInsights();
++  const notConfigured = useIsInsightsNotConfigured();
 +  const { from } = useInsightsPeriod();
-+  if (deployment?.kind === "local") {
-+    return null;
-+  }
 +  const criticalCount =
 +    insights?.filter(
 +      (insight) => severityForInsightKind[insight.kind] === "error",
@@ -1944,7 +1954,9 @@ index 000000000..81ee07d5b
 +          {warningCount} warning{warningCount !== 1 ? "s" : ""}
 +        </span>
 +      )}
-+      {criticalCount === 0 && warningCount === 0 && "No issues"}
++      {criticalCount === 0 &&
++        warningCount === 0 &&
++        (notConfigured ? "Not configured" : "No issues")}
 +    </span>
 +  ) : null;
 +  return (
@@ -1952,61 +1964,53 @@ index 000000000..81ee07d5b
 +      id="insights"
 +      title="Insights"
 +      defaultOpen
-+      closedDescription={canViewInsights === false ? null : closedDescription}
++      closedDescription={closedDescription}
 +    >
-+      {canViewInsights === false ? (
-+        <Sheet className="flex w-full max-w-3xl animate-fadeInFromLoading flex-col py-12">
-+          <NoPermissionMessage
-+            message="You do not have permission to view insights."
-+            missingPermission="deployment:insights:view"
-+          />
-+        </Sheet>
-+      ) : (
-+        <>
-+          <Sheet
-+            padding={false}
-+            className="flex w-full animate-fadeInFromLoading flex-col"
++      <Sheet
++        padding={false}
++        className="flex w-full animate-fadeInFromLoading flex-col"
++      >
++        <div className="flex items-center justify-between p-2">
++          <span className="text-xs text-content-secondary">
++            {new Date(from).toLocaleString([], {
++              year: "numeric",
++              month: "numeric",
++              day: "numeric",
++              hour: "numeric",
++              minute: undefined,
++            })}{" "}
++            – Now
++          </span>
++        </div>
++        <InsightsSummary
++          insights={insights?.slice(0, 5)}
++          notConfigured={notConfigured}
++        />
++      </Sheet>
++      <div className="flex">
++        {insights && insights.length > 0 && (
++          <Button
++            variant="neutral"
++            className="m-auto mt-2 w-fit gap-1 hover:bg-background-tertiary"
++            onClick={onViewAll}
 +          >
-+            <div className="flex items-center justify-between p-2">
-+              <span className="text-xs text-content-secondary">
-+                {new Date(from).toLocaleString([], {
-+                  year: "numeric",
-+                  month: "numeric",
-+                  day: "numeric",
-+                  hour: "numeric",
-+                  minute: undefined,
-+                })}{" "}
-+                – Now
-+              </span>
-+            </div>
-+            <InsightsSummary insights={insights?.slice(0, 5)} />
-+          </Sheet>
-+          <div className="flex">
-+            {insights && insights.length > 0 && (
-+              <Button
-+                variant="neutral"
-+                className="m-auto mt-2 w-fit gap-1 hover:bg-background-tertiary"
-+                onClick={onViewAll}
-+              >
-+                View{" "}
-+                {insights.length > 6
-+                  ? `${insights.length - 5} more insights`
-+                  : "all Insights"}{" "}
-+                <ChevronRightIcon />
-+              </Button>
-+            )}
-+          </div>
-+        </>
-+      )}
++            View{" "}
++            {insights.length > 6
++              ? `${insights.length - 5} more insights`
++              : "all Insights"}{" "}
++            <ChevronRightIcon />
++          </Button>
++        )}
++      </div>
 +    </DisclosureSection>
 +  );
 +}
 diff --git a/npm-packages/dashboard-common/src/features/health/components/SparklineForInsight.tsx b/npm-packages/dashboard-common/src/features/health/components/SparklineForInsight.tsx
 new file mode 100644
-index 000000000..99ea571a3
+index 000000000..fef3752c9
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/health/components/SparklineForInsight.tsx
-@@ -0,0 +1,104 @@
+@@ -0,0 +1,60 @@
 +import { Insight } from "@common/features/health/lib/insights";
 +
 +import { Sparklines, SparklinesCurve } from "react-sparklines";
@@ -2016,29 +2020,13 @@ index 000000000..99ea571a3
 +  switch (insight.kind) {
 +    case "bytesReadLimit":
 +    case "bytesReadThreshold":
-+      return (
-+        <BytesReadCountSparkline
-+          insight={{
-+            ...insight,
-+            kind: insight.kind as "bytesReadLimit" | "bytesReadThreshold",
-+          }}
-+        />
-+      );
 +    case "documentsReadLimit":
 +    case "documentsReadThreshold":
-+      return (
-+        <DocumentsReadCountSparkline
-+          insight={{
-+            ...insight,
-+            kind: insight.kind as
-+              | "documentsReadLimit"
-+              | "documentsReadThreshold",
-+          }}
-+        />
-+      );
 +    case "occFailedPermanently":
 +    case "occRetried":
-+      return <OCCSparkline insight={insight} />;
++      return (
++        <Sparkline data={insight.details.hourlyCounts.map((b) => b.count)} />
++      );
 +    default: {
 +      insight satisfies never;
 +      return null;
@@ -2083,40 +2071,12 @@ index 000000000..99ea571a3
 +    </LoadingTransition>
 +  );
 +}
-+
-+function BytesReadCountSparkline({
-+  insight,
-+}: {
-+  insight: Insight & { kind: "bytesReadLimit" | "bytesReadThreshold" };
-+}) {
-+  return <Sparkline data={insight.details.hourlyCounts.map((b) => b.count)} />;
-+}
-+
-+function DocumentsReadCountSparkline({
-+  insight,
-+}: {
-+  insight: Insight & {
-+    kind: "documentsReadLimit" | "documentsReadThreshold";
-+  };
-+}) {
-+  return <Sparkline data={insight.details.hourlyCounts.map((b) => b.count)} />;
-+}
-+
-+function OCCSparkline({
-+  insight,
-+}: {
-+  insight: Insight & {
-+    kind: "occFailedPermanently" | "occRetried";
-+  };
-+}) {
-+  return <Sparkline data={insight.details.hourlyCounts.map((b) => b.count)} />;
-+}
 diff --git a/npm-packages/dashboard-common/src/features/health/lib/insights.ts b/npm-packages/dashboard-common/src/features/health/lib/insights.ts
 new file mode 100644
-index 000000000..6f9deda9c
+index 000000000..62ee3025b
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/health/lib/insights.ts
-@@ -0,0 +1,219 @@
+@@ -0,0 +1,211 @@
 +import {
 +  rootComponentPath,
 +  useUsageQuery,
@@ -2182,80 +2142,46 @@ index 000000000..6f9deda9c
 +    }
 +);
 +
++const insightKinds = new Set<Insight["kind"]>([
++  "occRetried",
++  "occFailedPermanently",
++  "bytesReadLimit",
++  "bytesReadThreshold",
++  "documentsReadLimit",
++  "documentsReadThreshold",
++]);
++
 +function padAndSortHourlyData(
 +  hourlyCounts: HourlyCount[],
-+  periodStart?: string,
++  periodStart: string,
 +): HourlyCount[] {
 +  const currentTime = new Date();
 +  if (hourlyCounts.length === 0) {
-+    if (periodStart) {
-+      const startDate = new Date(periodStart);
-+      const endDate = new Date(currentTime);
-+      const result: HourlyCount[] = [];
-+      const currentDate = new Date(startDate);
-+      while (currentDate < endDate) {
-+        const year = currentDate.getUTCFullYear();
-+        const month = String(currentDate.getUTCMonth() + 1).padStart(2, "0");
-+        const day = String(currentDate.getUTCDate()).padStart(2, "0");
-+        const hour = String(currentDate.getUTCHours()).padStart(2, "0");
-+        const formattedHour = `${year}-${month}-${day} ${hour}:00:00`;
-+        result.push({
-+          hour: formattedHour,
-+          count: 0,
-+        });
-+        currentDate.setHours(currentDate.getHours() + 1);
-+      }
-+      return result;
++    const startDate = new Date(periodStart);
++    const result: HourlyCount[] = [];
++    const currentDate = new Date(startDate);
++    while (currentDate < currentTime) {
++      const year = currentDate.getUTCFullYear();
++      const month = String(currentDate.getUTCMonth() + 1).padStart(2, "0");
++      const day = String(currentDate.getUTCDate()).padStart(2, "0");
++      const hour = String(currentDate.getUTCHours()).padStart(2, "0");
++      const formattedHour = `${year}-${month}-${day} ${hour}:00:00`;
++      result.push({
++        hour: formattedHour,
++        count: 0,
++      });
++      currentDate.setHours(currentDate.getHours() + 1);
 +    }
-+    return [];
++    return result;
 +  }
-+  const hours = hourlyCounts.map((item) => item.hour);
 +  const hourToCountMap = new Map<string, number>();
 +  hourlyCounts.forEach((item) => {
 +    hourToCountMap.set(item.hour, item.count);
 +  });
-+  let startDate: Date;
-+  let endDate: Date;
-+  if (periodStart) {
-+    startDate = new Date(periodStart);
-+    endDate = new Date(currentTime);
-+  } else {
-+    try {
-+      const sortedHours = [...hours].sort();
-+      const minHour = sortedHours[0];
-+      const maxHour = sortedHours[sortedHours.length - 1];
-+      let minDate: string;
-+      let minHourNum: string;
-+      let maxDate: string;
-+      let maxHourNum: string;
-+      if (minHour.includes("T")) {
-+        [minDate, minHourNum] = minHour.split("T");
-+        [maxDate, maxHourNum] = maxHour.split("T");
-+      } else {
-+        minDate = minHour.substring(0, 10);
-+        minHourNum = minHour.substring(11, 13) || "00";
-+        maxDate = maxHour.substring(0, 10);
-+        maxHourNum = maxHour.substring(11, 13) || "23";
-+      }
-+      startDate = new Date(`${minDate}T${minHourNum}:00:00Z`);
-+      endDate = new Date(`${maxDate}T${maxHourNum}:59:59Z`);
-+      if (endDate > currentTime) {
-+        endDate.setTime(currentTime.getTime());
-+      }
-+      if (
-+        Number.isNaN(startDate.getTime()) ||
-+        Number.isNaN(endDate.getTime())
-+      ) {
-+        throw new Error("Invalid date range");
-+      }
-+    } catch (error) {
-+      console.error("Error parsing date range:", error);
-+      return hourlyCounts;
-+    }
-+  }
++  const startDate = new Date(periodStart);
 +  const result: HourlyCount[] = [];
 +  const currentDate = new Date(startDate);
-+  while (currentDate < endDate) {
++  while (currentDate < currentTime) {
 +    const year = currentDate.getUTCFullYear();
 +    const month = String(currentDate.getUTCMonth() + 1).padStart(2, "0");
 +    const day = String(currentDate.getUTCDate()).padStart(2, "0");
@@ -2276,19 +2202,29 @@ index 000000000..6f9deda9c
 +export function useInsights(): Insight[] | undefined {
 +  const moduleFunctions = useModuleFunctions();
 +  const period = useInsightsPeriod();
-+  const { data: insightsData } = useUsageQuery({
-+    queryId: "9ab3b74e-a725-480b-88a6-43e6bd70bd82",
++  const { data: insightsData, error } = useUsageQuery({
 +    period: {
 +      from: period.from.split("T")[0],
 +      to: period.to.split("T")[0],
 +    },
-+    componentPrefix: null,
 +  });
++  if (error) {
++    return [];
++  }
 +  if (!insightsData) {
 +    return undefined;
 +  }
-+  const insights = insightsData.map((d) => {
-+    const parsedDetails = JSON.parse(d[3]);
++  const insights = insightsData.flatMap((d) => {
++    const kind = d[0] as Insight["kind"];
++    if (!insightKinds.has(kind)) {
++      return [];
++    }
++    let parsedDetails: any;
++    try {
++      parsedDetails = JSON.parse(d[3]);
++    } catch {
++      return [];
++    }
 +    if (
 +      parsedDetails.hourlyCounts &&
 +      Array.isArray(parsedDetails.hourlyCounts)
@@ -2298,12 +2234,14 @@ index 000000000..6f9deda9c
 +        period.from,
 +      );
 +    }
-+    return {
-+      kind: d[0] as Insight["kind"],
-+      functionId: d[1],
-+      componentPath: d[2] === rootComponentPath ? null : d[2],
-+      details: parsedDetails,
-+    };
++    return [
++      {
++        kind,
++        functionId: d[1],
++        componentPath: d[2] === rootComponentPath ? null : d[2],
++        details: parsedDetails,
++      } as Insight,
++    ];
 +  });
 +  insights.sort((a, b) => {
 +    const order: Record<Insight["kind"], number> = {
@@ -2325,6 +2263,20 @@ index 000000000..6f9deda9c
 +  });
 +}
 +
++export function useIsInsightsNotConfigured(): boolean {
++  const period = useInsightsPeriod();
++  const { error } = useUsageQuery({
++    period: {
++      from: period.from.split("T")[0],
++      to: period.to.split("T")[0],
++    },
++  });
++  return (
++    error?.status === 404 ||
++    (error instanceof Error && error.message.includes("404"))
++  );
++}
++
 +export function getInsightPageIdentifier(insight: Insight): string {
 +  if (
 +    (insight.kind === "occRetried" ||
@@ -2338,10 +2290,10 @@ index 000000000..6f9deda9c
 +}
 diff --git a/npm-packages/dashboard-common/src/features/health/lib/usage.ts b/npm-packages/dashboard-common/src/features/health/lib/usage.ts
 new file mode 100644
-index 000000000..bb913b91b
+index 000000000..b43fc782b
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/health/lib/usage.ts
-@@ -0,0 +1,70 @@
+@@ -0,0 +1,45 @@
 +import useSWR, { BareFetcher } from "swr";
 +import { deploymentAuthMiddleware } from "@common/lib/deploymentApi";
 +import { deploymentFetch } from "@common/lib/fetching";
@@ -2350,46 +2302,17 @@ index 000000000..bb913b91b
 +
 +export const USAGE_REFRESH_INTERVAL_MS =
 +  getURLConfigInt("usage_refresh_secs", 60 * 10) * 1000;
-+export type DatabricksQueryId = string;
-+
 +export const rootComponentPath = "-root-component-";
 +
-+export function useUsageQuery({
-+  queryId,
-+  functionId,
-+  tableName,
-+  period,
-+  componentPrefix,
-+  skip,
-+}: {
-+  queryId: DatabricksQueryId;
-+  functionId?: string;
-+  tableName?: string;
-+  period: DateRange | null;
-+  componentPrefix: string | null;
-+  skip?: boolean;
-+}) {
++export function useUsageQuery({ period }: { period: DateRange | null }) {
 +  const queryParams = new URLSearchParams();
-+  queryParams.set("queryId", queryId);
-+  if (functionId) {
-+    queryParams.set("udfId", functionId);
-+  }
-+  if (tableName) {
-+    queryParams.set("tableName", tableName);
-+  }
 +  if (period) {
 +    queryParams.set("from", period.from);
 +    queryParams.set("to", period.to);
 +  }
-+  if (componentPrefix) {
-+    queryParams.set(
-+      "componentPath",
-+      componentPrefix === "app" ? rootComponentPath : componentPrefix,
-+    );
-+  }
 +  const fetcher = deploymentFetch as BareFetcher<any[][]>;
 +  const result = useSWR<any[][]>(
-+    skip ? null : `/api/insights/usage/query?${queryParams.toString()}`,
++    `/api/insights/usage/query?${queryParams.toString()}`,
 +    fetcher,
 +    {
 +      use: [deploymentAuthMiddleware],
@@ -2405,26 +2328,32 @@ index 000000000..bb913b91b
 +  };
 +}
 +
-+function getURLConfigInt(name: string, default_value: number) {
++function getURLConfigInt(name: string, defaultValue: number) {
 +  if (typeof window === "undefined") {
-+    return default_value;
++    return defaultValue;
 +  }
 +  const value = new URLSearchParams(window.location.search).get(name);
-+  return value !== null ? parseInt(value) : default_value;
++  if (value === null) {
++    return defaultValue;
++  }
++  const parsed = Number.parseInt(value, 10);
++  return Number.isFinite(parsed) && parsed > 0 ? parsed : defaultValue;
 +}
 diff --git a/npm-packages/dashboard-common/src/features/settings/components/backups/SnapshotExport.tsx b/npm-packages/dashboard-common/src/features/settings/components/backups/SnapshotExport.tsx
 new file mode 100644
-index 000000000..dba10bfe4
+index 000000000..5894715c8
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/settings/components/backups/SnapshotExport.tsx
-@@ -0,0 +1,119 @@
-+import { DownloadIcon, EnvelopeClosedIcon } from "@radix-ui/react-icons";
-+import { Link } from "@ui/Link";
+@@ -0,0 +1,132 @@
++import { DownloadIcon } from "@radix-ui/react-icons";
 +import { Button } from "@ui/Button";
 +import { Spinner } from "@ui/Spinner";
 +import { Callout } from "@ui/Callout";
 +import { Sheet } from "@ui/Sheet";
-+import { useGetZipExport } from "@common/lib/deploymentApi";
++import {
++  useGetZipExport,
++  useRequestZipExport,
++} from "@common/lib/deploymentApi";
 +import { Fragment, useContext } from "react";
 +import { useQuery } from "convex/react";
 +import udfs from "@common/udfs";
@@ -2436,7 +2365,7 @@ index 000000000..dba10bfe4
 +}: {
 +  existingExport: CompletedExport;
 +}) {
-+  const getZipExport = useGetZipExport(existingExport.format);
++  const getZipExport = useGetZipExport();
 +  const format = existingExport.format?.format;
 +  if (format !== "zip") {
 +    throw new Error(`unexpected export with format ${format}`);
@@ -2497,25 +2426,36 @@ index 000000000..dba10bfe4
 +
 +export function SnapshotExport() {
 +  const existingExport = useQuery(udfs.latestExport.default);
++  const requestZipExport = useRequestZipExport();
++  const inProgress =
++    existingExport?.state === "requested" ||
++    existingExport?.state === "in_progress";
 +  return (
 +    <Sheet>
++      <div className="flex items-center justify-between gap-4">
++        <div>
++          <h3>Snapshot Export</h3>
++          <p className="text-sm text-content-secondary">
++            Create a ZIP snapshot including stored files.
++          </p>
++        </div>
++        <Button
++          variant="primary"
++          disabled={inProgress}
++          onClick={() => void requestZipExport()}
++        >
++          Request Export
++        </Button>
++      </div>
 +      {existingExport ? (
 +        <div className="mt-4 text-content-primary">
-+          {["requested", "in_progress"].some(
-+            (s) => s === existingExport.state,
-+          ) ? (
++          {inProgress ? (
 +            <div className="float-left flex items-center gap-2">
 +              <Spinner /> Export in progress
 +            </div>
 +          ) : existingExport.state === "failed" ? (
 +            <Callout variant="error">
-+              <div>
-+                Latest snapshot export failed. Please try again or contact us at{" "}
-+                <Link href="mailto:support@convex.dev" className="items-center">
-+                  <EnvelopeClosedIcon className="mr-0.5 inline" />
-+                  support@convex.dev
-+                </Link>
-+              </div>
++              Latest snapshot export failed. Review backend logs and try again.
 +            </Callout>
 +          ) : existingExport.state === "completed" &&
 +            Date.now() <
@@ -2539,10 +2479,10 @@ index 000000000..dba10bfe4
 +}
 diff --git a/npm-packages/dashboard-common/src/features/settings/components/backups/SnapshotImport.tsx b/npm-packages/dashboard-common/src/features/settings/components/backups/SnapshotImport.tsx
 new file mode 100644
-index 000000000..1d6a0fefc
+index 000000000..17142a28a
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/settings/components/backups/SnapshotImport.tsx
-@@ -0,0 +1,420 @@
+@@ -0,0 +1,431 @@
 +import {
 +  CheckCircledIcon,
 +  CheckIcon,
@@ -2561,16 +2501,19 @@ index 000000000..1d6a0fefc
 +import { Doc, Id } from "system-udfs/convex/_generated/dataModel";
 +import { formatDistanceStrict } from "date-fns";
 +import { Link } from "@ui/Link";
-+import { DeploymentInfoContext } from "@common/lib/deploymentContext";
 +import { snapshotImportFormat } from "system-udfs/convex/tableDefs/snapshotImport";
 +import { Infer } from "convex/values";
-+import { useCancelImport, useConfirmImport } from "@common/lib/deploymentApi";
++import {
++  useCancelImport,
++  useConfirmImport,
++  useUploadSnapshotImport,
++} from "@common/lib/deploymentApi";
 +import {
 +  Disclosure,
 +  DisclosureButton,
 +  DisclosurePanel,
 +} from "@headlessui/react";
-+import { useContext, useState } from "react";
++import { useRef, useState } from "react";
 +import { PuzzlePieceIcon } from "@common/elements/icons";
 +
 +function ConfirmImportButton({
@@ -2662,7 +2605,10 @@ index 000000000..1d6a0fefc
 +          <CancelImportButton importId={snapshotImport._id} />
 +          <div className="flex flex-col">
 +            {snapshotImport.state.checkpoint_messages.map((message, index) => (
-+              <div key={index} className="flex items-center gap-2">
++              <div
++                key={`${index}-${message}`}
++                className="flex items-center gap-2"
++              >
 +                <CheckIcon /> {message}
 +              </div>
 +            ))}
@@ -2794,7 +2740,7 @@ index 000000000..1d6a0fefc
 +    <div className="flex flex-col gap-4">
 +      {Array.from(checkpointsByComponent.entries()).map(
 +        ([componentPath, checkpoints]) => (
-+          <div key={componentPath}>
++          <div key={componentPath ?? "root"}>
 +            {componentPath ? (
 +              <h5 className="mb-1 flex w-full items-center space-x-1">
 +                <PuzzlePieceIcon className="text-content-secondary" />
@@ -2849,9 +2795,8 @@ index 000000000..1d6a0fefc
 +export function ImportState({
 +  snapshotImport,
 +}: {
-+  snapshotImport: Doc<"_snapshot_imports"> & { memberName: string };
++  snapshotImport: Doc<"_snapshot_imports">;
 +}) {
-+  const { TeamMemberLink } = useContext(DeploymentInfoContext);
 +  return (
 +    <Disclosure>
 +      {({ open }) => (
@@ -2862,16 +2807,7 @@ index 000000000..1d6a0fefc
 +                snapshotImportState={snapshotImport.state.state}
 +              />
 +              <div className="flex flex-wrap items-center gap-1">
-+                <TeamMemberLink
-+                  memberId={
-+                    snapshotImport.member_id === null ||
-+                    snapshotImport.member_id === undefined
-+                      ? snapshotImport.member_id
-+                      : Number(snapshotImport.member_id)
-+                  }
-+                  name={snapshotImport.memberName}
-+                />
-+                {`imported a snapshot from a ${snapshotImportFormatToText(snapshotImport.format)} file.`}
++                {`Imported a snapshot from a ${snapshotImportFormatToText(snapshotImport.format)} file.`}
 +              </div>
 +            </div>
 +            <div className="flex items-center gap-2">
@@ -2907,21 +2843,8 @@ index 000000000..1d6a0fefc
 +}
 +
 +const useSnapshotImports = () => {
-+  const { useCurrentTeam, useTeamMembers } = useContext(DeploymentInfoContext);
-+  const existingImports: Doc<"_snapshot_imports">[] | undefined =
-+    useQuery(udfs.snapshotImport.list) ?? [];
-+  const currentTeam = useCurrentTeam();
-+  const teamMembers = useTeamMembers(currentTeam?.id) ?? [];
-+  return existingImports
-+    ?.filter((s) => s.requestor.type === "snapshotImport")
-+    .map((s) => {
-+      const member = teamMembers.find((m) => BigInt(m.id) === s.member_id);
-+      const memberName = member?.name || member?.email || "Unknown member";
-+      return {
-+        ...s,
-+        memberName,
-+      };
-+    });
++  const existingImports = useQuery(udfs.snapshotImport.list) ?? [];
++  return existingImports.filter((s) => s.requestor.type === "snapshotImport");
 +};
 +
 +export function SnapshotImport() {
@@ -2936,73 +2859,134 @@ index 000000000..1d6a0fefc
 +              Import tables into your database from a snapshot.{" "}
 +              <Link
 +                target="_blank"
++                rel="noopener noreferrer"
 +                href="https://docs.convex.dev/database/import-export/import"
 +              >
 +                Learn more
 +              </Link>
 +            </p>
 +          </div>
++          <SnapshotUploadButton />
 +        </div>
-+        {existingImports && existingImports.length !== 0 && (
++        {existingImports.length !== 0 && (
 +          <div className="flex flex-col gap-4">
 +            <h4>Recent Imports</h4>
-+            {existingImports.map(
-+              (
-+                existingImport: Doc<"_snapshot_imports"> & {
-+                  memberName: string;
-+                },
-+              ) => (
-+                <div className="text-content-primary" key={existingImport._id}>
-+                  <ImportState snapshotImport={existingImport} />
-+                </div>
-+              ),
-+            )}
++            {existingImports.map((existingImport) => (
++              <div className="text-content-primary" key={existingImport._id}>
++                <ImportState snapshotImport={existingImport} />
++              </div>
++            ))}
 +          </div>
 +        )}
 +      </div>
 +    </Sheet>
 +  );
 +}
++
++function SnapshotUploadButton() {
++  const input = useRef<HTMLInputElement>(null);
++  const upload = useUploadSnapshotImport();
++  const [uploading, setUploading] = useState(false);
++  return (
++    <>
++      <input
++        ref={input}
++        className="hidden"
++        type="file"
++        accept=".zip,application/zip"
++        onChange={(event) => {
++          const file = event.target.files?.[0];
++          if (!file) return;
++          setUploading(true);
++          void upload(file).finally(() => {
++            setUploading(false);
++            event.target.value = "";
++          });
++        }}
++      />
++      <Button
++        variant="primary"
++        disabled={uploading}
++        onClick={() => input.current?.click()}
++      >
++        {uploading ? "Uploading..." : "Upload Snapshot ZIP"}
++      </Button>
++    </>
++  );
++}
 diff --git a/npm-packages/dashboard-common/src/features/settings/components/backups/SnapshotsView.tsx b/npm-packages/dashboard-common/src/features/settings/components/backups/SnapshotsView.tsx
 new file mode 100644
-index 000000000..8b1e10aef
+index 000000000..1476c354a
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/settings/components/backups/SnapshotsView.tsx
-@@ -0,0 +1,29 @@
-+import { useContext } from "react";
+@@ -0,0 +1,14 @@
 +import { DeploymentSettingsLayout } from "@common/layouts/DeploymentSettingsLayout";
-+import { NoPermissionMessage } from "@common/elements/NoPermissionMessage";
 +import { SnapshotExport } from "@common/features/settings/components/backups/SnapshotExport";
 +import { SnapshotImport } from "@common/features/settings/components/backups/SnapshotImport";
-+import { DeploymentInfoContext } from "@common/lib/deploymentContext";
 +
 +export function SnapshotsView() {
-+  const { useCurrentDeployment, useHasProjectAdminPermissions } = useContext(
-+    DeploymentInfoContext,
-+  );
-+  const deployment = useCurrentDeployment();
-+  const canView = useHasProjectAdminPermissions(deployment?.projectId);
 +  return (
 +    <DeploymentSettingsLayout page="snapshots">
-+      {canView === false ? (
-+        <NoPermissionMessage
-+          message="You do not have permission to view snapshots."
-+          missingPermission="deployment:backups:view"
-+        />
-+      ) : (
-+        <div className="flex flex-col gap-4">
-+          <SnapshotExport />
-+          <SnapshotImport />
-+        </div>
-+      )}
++      <div className="flex flex-col gap-4">
++        <SnapshotExport />
++        <SnapshotImport />
++      </div>
 +    </DeploymentSettingsLayout>
 +  );
 +}
 diff --git a/npm-packages/dashboard-common/src/layouts/SettingsSidebar.tsx b/npm-packages/dashboard-common/src/layouts/SettingsSidebar.tsx
-index e268b7bd5..fac7a33a0 100644
+index e268b7bd5..796600de9 100644
 --- a/npm-packages/dashboard-common/src/layouts/SettingsSidebar.tsx
 +++ b/npm-packages/dashboard-common/src/layouts/SettingsSidebar.tsx
-@@ -162,7 +162,5 @@ function useAllowedPages() {
+@@ -14,7 +14,6 @@ export const DEPLOYMENT_SETTINGS_PAGES_AND_NAMES = {
+   "custom-domains": "Custom Domains",
+   snapshots: "Snapshot Import & Export",
+   components: "Components",
+-  backups: "Backup & Restore",
+   integrations: "Integrations",
+ };
+ 
+@@ -60,22 +59,14 @@ export function SettingsSidebar({
+       >
+         {/* On larger screens, this is a sidebar and not a popover menu. */}
+         {allowedPages.map((page) => {
+-          const showInCloudDashboard =
+-            page === "backups" && isCloudDeploymentInSelfHostedDashboard;
+           const isUnavailableForSelfHosted =
+-            (page === "backups" || page === "custom-domains") &&
+-            isSelfHostedDeployment;
++            page === "custom-domains" && isSelfHostedDeployment;
+           const isUnavailableForLocal =
+-            (page === "backups" || page === "custom-domains") &&
+-            deployment?.kind === "local";
++            page === "custom-domains" && deployment?.kind === "local";
+ 
+           return (
+             <SidebarLink
+-              href={
+-                showInCloudDashboard
+-                  ? `https://dashboard.convex.dev/d/${deploymentName}/settings/${page}`
+-                  : `${deploymentsURI}/settings/${page === "general" ? "" : page}`
+-              }
++              href={`${deploymentsURI}/settings/${page === "general" ? "" : page}`}
+               isActive={page === selectedPage}
+               key={page}
+               disabled={isUnavailableForSelfHosted || isUnavailableForLocal}
+@@ -86,12 +77,8 @@ export function SettingsSidebar({
+                     ? `The ${DEPLOYMENT_SETTINGS_PAGES_AND_NAMES[page]} feature is not currently available in self-hosted deployments.`
+                     : undefined
+               }
+-              target={showInCloudDashboard ? "_blank" : undefined}
+             >
+-              <div className="flex items-center justify-between gap-2">
+-                {DEPLOYMENT_SETTINGS_PAGES_AND_NAMES[page]}
+-                {showInCloudDashboard && <ExternalLinkIcon />}
+-              </div>
++              {DEPLOYMENT_SETTINGS_PAGES_AND_NAMES[page]}
+             </SidebarLink>
+           );
+         })}
+@@ -162,7 +149,5 @@ function useAllowedPages() {
      pages = pages.filter((d) => d !== "components");
    }
  
@@ -3010,154 +2994,16 @@ index e268b7bd5..fac7a33a0 100644
 -
    return pages;
  }
-diff --git a/npm-packages/dashboard-common/src/lib/cloudApiShim.tsx b/npm-packages/dashboard-common/src/lib/cloudApiShim.tsx
-new file mode 100644
-index 000000000..0d7aec4e2
---- /dev/null
-+++ b/npm-packages/dashboard-common/src/lib/cloudApiShim.tsx
-@@ -0,0 +1,131 @@
-+import { useContext } from "react";
-+import { DeploymentInfoContext } from "@common/lib/deploymentContext";
-+import {
-+  DeploymentResponse,
-+  ProjectDetails,
-+} from "@common/lib/generatedApiStub";
-+import { PlatformDeploymentResponse } from "@convex-dev/platform/managementApi";
-+
-+export function useCurrentDeployment() {
-+  const { useCurrentDeployment: hook } = useContext(DeploymentInfoContext);
-+  return hook();
-+}
-+
-+export function useDeploymentByName(_name?: string) {
-+  const { useCurrentDeployment: hook } = useContext(DeploymentInfoContext);
-+  return hook();
-+}
-+
-+export function useCurrentTeam() {
-+  const { useCurrentTeam: hook } = useContext(DeploymentInfoContext);
-+  return hook();
-+}
-+
-+export function useTeamMembers(
-+  teamId?: number,
-+): Array<{ id: number; name?: string | null; email: string }> | undefined {
-+  const { useTeamMembers: hook } = useContext(DeploymentInfoContext);
-+  const members = hook(teamId);
-+  return members?.map((m) => ({ ...m, email: m.email ?? "" }));
-+}
-+
-+export function useCurrentProject() {
-+  const { useCurrentProject: hook } = useContext(DeploymentInfoContext);
-+  return hook();
-+}
-+
-+export function useProjectById(projectId?: number): {
-+  project: ProjectDetails | null;
-+  isLoading: boolean;
-+} {
-+  const { useCurrentProject: hook } = useContext(DeploymentInfoContext);
-+  const current = hook();
-+  if (current && current.id === projectId) {
-+    return {
-+      project: { ...current, teamId: (current as any).teamId ?? 0 },
-+      isLoading: false,
-+    };
-+  }
-+  return { project: null, isLoading: false };
-+}
-+
-+export function useProfile():
-+  | { id: number; name?: string | null; email?: string }
-+  | undefined {
-+  return undefined;
-+}
-+
-+export function useHasProjectAdminPermissions(_projectId?: number): boolean {
-+  const { useHasProjectAdminPermissions: hook } = useContext(
-+    DeploymentInfoContext,
-+  );
-+  return hook(_projectId);
-+}
-+
-+export function useHasCustomRolePermission(
-+  _teamId: number | undefined,
-+  _action: string,
-+  _resource: unknown,
-+  builtinAllowed: boolean,
-+): boolean | undefined {
-+  const { useHasProjectAdminPermissions: hook } = useContext(
-+    DeploymentInfoContext,
-+  );
-+  const isAdmin = hook(undefined);
-+  return isAdmin || builtinAllowed;
-+}
-+
-+export function deploymentResource(
-+  _project: unknown,
-+  _deployment: unknown,
-+): undefined {
-+  return undefined;
-+}
-+
-+export function permissionDeniedTip(
-+  message: string,
-+  _action: string,
-+): React.ReactNode {
-+  return message;
-+}
-+
-+export function usePostHog(): {
-+  capture: (event: string, properties?: Record<string, unknown>) => void;
-+} {
-+  return { capture: () => {} };
-+}
-+
-+export function getDeploymentLabel({
-+  deployment,
-+  whoseName,
-+}: {
-+  deployment: PlatformDeploymentResponse | DeploymentResponse;
-+  whoseName: string | null;
-+}): string {
-+  if (
-+    (deployment.deploymentType === "custom" ||
-+      ("isDefault" in deployment &&
-+        !deployment.isDefault &&
-+        deployment.deploymentType !== "preview")) &&
-+    "reference" in deployment &&
-+    deployment.reference
-+  ) {
-+    return deployment.reference;
-+  }
-+  switch (deployment.deploymentType) {
-+    case "prod":
-+      return "Production";
-+    case "preview":
-+      return `Preview: ${(deployment as any).previewIdentifier || "Unknown"}`;
-+    case "dev": {
-+      if (deployment.kind === "local") {
-+        return (deployment as any).deviceName ?? "Local";
-+      }
-+      return whoseName === null ? "Development (Cloud)" : `${whoseName}’s Dev`;
-+    }
-+    case "custom":
-+      return "Custom";
-+    default:
-+      return "";
-+  }
-+}
 diff --git a/npm-packages/dashboard-common/src/lib/deploymentApi.ts b/npm-packages/dashboard-common/src/lib/deploymentApi.ts
-index a3b43aab0..07cfcc145 100644
+index a3b43aab0..0ec675246 100644
 --- a/npm-packages/dashboard-common/src/lib/deploymentApi.ts
 +++ b/npm-packages/dashboard-common/src/lib/deploymentApi.ts
-@@ -1,14 +1,16 @@
+@@ -1,14 +1,15 @@
 -import { useContext, useMemo } from "react";
 +import { useCallback, useContext, useMemo } from "react";
  import { Shape, shapeSchema } from "shapes";
  import useSWR, { BareFetcher, Middleware } from "swr";
  import { z } from "zod";
-+import { CompletedExport } from "system-udfs/convex/_system/frontend/common";
 +import { Id } from "system-udfs/convex/_generated/dataModel";
  import { useNents } from "@common/lib/useNents";
  import {
@@ -3170,7 +3016,7 @@ index a3b43aab0..07cfcc145 100644
  import { displayName } from "@common/lib/functions/generateFileTree";
  
  export function useDeploymentUrl(): string {
-@@ -65,7 +67,6 @@ export function useTableShapes(): {
+@@ -65,7 +66,6 @@ export function useTableShapes(): {
    return {
      tables: useMemo(() => {
        if (!data) return undefined;
@@ -3178,7 +3024,7 @@ index a3b43aab0..07cfcc145 100644
        const shapes = shapes2ResponseSchema.parse(data);
        return new Map(
          Object.entries(shapes)
-@@ -77,8 +78,6 @@ export function useTableShapes(): {
+@@ -77,8 +77,6 @@ export function useTableShapes(): {
    };
  }
  
@@ -3187,28 +3033,26 @@ index a3b43aab0..07cfcc145 100644
  export function useFunctionUrl(udfPath: string, componentId?: string | null) {
    const { deploymentsURI } = useContext(DeploymentInfoContext);
  
-@@ -103,3 +102,96 @@ export const deploymentAuthMiddleware: Middleware =
+@@ -103,3 +101,192 @@ export const deploymentAuthMiddleware: Middleware =
  
      return useSWRNext(swrKey, fetcher, config);
    };
 +
-+export function useGetZipExport(
-+  format: CompletedExport["format"],
-+): (snapshotId: Id<"_exports">, filename: string) => Promise<void> {
++export function useGetZipExport(): (
++  snapshotId: Id<"_exports">,
++  filename: string,
++) => Promise<void> {
 +  const deploymentUrl = useDeploymentUrl();
 +  const adminKey = useAdminKey();
 +  const { reportHttpError } = useContext(DeploymentInfoContext);
 +  return useCallback(
 +    async (snapshotId: Id<"_exports">, filename: string) => {
-+      if (format?.format !== "zip") {
-+        throw new Error("expected zip");
-+      }
 +      const url = `${deploymentUrl}/api/export/zip/${snapshotId}`;
 +      const res = await fetch(url, {
 +        headers: { Authorization: `Convex ${adminKey}` },
 +      });
 +      if (!res.ok) {
-+        const err = await res.json();
++        const err = await deploymentResponseError(res);
 +        reportHttpError("GET", res.url, err);
 +        toast("error", err.message);
 +        return;
@@ -3223,7 +3067,105 @@ index a3b43aab0..07cfcc145 100644
 +      document.body.removeChild(anchor);
 +      URL.revokeObjectURL(objectUrl);
 +    },
-+    [deploymentUrl, adminKey, format, reportHttpError],
++    [deploymentUrl, adminKey, reportHttpError],
++  );
++}
++
++async function deploymentResponseError(res: Response) {
++  const text = await res.text();
++  try {
++    return JSON.parse(text);
++  } catch {
++    return { message: text || `${res.status} ${res.statusText}` };
++  }
++}
++
++export function useRequestZipExport(): () => Promise<void> {
++  const deploymentUrl = useDeploymentUrl();
++  const adminKey = useAdminKey();
++  const { reportHttpError } = useContext(DeploymentInfoContext);
++  return useCallback(async () => {
++    const res = await fetch(
++      `${deploymentUrl}/api/export/request/zip?includeStorage=true`,
++      {
++        method: "POST",
++        headers: { Authorization: `Convex ${adminKey}` },
++      },
++    );
++    if (!res.ok) {
++      const err = await deploymentResponseError(res);
++      reportHttpError("POST", res.url, err);
++      toast("error", err.message);
++      return;
++    }
++    toast("success", "Snapshot export requested.");
++  }, [deploymentUrl, adminKey, reportHttpError]);
++}
++
++export function useUploadSnapshotImport(): (file: File) => Promise<void> {
++  const deploymentUrl = useDeploymentUrl();
++  const adminKey = useAdminKey();
++  const { reportHttpError } = useContext(DeploymentInfoContext);
++  return useCallback(
++    async (file: File) => {
++      const headers = { Authorization: `Convex ${adminKey}` };
++      const checkedFetch = async (path: string, init: RequestInit) => {
++        const res = await fetch(`${deploymentUrl}${path}`, {
++          ...init,
++          headers: { ...headers, ...init.headers },
++        });
++        if (!res.ok) {
++          const err = await deploymentResponseError(res);
++          reportHttpError(init.method ?? "GET", res.url, err);
++          throw new Error(err.message);
++        }
++        return res;
++      };
++      try {
++        const start = await checkedFetch("/api/import/start_upload", {
++          method: "POST",
++        });
++        const { uploadToken } = await start.json();
++        const chunkSize = Math.max(
++          5 * 1024 * 1024,
++          Math.ceil(file.size / 9999),
++        );
++        const partTokens: string[] = [];
++        for (
++          let offset = 0, partNumber = 1;
++          offset < file.size;
++          offset += chunkSize, partNumber += 1
++        ) {
++          const part = await checkedFetch(
++            `/api/import/upload_part?uploadToken=${encodeURIComponent(
++              uploadToken,
++            )}&partNumber=${partNumber}`,
++            {
++              method: "POST",
++              headers: { "Content-Type": "application/octet-stream" },
++              body: file.slice(offset, offset + chunkSize),
++            },
++          );
++          partTokens.push(await part.json());
++        }
++        await checkedFetch("/api/import/finish_upload", {
++          method: "POST",
++          headers: { "Content-Type": "application/json" },
++          body: JSON.stringify({
++            import: { mode: "replaceAll", format: "zip" },
++            uploadToken,
++            partTokens,
++          }),
++        });
++        toast("success", "Snapshot uploaded. Review and confirm the import.");
++      } catch (error) {
++        toast(
++          "error",
++          error instanceof Error ? error.message : "Snapshot upload failed.",
++        );
++      }
++    },
++    [deploymentUrl, adminKey, reportHttpError],
 +  );
 +}
 +
@@ -3244,7 +3186,7 @@ index a3b43aab0..07cfcc145 100644
 +        body: JSON.stringify({ importId: id }),
 +      });
 +      if (res.status !== 200) {
-+        const err = await res.json();
++        const err = await deploymentResponseError(res);
 +        reportHttpError("POST", res.url, err);
 +        toast("error", err.message);
 +      }
@@ -3271,7 +3213,7 @@ index a3b43aab0..07cfcc145 100644
 +        body: JSON.stringify({ importId }),
 +      });
 +      if (res.status !== 200) {
-+        const err = await res.json();
++        const err = await deploymentResponseError(res);
 +        reportHttpError("POST", res.url, err);
 +        toast("error", err.message);
 +      }
@@ -3284,72 +3226,6 @@ index a3b43aab0..07cfcc145 100644
 +  const { useLogDeploymentEvent: hook } = useContext(DeploymentInfoContext);
 +  return hook();
 +}
-diff --git a/npm-packages/dashboard-common/src/lib/generatedApiStub.ts b/npm-packages/dashboard-common/src/lib/generatedApiStub.ts
-new file mode 100644
-index 000000000..7e260bc21
---- /dev/null
-+++ b/npm-packages/dashboard-common/src/lib/generatedApiStub.ts
-@@ -0,0 +1,60 @@
-+export type CloudBackupResponse = {
-+  id: number;
-+  snapshotId?: string | null;
-+  sourceDeploymentId: number;
-+  sourceDeploymentName: string;
-+  state: string;
-+  requestedTime: number;
-+  completedTime: number;
-+  expirationTime: number;
-+  includeStorage?: boolean;
-+};
-+
-+export type PeriodicBackupConfig = {
-+  sourceDeploymentId: number;
-+  cronspec: string;
-+  expirationDeltaSecs: number;
-+  nextRun: number;
-+  includeStorage: boolean;
-+};
-+
-+export type TeamResponse = {
-+  id: number;
-+  name: string;
-+  slug: string;
-+};
-+
-+export type TeamEntitlementsResponse = {
-+  periodicBackupsEnabled?: boolean;
-+  maxCloudBackups?: number;
-+  auditLogRetentionDays?: number;
-+  logStreamingEnabled?: boolean;
-+  streamingExportEnabled?: boolean;
-+};
-+
-+export type ProjectDetails = {
-+  id: number;
-+  name: string;
-+  slug: string;
-+  teamId: number;
-+};
-+
-+export type DeploymentResponse = {
-+  id: number;
-+  name: string;
-+  deploymentType: "prod" | "dev" | "preview" | "custom";
-+  projectId: number;
-+  kind: string;
-+  previewIdentifier?: string | null;
-+  creator?: number | null;
-+  isDefault?: boolean;
-+  reference?: string;
-+  region?: string;
-+  deviceName?: string;
-+};
-+
-+export type components = {
-+  schemas: {
-+    DeploymentId: number;
-+  };
-+};
 diff --git a/npm-packages/dashboard-self-hosted/src/pages/index.tsx b/npm-packages/dashboard-self-hosted/src/pages/index.tsx
 index cd4843ab6..9f510a67a 100644
 --- a/npm-packages/dashboard-self-hosted/src/pages/index.tsx

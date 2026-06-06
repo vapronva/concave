@@ -22,7 +22,7 @@ type leaderResponse struct {
 func newTestServer(t *testing.T) (*registry.Registry, http.Handler) {
 	t.Helper()
 	reg := registry.New()
-	return reg, server.New(reg, insights.New(10), "usage-secret", nil).Handler()
+	return reg, server.New(reg, insights.New(10), map[string]string{"dev": "usage-secret"}, nil).Handler()
 }
 
 func TestServer_Healthz(t *testing.T) {
@@ -49,7 +49,7 @@ func TestServer_Leader(t *testing.T) {
 	if rr.Code != http.StatusServiceUnavailable {
 		t.Fatalf("leaderless: want 503, got %d", rr.Code)
 	}
-	reg.Update("dev", nil, "backend-0", "http://10.0.0.1:3210")
+	reg.Update("dev", "backend-0", "http://10.0.0.1:3210")
 	rr = httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/registry/deployments/dev/leader", nil))
 	if rr.Code != http.StatusOK {
@@ -99,7 +99,7 @@ func TestServer_LeaderStreamInitialEvent(t *testing.T) {
 	t.Parallel()
 	reg, h := newTestServer(t)
 	reg.EnsureDeployment("dev", "convex-dev")
-	reg.Update("dev", nil, "backend-0", "http://10.0.0.1:3210")
+	reg.Update("dev", "backend-0", "http://10.0.0.1:3210")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	req := httptest.NewRequest(http.MethodGet, "/registry/deployments/dev/leader-stream", nil).WithContext(ctx)
@@ -113,7 +113,8 @@ func TestServer_LeaderStreamInitialEvent(t *testing.T) {
 
 func TestServer_UsageIngestRequiresToken(t *testing.T) {
 	t.Parallel()
-	_, h := newTestServer(t)
+	reg, h := newTestServer(t)
+	reg.EnsureDeployment("dev", "convex-dev")
 	body := `{"deployment":"dev","events":[]}`
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/internal/usage", strings.NewReader(body))
@@ -127,6 +128,41 @@ func TestServer_UsageIngestRequiresToken(t *testing.T) {
 	h.ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("valid token: want 200, got %d (%s)", rr.Code, rr.Body.String())
+	}
+}
+
+func TestServer_UsageIngestRejectsUnknownDeployment(t *testing.T) {
+	t.Parallel()
+	_, h := newTestServer(t)
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/internal/usage",
+		strings.NewReader(`{"deployment":"ghost","events":[]}`),
+	)
+	req.Header.Set("Authorization", "Bearer usage-secret")
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("unknown deployment: want 404, got %d", rr.Code)
+	}
+}
+
+func TestServer_RejectsMalformedBearer(t *testing.T) {
+	t.Parallel()
+	reg, h := newTestServer(t)
+	reg.EnsureDeployment("dev", "convex-dev")
+	for _, auth := range []string{"bearerusage-secret", "Bearer usage-secret extra"} {
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequest(
+			http.MethodPost,
+			"/internal/usage",
+			strings.NewReader(`{"deployment":"dev","events":[]}`),
+		)
+		req.Header.Set("Authorization", auth)
+		h.ServeHTTP(rr, req)
+		if rr.Code != http.StatusUnauthorized {
+			t.Fatalf("auth=%q: want 401, got %d", auth, rr.Code)
+		}
 	}
 }
 

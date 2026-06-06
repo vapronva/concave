@@ -20,8 +20,10 @@ spec:
         {{- include "convex.componentLabels" (dict "ctx" . "component" "leader") | nindent 8 }}
         {{- include "convex.backendDiscoveryLabels" (dict "ctx" . "role" "leader" "priority" .Values.ha.leaderPriority) | nindent 8 }}
     spec:
+      {{- with .Values.ha.leader.nodeSelector }}
       nodeSelector:
-        kubernetes.io/hostname: {{ .Values.ha.leaderNode }}
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       terminationGracePeriodSeconds: 40
       containers:
         - name: backend
@@ -47,7 +49,7 @@ spec:
           volumeMounts:
             {{- include "convex.dataVolumeMount" . | nindent 12 }}
           readinessProbe:
-            httpGet: { path: /instance/leadership, port: cloud }
+            httpGet: { path: /, port: cloud }
             initialDelaySeconds: 10
             periodSeconds: 5
             failureThreshold: 30

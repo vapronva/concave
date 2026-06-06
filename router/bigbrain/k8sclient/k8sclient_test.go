@@ -60,7 +60,7 @@ func TestDiscoverBackends_CustomPrefix(t *testing.T) {
 	if out[0].URL != "http://10.0.0.1:3210" {
 		t.Fatalf("unexpected URL %q", out[0].URL)
 	}
-	if out[0].Priority != 100 || out[0].Role != "leader" || !out[0].Ready {
+	if out[0].Priority != 100 || !out[0].Ready {
 		t.Fatalf("unexpected leader fields: %+v", out[0])
 	}
 	if out[1].Ready {
@@ -92,6 +92,7 @@ func TestDiscoverBackends_SkipsNonBackendComponentAndNoIP(t *testing.T) {
 	cs := fake.NewClientset(
 		pod(prefix, "backend-0", "leader", "backend", "100", "10.0.0.1", true),
 		pod(prefix, "sidecar-0", "follower", "router", "", "10.0.0.2", true),
+		pod(prefix, "funrun-0", "", "funrun", "", "10.0.0.3", true),
 		pod(prefix, "pending-0", "follower", "backend", "", "", true),
 	)
 	c := k8sclient.NewFromInterface(cs, prefix)

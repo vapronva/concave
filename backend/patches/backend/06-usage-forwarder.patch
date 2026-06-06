@@ -1,9 +1,49 @@
+diff --git a/crates/events/src/usage.rs b/crates/events/src/usage.rs
+index d8ef7d6f1..a65ed43af 100644
+--- a/crates/events/src/usage.rs
++++ b/crates/events/src/usage.rs
+@@ -13,6 +13,9 @@ pub enum UdfType {
+ 
+ #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+ pub struct FunctionCallUsageFields {
++    /// Event creation time in Unix milliseconds.
++    #[serde(default)]
++    pub timestamp: i64,
+     /// The ExecutionId of a particular UDF
+     pub id: String,
+     /// The RequestId of a particular UDF
+@@ -60,6 +63,9 @@ pub struct FunctionCallUsageFields {
+     pub occ_write_source: Option<String>,
+     /// The retry number of the OCC. Only set if is_occ is true.
+     pub occ_retry_count: Option<u64>,
++    /// Whether this OCC exhausted retries and ended the mutation.
++    #[serde(default)]
++    pub occ_failed_permanently: bool,
+ }
+ 
+ #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+@@ -141,6 +147,8 @@ pub enum UsageEvent {
+         egress: u64,
+     },
+     InsightReadLimit {
++        #[serde(default)]
++        timestamp: i64,
+         id: String,
+         request_id: String,
+         udf_id: String,
+@@ -270,4 +278,4 @@ impl UsageEventLogger for NoOpUsageEventLogger {
+     async fn shutdown(&self) -> anyhow::Result<()> {
+         Ok(())
+     }
+-}
+\ No newline at end of file
++}
 diff --git a/crates/local_backend/src/usage_forwarder.rs b/crates/local_backend/src/usage_forwarder.rs
 new file mode 100644
-index 000000000..5b77e7898
+index 000000000..9edb14b62
 --- /dev/null
 +++ b/crates/local_backend/src/usage_forwarder.rs
-@@ -0,0 +1,197 @@
+@@ -0,0 +1,300 @@
 +use async_trait::async_trait;
 +use axum::{
 +    extract::RawQuery,
@@ -18,6 +58,10 @@ index 000000000..5b77e7898
 +    UsageEventLogger,
 +};
 +use http::StatusCode;
++use metrics::{
++    log_counter,
++    register_convex_counter,
++};
 +use reqwest::Client;
 +use tokio::{
 +    sync::{
@@ -37,6 +81,18 @@ index 000000000..5b77e7898
 +};
 +
 +const USAGE_FORWARDER_CHANNEL_CAPACITY: usize = 2048;
++const SELF_HOSTED_USAGE_QUERY_PATH: &str = "/api/dashboard/teams/0/usage/query";
++
++register_convex_counter!(
++    USAGE_FORWARDER_DROPPED_BATCHES_TOTAL,
++    "Usage-event batches dropped because the forwarder channel was full or closed"
++);
++
++fn usage_sink_token() -> Option<String> {
++    std::env::var("CONVEX_USAGE_SINK_TOKEN")
++        .ok()
++        .filter(|t| !t.is_empty())
++}
 +
 +#[derive(Debug)]
 +pub struct HttpUsageForwarder {
@@ -63,25 +119,37 @@ index 000000000..5b77e7898
 +    if let Some(token) = token {
 +        req = req.bearer_auth(token);
 +    }
-+    match req.send().await {
-+        Ok(resp) if resp.status().is_success() => {},
-+        Ok(resp) => tracing::warn!("usage sink {} returned {}", sink_url, resp.status()),
-+        Err(e) => tracing::warn!("usage sink post failed: {e}"),
++    for attempt in 1..=3 {
++        match req
++            .try_clone()
++            .expect("usage sink request must be clonable")
++            .send()
++            .await
++        {
++            Ok(resp) if resp.status().is_success() => return,
++            Ok(resp) => tracing::warn!(
++                "usage sink {} returned {} (attempt {attempt}/3)",
++                sink_url,
++                resp.status()
++            ),
++            Err(e) => tracing::warn!("usage sink post failed (attempt {attempt}/3): {e}"),
++        }
++        if attempt < 3 {
++            tokio::time::sleep(Duration::from_millis(100 * attempt)).await;
++        }
 +    }
++    tracing::error!("usage sink batch permanently failed after 3 attempts");
 +}
 +
 +impl HttpUsageForwarder {
-+    pub fn new(sink_url: String, deployment: String) -> Self {
-+        let token = std::env::var("CONVEX_USAGE_SINK_TOKEN")
-+            .ok()
-+            .filter(|t| !t.is_empty());
++    pub fn new(sink_url: String, deployment: String) -> anyhow::Result<Self> {
++        let token = usage_sink_token();
 +        let (tx, mut rx) = mpsc::channel::<Vec<UsageEvent>>(USAGE_FORWARDER_CHANNEL_CAPACITY);
 +        let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
 +        let client = Client::builder()
 +            .timeout(Duration::from_secs(30))
 +            .connect_timeout(Duration::from_secs(10))
-+            .build()
-+            .unwrap_or_else(|_| Client::new());
++            .build()?;
 +        let worker = tokio::spawn(async move {
 +            loop {
 +                tokio::select! {
@@ -105,11 +173,11 @@ index 000000000..5b77e7898
 +                }
 +            }
 +        });
-+        Self {
++        Ok(Self {
 +            tx,
 +            shutdown_tx: Mutex::new(Some(shutdown_tx)),
 +            worker: Mutex::new(Some(worker)),
-+        }
++        })
 +    }
 +}
 +
@@ -117,17 +185,16 @@ index 000000000..5b77e7898
 +impl UsageEventLogger for HttpUsageForwarder {
 +    async fn record_async(&self, events: Vec<UsageEvent>) {
 +        let n = events.len();
-+        if let Err(err) = self.tx.try_send(events) {
-+            match err {
-+                mpsc::error::TrySendError::Full(_) => tracing::warn!(
-+                    "usage forwarder channel full (capacity {}); dropping {} events",
-+                    USAGE_FORWARDER_CHANNEL_CAPACITY,
-+                    n
-+                ),
-+                mpsc::error::TrySendError::Closed(_) => {
-+                    tracing::warn!("usage forwarder channel closed; dropping {} events", n)
-+                },
-+            }
++        match self.tx.try_send(events) {
++            Ok(()) => {},
++            Err(mpsc::error::TrySendError::Full(_)) => {
++                log_counter(&USAGE_FORWARDER_DROPPED_BATCHES_TOTAL, 1);
++                tracing::warn!("usage forwarder channel full; dropping {} events", n)
++            },
++            Err(mpsc::error::TrySendError::Closed(_)) => {
++                log_counter(&USAGE_FORWARDER_DROPPED_BATCHES_TOTAL, 1);
++                tracing::warn!("usage forwarder channel closed; dropping {} events", n)
++            },
 +        }
 +    }
 +
@@ -135,10 +202,38 @@ index 000000000..5b77e7898
 +        if let Some(tx) = self.shutdown_tx.lock().await.take() {
 +            let _ = tx.send(());
 +        }
-+        if let Some(handle) = self.worker.lock().await.take() {
-+            let _ = timeout(Duration::from_secs(5), handle).await;
++        if let Some(mut handle) = self.worker.lock().await.take() {
++            if timeout(Duration::from_secs(5), &mut handle).await.is_err() {
++                handle.abort();
++            }
 +        }
 +        Ok(())
++    }
++}
++
++#[derive(Clone, Debug)]
++pub struct InsightsProxy {
++    base_url: reqwest::Url,
++    token: Option<String>,
++    client: Client,
++}
++
++impl InsightsProxy {
++    pub fn from_env() -> anyhow::Result<Option<Self>> {
++        let Some(base_url) = std::env::var("CONVEX_INSIGHTS_QUERY_URL")
++            .ok()
++            .filter(|u| !u.is_empty())
++        else {
++            return Ok(None);
++        };
++        Ok(Some(Self {
++            base_url: reqwest::Url::parse(&base_url)?,
++            token: usage_sink_token(),
++            client: Client::builder()
++                .timeout(Duration::from_secs(15))
++                .connect_timeout(Duration::from_secs(10))
++                .build()?,
++        }))
 +    }
 +}
 +
@@ -153,47 +248,47 @@ index 000000000..5b77e7898
 +    {
 +        return (StatusCode::FORBIDDEN, "insights requires deployment admin").into_response();
 +    }
-+    let Some(query_url) = std::env::var("CONVEX_INSIGHTS_QUERY_URL")
-+        .ok()
-+        .filter(|u| !u.is_empty())
-+    else {
++    let Some(proxy) = &st.insights_proxy else {
 +        return (
 +            StatusCode::NOT_FOUND,
 +            "insights query endpoint not configured",
 +        )
 +            .into_response();
 +    };
-+    let token = std::env::var("CONVEX_USAGE_SINK_TOKEN")
-+        .ok()
-+        .filter(|t| !t.is_empty());
-+    let upstream = format!(
-+        "{}/api/dashboard/teams/0/usage/query?deploymentName={}&{}",
-+        query_url.trim_end_matches('/'),
-+        st.instance_name,
-+        query.unwrap_or_default()
-+    );
-+    let client = Client::builder()
-+        .timeout(Duration::from_secs(15))
-+        .build()
-+        .unwrap_or_else(|_| Client::new());
-+    let mut req = client.get(&upstream);
-+    if let Some(token) = token {
++    let upstream = match build_insights_url(&proxy.base_url, &st.instance_name, query.as_deref()) {
++        Ok(url) => url,
++        Err(e) => {
++            tracing::warn!("[concave] invalid CONVEX_INSIGHTS_QUERY_URL: {e:#}");
++            return (StatusCode::BAD_GATEWAY, "insights upstream misconfigured").into_response();
++        },
++    };
++    let mut req = proxy.client.get(upstream);
++    if let Some(token) = &proxy.token {
 +        req = req.bearer_auth(token);
 +    }
 +    match req.send().await {
 +        Ok(resp) => {
 +            let status =
 +                StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-+            let body = resp.bytes().await.unwrap_or_default();
-+            (
-+                status,
-+                [(
-+                    http::header::CONTENT_TYPE,
-+                    http::HeaderValue::from_static("application/json"),
-+                )],
-+                body,
-+            )
-+                .into_response()
++            let content_type = resp.headers().get(http::header::CONTENT_TYPE).cloned();
++            let body = match resp.bytes().await {
++                Ok(body) => body,
++                Err(e) => {
++                    tracing::warn!("[concave] insights upstream body read failed: {e}");
++                    return (
++                        StatusCode::BAD_GATEWAY,
++                        "insights upstream body read failed",
++                    )
++                        .into_response();
++                },
++            };
++            let mut response = (status, body).into_response();
++            if let Some(content_type) = content_type {
++                response
++                    .headers_mut()
++                    .insert(http::header::CONTENT_TYPE, content_type);
++            }
++            response
 +        },
 +        Err(e) => {
 +            tracing::warn!("[concave] insights query proxy failed: {e}");
@@ -201,3 +296,132 @@ index 000000000..5b77e7898
 +        },
 +    }
 +}
++
++fn build_insights_url(
++    base: &reqwest::Url,
++    deployment: &str,
++    raw_query: Option<&str>,
++) -> anyhow::Result<reqwest::Url> {
++    let mut url = base.clone();
++    url.set_path(SELF_HOSTED_USAGE_QUERY_PATH);
++    url.set_query(None);
++    {
++        let mut pairs = url.query_pairs_mut();
++        if let Some(raw_query) = raw_query {
++            for (key, value) in url::form_urlencoded::parse(raw_query.as_bytes()) {
++                if key != "deploymentName" {
++                    pairs.append_pair(&key, &value);
++                }
++            }
++        }
++        pairs.append_pair("deploymentName", deployment);
++    }
++    Ok(url)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::build_insights_url;
++
++    #[test]
++    fn insights_url_pins_deployment_name() {
++        let url = build_insights_url(
++            &reqwest::Url::parse("http://bigbrain:8081/ignored").unwrap(),
++            "real deployment",
++            Some("from=2026-01-01&deploymentName=evil&to=2026-01-02"),
++        )
++        .unwrap();
++        let pairs = url.query_pairs().collect::<Vec<_>>();
++        assert_eq!(
++            pairs
++                .iter()
++                .filter(|(key, _)| key == "deploymentName")
++                .count(),
++            1
++        );
++        assert!(pairs
++            .iter()
++            .any(|(key, value)| key == "deploymentName" && value == "real deployment"));
++    }
++}
+diff --git a/crates/usage_tracking/src/lib.rs b/crates/usage_tracking/src/lib.rs
+index a0a075671..dd2a9a726 100644
+--- a/crates/usage_tracking/src/lib.rs
++++ b/crates/usage_tracking/src/lib.rs
+@@ -5,7 +5,11 @@ use std::{
+     fmt::Debug,
+     ops::Add,
+     sync::Arc,
+-    time::Duration,
++    time::{
++        Duration,
++        SystemTime,
++        UNIX_EPOCH,
++    },
+ };
+ 
+ use anyhow::Context;
+@@ -48,6 +52,14 @@ use value::sha256::Sha256Digest;
+ 
+ mod metrics;
+ 
++fn event_timestamp_millis() -> i64 {
++    let millis = SystemTime::now()
++        .duration_since(UNIX_EPOCH)
++        .unwrap_or_default()
++        .as_millis();
++    i64::try_from(millis).unwrap_or(i64::MAX)
++}
++
+ /// The core usage stats aggregator that is cheaply cloneable
+ #[derive(Clone, Debug)]
+ pub struct UsageCounter {
+@@ -83,6 +95,7 @@ pub enum CallType {
+         user_execution_time: Option<Duration>,
+         memory_in_mb: u64,
+         occ_info: Option<OccInfo>,
++        occ_failed_permanently: bool,
+     },
+     Import,
+     CloudBackup,
+@@ -149,6 +162,16 @@ impl CallType {
+         }
+     }
+ 
++    fn occ_failed_permanently(&self) -> bool {
++        match self {
++            Self::Mutation {
++                occ_failed_permanently,
++                ..
++            } => *occ_failed_permanently,
++            _ => false,
++        }
++    }
++
+     fn memory_megabytes(&self) -> u64 {
+         match self {
+             CallType::UncachedQuery { memory_in_mb, .. }
+@@ -249,6 +272,7 @@ impl UsageCounter {
+         let (component_path, udf_id) = udf_path.clone().into_component_and_udf_path();
+         usage_metrics.push(UsageEvent::FunctionCall {
+             fields: FunctionCallUsageFields {
++                timestamp: event_timestamp_millis(),
+                 id: execution_id.to_string(),
+                 request_id: request_id.to_string(),
+                 status: if success { "success" } else { "failure" }.to_string(),
+@@ -267,6 +291,7 @@ impl UsageCounter {
+                 occ_document_id: call_type.occ_document_id(),
+                 occ_write_source: call_type.occ_write_source(),
+                 occ_retry_count: call_type.occ_retry_count(),
++                occ_failed_permanently: call_type.occ_failed_permanently(),
+             },
+         });
+ 
+@@ -492,6 +517,7 @@ impl UsageCounter {
+                 }
+ 
+                 usage_metrics.push(UsageEvent::InsightReadLimit {
++                    timestamp: event_timestamp_millis(),
+                     id: execution_id.to_string(),
+                     request_id: request_id.to_string(),
+                     udf_id: udf_id.clone(),

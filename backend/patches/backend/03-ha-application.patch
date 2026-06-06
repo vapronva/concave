@@ -1,5 +1,17 @@
+diff --git a/crates/application/src/function_log.rs b/crates/application/src/function_log.rs
+index add0ec6e6..462b775c5 100644
+--- a/crates/application/src/function_log.rs
++++ b/crates/application/src/function_log.rs
+@@ -921,6 +921,7 @@ impl<RT: Runtime> FunctionExecutionLog<RT> {
+                             user_execution_time: outcome.user_execution_time,
+                             memory_in_mb: outcome.memory_in_mb,
+                             occ_info: occ_info.clone(),
++                            occ_failed_permanently: occ_info.is_some() && !will_retry,
+                         },
+                         outcome.result.is_ok(),
+                         usage_stats,
 diff --git a/crates/application/src/lib.rs b/crates/application/src/lib.rs
-index f81b976ac..6ce65c07a 100644
+index f81b976ac..17c49408a 100644
 --- a/crates/application/src/lib.rs
 +++ b/crates/application/src/lib.rs
 @@ -132,6 +132,7 @@ use common::{
@@ -19,7 +31,7 @@ index f81b976ac..6ce65c07a 100644
      log_visibility: Arc<dyn LogVisibility<RT>>,
      module_cache: ModuleCache<RT>,
      system_env_var_names: HashSet<EnvVarName>,
-@@ -597,6 +598,11 @@ pub struct Application<RT: Runtime> {
+@@ -597,6 +598,10 @@ pub struct Application<RT: Runtime> {
      log_manager_client: LogManagerClient,
      audit_log_client: AuditLogClient,
      oidc_http_client: CachedHttpClient,
@@ -27,11 +39,56 @@ index f81b976ac..6ce65c07a 100644
 +    segment_term_metadata_fetcher: Arc<dyn SegmentTermMetadataFetcher>,
 +    export_provider: Arc<dyn ExportProvider<RT>>,
 +    fetch_client: Arc<dyn FetchClient>,
-+    promotion_log_manager: Arc<Mutex<Option<LogManagerClient>>>,
  }
  
  /// Create storage based on the storage type configuration
-@@ -668,7 +674,58 @@ impl<RT: Runtime> Application<RT> {
+@@ -636,29 +641,31 @@ impl<RT: Runtime> Application<RT> {
+             storage_type
+         };
+ 
++        let storage = Self::open_application_storage(runtime, database, &storage_type).await?;
++        tracing::info!("{:?} storage is configured.", storage_type);
++        Ok(storage)
++    }
++
++    async fn open_application_storage(
++        runtime: RT,
++        database: &Database<RT>,
++        storage_type: &model::database_globals::types::StorageType,
++    ) -> anyhow::Result<ApplicationStorage> {
+         let files_storage =
+-            create_storage(runtime.clone(), &storage_type, StorageUseCase::Files).await?;
++            create_storage(runtime.clone(), storage_type, StorageUseCase::Files).await?;
+         let modules_storage =
+-            create_storage(runtime.clone(), &storage_type, StorageUseCase::Modules).await?;
+-        let search_storage = create_storage(
+-            runtime.clone(),
+-            &storage_type,
+-            StorageUseCase::SearchIndexes,
+-        )
+-        .await?;
++            create_storage(runtime.clone(), storage_type, StorageUseCase::Modules).await?;
++        let search_storage =
++            create_storage(runtime.clone(), storage_type, StorageUseCase::SearchIndexes).await?;
+         let exports_storage =
+-            create_storage(runtime.clone(), &storage_type, StorageUseCase::Exports).await?;
++            create_storage(runtime.clone(), storage_type, StorageUseCase::Exports).await?;
+         let snapshot_imports_storage = create_storage(
+             runtime.clone(),
+-            &storage_type,
++            storage_type,
+             StorageUseCase::SnapshotImports,
+         )
+         .await?;
+-
+-        // Search storage needs to be set for Database to be fully initialized
+         database.set_search_storage(search_storage.clone());
+-        tracing::info!("{:?} storage is configured.", storage_type);
+-
+         Ok(ApplicationStorage {
+             files_storage,
+             modules_storage,
+@@ -668,7 +675,34 @@ impl<RT: Runtime> Application<RT> {
          })
      }
  
@@ -53,36 +110,12 @@ index f81b976ac..6ce65c07a 100644
 +                    )
 +                })?
 +        };
-+        let files_storage =
-+            create_storage(runtime.clone(), &storage_type, StorageUseCase::Files).await?;
-+        let modules_storage =
-+            create_storage(runtime.clone(), &storage_type, StorageUseCase::Modules).await?;
-+        let search_storage = create_storage(
-+            runtime.clone(),
-+            &storage_type,
-+            StorageUseCase::SearchIndexes,
-+        )
-+        .await?;
-+        let exports_storage =
-+            create_storage(runtime.clone(), &storage_type, StorageUseCase::Exports).await?;
-+        let snapshot_imports_storage = create_storage(
-+            runtime.clone(),
-+            &storage_type,
-+            StorageUseCase::SnapshotImports,
-+        )
-+        .await?;
-+        database.set_search_storage(search_storage.clone());
++        let storage = Self::open_application_storage(runtime, database, &storage_type).await?;
 +        tracing::info!(
 +            "{:?} storage is configured (follower, read-only).",
 +            storage_type
 +        );
-+        Ok(ApplicationStorage {
-+            files_storage,
-+            modules_storage,
-+            search_storage,
-+            exports_storage,
-+            snapshot_imports_storage,
-+        })
++        Ok(storage)
 +    }
 +
      pub async fn new(
@@ -90,7 +123,7 @@ index f81b976ac..6ce65c07a 100644
          runtime: RT,
          database: Database<RT>,
          file_storage: FileStorage<RT>,
-@@ -681,7 +738,7 @@ impl<RT: Runtime> Application<RT> {
+@@ -681,7 +715,7 @@ impl<RT: Runtime> Application<RT> {
          convex_site: ConvexSite,
          searcher: Arc<dyn Searcher>,
          segment_term_metadata_fetcher: Arc<dyn SegmentTermMetadataFetcher>,
@@ -99,7 +132,7 @@ index f81b976ac..6ce65c07a 100644
          node_actions: Actions<RT>,
          log_visibility: Arc<dyn LogVisibility<RT>>,
          app_auth: Arc<ApplicationAuth<RT>>,
-@@ -704,6 +761,146 @@ impl<RT: Runtime> Application<RT> {
+@@ -704,6 +738,145 @@ impl<RT: Runtime> Application<RT> {
              CONVEX_SITE.clone() => convex_site.parse()?
          };
  
@@ -203,7 +236,6 @@ index f81b976ac..6ce65c07a 100644
 +            segment_term_metadata_fetcher,
 +            export_provider,
 +            fetch_client: fetch_client.clone(),
-+            promotion_log_manager: Arc::new(Mutex::new(None)),
 +        };
 +        if role.is_leader() {
 +            let persistence = persistence
@@ -227,7 +259,7 @@ index f81b976ac..6ce65c07a 100644
 +        Ok(application)
 +    }
 +
-+    pub async fn start_leader_workers(
++    pub(crate) async fn start_leader_workers(
 +        &self,
 +        persistence: Arc<dyn Persistence>,
 +        log_manager_client: LogManagerClient,
@@ -246,7 +278,7 @@ index f81b976ac..6ce65c07a 100644
          let mut index_worker = Arc::new(Mutex::new(None));
          if *ENABLE_INDEX_BACKFILL {
              let index_worker_fut = IndexWorker::new(
-@@ -728,8 +925,8 @@ impl<RT: Runtime> Application<RT> {
+@@ -728,12 +901,12 @@ impl<RT: Runtime> Application<RT> {
              database.clone(),
              persistence.reader(),
              application_storage.search_storage.clone(),
@@ -257,7 +289,12 @@ index f81b976ac..6ce65c07a 100644
          );
          let search_worker = Arc::new(Mutex::new(search_worker));
          let search_and_vector_bootstrap_worker =
-@@ -755,74 +952,6 @@ impl<RT: Runtime> Application<RT> {
+-            Arc::new(Mutex::new(database.start_search_and_vector_bootstrap()));
++            Arc::new(Mutex::new(database.start_search_and_vector_bootstrap()?));
+         let table_summary_worker = TableSummaryWorker::start(
+             runtime.clone(),
+             database.clone(),
+@@ -755,74 +928,6 @@ impl<RT: Runtime> Application<RT> {
              runtime.spawn("system_table_cleanup_worker", system_table_cleanup_worker),
          ));
  
@@ -332,7 +369,7 @@ index f81b976ac..6ce65c07a 100644
          let scheduled_job_runner = ScheduledJobRunner::start(
              runtime.clone(),
              deployment_name.clone(),
-@@ -847,7 +976,7 @@ impl<RT: Runtime> Application<RT> {
+@@ -847,7 +952,7 @@ impl<RT: Runtime> Application<RT> {
              database.clone(),
              application_storage.exports_storage.clone(),
              application_storage.files_storage.clone(),
@@ -341,7 +378,7 @@ index f81b976ac..6ce65c07a 100644
              usage_counter.clone(),
              deployment_name.clone(),
          );
-@@ -884,7 +1013,7 @@ impl<RT: Runtime> Application<RT> {
+@@ -884,7 +989,7 @@ impl<RT: Runtime> Application<RT> {
              deployment_name.clone(),
          );
  
@@ -350,7 +387,7 @@ index f81b976ac..6ce65c07a 100644
              usage_gauges_tracking_worker,
              scheduled_job_runner,
              cron_job_executor,
-@@ -899,33 +1028,86 @@ impl<RT: Runtime> Application<RT> {
+@@ -899,33 +1004,80 @@ impl<RT: Runtime> Application<RT> {
              system_table_cleanup_worker,
              migration_worker,
          };
@@ -408,13 +445,8 @@ index f81b976ac..6ce65c07a 100644
 +            self.usage_counter.clone(),
 +        )
 +        .await;
-+        let prev = self
-+            .promotion_log_manager
-+            .lock()
-+            .replace(real_log_manager_client.clone());
-+        if let Some(prev) = prev {
-+            let _ = prev.shutdown().await;
-+        }
++        self.log_manager_client
++            .replace_with(&real_log_manager_client);
 +        tracing::info!("[promote] Application::become_leader: starting leader workers");
 +        self.start_leader_workers(
 +            rw_persistence,
@@ -436,10 +468,9 @@ index f81b976ac..6ce65c07a 100644
 +        if let Some(workers) = workers {
 +            workers.shutdown().await?;
 +        }
-+        let promo_log = self.promotion_log_manager.lock().take();
-+        if let Some(promo_log) = promo_log {
-+            let _ = promo_log.shutdown().await;
-+        }
++        let _ = self.log_manager_client.shutdown().await;
++        self.log_manager_client
++            .replace_with(&LogManagerClient::noop());
 +        tracing::info!("[demote] Application::become_follower: demoting Database");
 +        self.database.become_follower(rw_persistence).await?;
 +        tracing::info!("[demote] Application::become_follower complete");
@@ -457,7 +488,7 @@ index f81b976ac..6ce65c07a 100644
      pub fn modules_storage(&self) -> &Arc<dyn Storage> {
          &self.application_storage.modules_storage
      }
-@@ -3700,7 +3882,10 @@ impl<RT: Runtime> Application<RT> {
+@@ -3700,7 +3852,10 @@ impl<RT: Runtime> Application<RT> {
      }
  
      pub async fn shutdown(&self) -> anyhow::Result<()> {
@@ -470,23 +501,102 @@ index f81b976ac..6ce65c07a 100644
          self.runner.shutdown().await?;
          self.database.shutdown().await?;
 diff --git a/crates/log_streaming/src/lib.rs b/crates/log_streaming/src/lib.rs
-index 2cf993c59..b555b7bd8 100644
+index 2cf993c59..8d25f4eb0 100644
 --- a/crates/log_streaming/src/lib.rs
 +++ b/crates/log_streaming/src/lib.rs
-@@ -101,6 +101,16 @@ pub struct LogManagerClient {
+@@ -94,6 +94,11 @@ use crate::sinks::{
+ /// See `log_streaming/README.md` for more info.
+ #[derive(Clone)]
+ pub struct LogManagerClient {
++    inner: Arc<RwLock<LogManagerClientInner>>,
++}
++
++#[derive(Clone)]
++struct LogManagerClientInner {
+     handle: Arc<Mutex<Option<Box<dyn SpawnHandle>>>>,
+     event_sender: mpsc::Sender<LogEvent>,
+     active_sinks_count: Arc<AtomicUsize>,
+@@ -101,12 +106,33 @@ pub struct LogManagerClient {
  }
  
  impl LogManagerClient {
 +    pub fn noop() -> Self {
 +        let (event_sender, _rx) = mpsc::channel(1);
-+        LogManagerClient {
++        LogManagerClient::from_inner(LogManagerClientInner {
 +            handle: Arc::new(Mutex::new(None)),
 +            event_sender,
 +            active_sinks_count: Arc::new(AtomicUsize::new(0)),
 +            entitlement_enabled: Arc::new(AtomicBool::new(false)),
++        })
++    }
++
++    fn from_inner(inner: LogManagerClientInner) -> Self {
++        Self {
++            inner: Arc::new(RwLock::new(inner)),
 +        }
++    }
++
++    pub fn replace_with(&self, other: &Self) {
++        *self.inner.write() = other.inner.read().clone();
 +    }
 +
      fn send_logs_inner(&self, logs: Vec<LogEvent>) -> Result<(), SendLogBatchError> {
          let mut dropped = 0;
          let mut num_left = logs.len();
+         let total = logs.len();
++        let event_sender = self.inner.read().event_sender.clone();
+         for log in logs.into_iter() {
+-            match self.event_sender.try_send(log) {
++            match event_sender.try_send(log) {
+                 Err(mpsc::error::TrySendError::Full(_)) => {
+                     dropped += 1;
+                 },
+@@ -133,15 +159,21 @@ impl LogManagerClient {
+     }
+ 
+     pub fn set_entitlement_enabled(&self, enabled: bool) {
+-        self.entitlement_enabled.store(enabled, Ordering::Relaxed)
++        self.inner
++            .read()
++            .entitlement_enabled
++            .store(enabled, Ordering::Relaxed)
+     }
+ 
+     fn get_active_sinks_count(&self) -> usize {
+-        self.active_sinks_count.load(Ordering::Relaxed)
++        self.inner.read().active_sinks_count.load(Ordering::Relaxed)
+     }
+ 
+     fn is_entitlement_enabled(&self) -> bool {
+-        self.entitlement_enabled.load(Ordering::Relaxed)
++        self.inner
++            .read()
++            .entitlement_enabled
++            .load(Ordering::Relaxed)
+     }
+ 
+     fn is_active(&self) -> bool {
+@@ -152,7 +184,7 @@ impl LogManagerClient {
+ #[async_trait]
+ impl LogSender for LogManagerClient {
+     async fn shutdown(&self) -> anyhow::Result<()> {
+-        let handle = self.handle.lock().take();
++        let handle = self.inner.read().handle.lock().take();
+         if let Some(handle) = handle {
+             shutdown_and_join(handle).await?;
+         }
+@@ -276,12 +308,12 @@ impl<RT: Runtime> LogManager<RT> {
+ 
+         let handle = Arc::new(Mutex::new(Some(runtime.spawn("log_manager", worker.go()))));
+         let entitlement_enabled = Arc::new(AtomicBool::new(entitlement_enabled));
+-        LogManagerClient {
++        LogManagerClient::from_inner(LogManagerClientInner {
+             handle,
+             event_sender: req_tx,
+             active_sinks_count,
+             entitlement_enabled,
+-        }
++        })
+     }
+ 
+     /// Event loop

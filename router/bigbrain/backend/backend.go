@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 )
 
 type Leadership struct {
-	Role     string  `json:"role"`
 	IsLeader bool    `json:"is_leader"`
 	LatestTS uint64  `json:"latest_ts"`
 	LeaseTS  *uint64 `json:"lease_ts"`
@@ -17,63 +17,72 @@ type Leadership struct {
 
 const (
 	maxBodyBytes            = 4096
-	controlPlaneTokenHeader = "X-Convex-Control-Plane-Token" //nolint:gosec // false positive
+	controlPlaneTokenHeader = "X-Convex-Control-Plane-Token" //nolint:gosec // HTTP header name, not a credential
+	clientTimeout           = 10 * time.Second
 )
 
 type Client struct {
-	http  *http.Client
-	token string
+	http   *http.Client
+	tokens map[string]string
 }
 
-func New(token string) *Client {
-	return &Client{http: &http.Client{}, token: token}
+func New(tokens map[string]string) *Client {
+	return &Client{http: &http.Client{Timeout: clientTimeout}, tokens: tokens}
 }
 
-func (c *Client) Leadership(ctx context.Context, base string) (Leadership, error) {
+func (c *Client) Leadership(ctx context.Context, deployment, base string) (Leadership, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/instance/leadership", nil)
 	if err != nil {
 		return Leadership{}, err
 	}
-	resp, err := c.http.Do(req) //nolint:bodyclose // closed via drainClose
+	c.setControlPlaneToken(req, deployment)
+	status, body, err := c.do(req)
 	if err != nil {
 		return Leadership{}, err
 	}
-	defer drainClose(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return Leadership{}, fmt.Errorf("leadership %s: status %d", base, resp.StatusCode)
+	if status != http.StatusOK {
+		return Leadership{}, fmt.Errorf("leadership %s: status %d", base, status)
 	}
 	var l Leadership
-	if derr := json.NewDecoder(io.LimitReader(resp.Body, maxBodyBytes)).Decode(&l); derr != nil {
+	if derr := json.Unmarshal(body, &l); derr != nil {
 		return Leadership{}, fmt.Errorf("leadership %s: decode: %w", base, derr)
 	}
 	return l, nil
 }
 
-func (c *Client) Promote(ctx context.Context, base string) (int, error) {
-	return c.post(ctx, base+"/instance/promote")
+func (c *Client) Promote(ctx context.Context, deployment, base string) (int, error) {
+	return c.post(ctx, deployment, base+"/instance/promote")
 }
 
-func (c *Client) Demote(ctx context.Context, base string) (int, error) {
-	return c.post(ctx, base+"/instance/demote")
+func (c *Client) Demote(ctx context.Context, deployment, base string) (int, error) {
+	return c.post(ctx, deployment, base+"/instance/demote")
 }
 
-func (c *Client) post(ctx context.Context, url string) (int, error) {
+func (c *Client) post(ctx context.Context, deployment, url string) (int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
 	if err != nil {
 		return 0, err
 	}
-	if c.token != "" {
-		req.Header.Set(controlPlaneTokenHeader, c.token)
-	}
-	resp, err := c.http.Do(req) //nolint:bodyclose // closed via drainClose
-	if err != nil {
-		return 0, err
-	}
-	defer drainClose(resp.Body)
-	return resp.StatusCode, nil
+	c.setControlPlaneToken(req, deployment)
+	status, _, err := c.do(req)
+	return status, err
 }
 
-func drainClose(rc io.ReadCloser) {
-	_, _ = io.Copy(io.Discard, io.LimitReader(rc, maxBodyBytes))
-	_ = rc.Close()
+func (c *Client) do(req *http.Request) (int, []byte, error) {
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
+	if err != nil {
+		return 0, nil, err
+	}
+	return resp.StatusCode, body, nil
+}
+
+func (c *Client) setControlPlaneToken(req *http.Request, deployment string) {
+	if token := c.tokens[deployment]; token != "" {
+		req.Header.Set(controlPlaneTokenHeader, token)
+	}
 }

@@ -1,5 +1,12 @@
 {{- if .Values.bigbrain.enabled }}
 {{- $b := .Values.bigbrain -}}
+{{- $deployments := required "deployments is required when bigbrain.enabled" .Values.deployments -}}
+{{- if eq (len $deployments) 0 -}}
+{{- fail "deployments must contain at least one entry when bigbrain.enabled" -}}
+{{- end -}}
+{{- if ne (int $b.replicas) 1 -}}
+{{- fail "bigbrain.replicas must equal 1 because controller leader election is not implemented" -}}
+{{- end -}}
 {{- if $b.rbac.create }}
 ---
 apiVersion: v1
@@ -12,37 +19,47 @@ metadata:
     {{- include "convex.componentLabels" (dict "ctx" . "component" "bigbrain") | nindent 4 }}
 
 ---
+{{- $namespaces := dict -}}
+{{- range $deployments -}}
+{{- $_ := set $namespaces (required "deployments[].namespace is required" .namespace) true -}}
+{{- end -}}
+{{- range $namespace, $_ := $namespaces }}
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
+kind: Role
 
 metadata:
-  name: {{ include "convex.bigbrainName" . }}
+  name: {{ include "convex.bigbrainName" $ }}
+  namespace: {{ $namespace }}
   labels:
-    {{- include "convex.componentLabels" (dict "ctx" . "component" "bigbrain") | nindent 4 }}
+    {{- include "convex.componentLabels" (dict "ctx" $ "component" "bigbrain") | nindent 4 }}
 
 rules:
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["list"]
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
+kind: RoleBinding
 
 metadata:
-  name: {{ include "convex.bigbrainName" . }}
+  name: {{ include "convex.bigbrainName" $ }}
+  namespace: {{ $namespace }}
   labels:
-    {{- include "convex.componentLabels" (dict "ctx" . "component" "bigbrain") | nindent 4 }}
+    {{- include "convex.componentLabels" (dict "ctx" $ "component" "bigbrain") | nindent 4 }}
 
 roleRef:
   apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: {{ include "convex.bigbrainName" . }}
+  kind: Role
+  name: {{ include "convex.bigbrainName" $ }}
 
 subjects:
   - kind: ServiceAccount
-    name: {{ include "convex.bigbrainName" . }}
-    namespace: {{ .Values.namespace.system }}
+    name: {{ include "convex.bigbrainName" $ }}
+    namespace: {{ $.Values.namespace.system }}
+
+---
+{{- end }}
 
 {{- end }}
 ---
@@ -78,13 +95,15 @@ spec:
       affinity:
         nodeAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
+            {{- with $b.preferredNode }}
             - weight: 1
               preference:
                 matchExpressions:
                   - key: kubernetes.io/hostname
                     operator: In
                     values:
-                      - {{ $b.preferredNode }}
+                      - {{ . }}
+            {{- end }}
           {{- if $b.nodes }}
           requiredDuringSchedulingIgnoredDuringExecution:
             nodeSelectorTerms:
@@ -104,10 +123,8 @@ spec:
           env:
             - name: BIGBRAIN_LABEL_PREFIX
               value: {{ include "convex.labelPrefix" . | quote }}
-            {{- with $b.deployments }}
             - name: BIGBRAIN_DEPLOYMENTS
-              value: {{ . | quote }}
-            {{- end }}
+              value: {{ include "convex.bigbrainDeployments" . | quote }}
             - name: BIGBRAIN_INTERVAL
               value: {{ $b.reconcileInterval | quote }}
             - name: BIGBRAIN_PROMOTE_DEBOUNCE
@@ -118,21 +135,25 @@ spec:
               value: {{ $b.failback.stability | quote }}
             - name: BIGBRAIN_FAILBACK_WARMTH_LAG
               value: {{ int64 $b.failback.warmthLag | quote }}
-            {{- if $b.usageToken }}
-            - name: BIGBRAIN_USAGE_TOKEN
-              value: {{ $b.usageToken | quote }}
-            {{- else }}
-            {{- with $b.usageTokenRef.name }}
-            - name: BIGBRAIN_USAGE_TOKEN
+            {{- range $i, $deployment := $deployments }}
+            {{- $cp := $deployment.controlPlaneTokenSecretRef | default dict }}
+            - name: BIGBRAIN_CONTROL_PLANE_TOKEN_{{ $i }}
               valueFrom:
                 secretKeyRef:
-                  name: {{ . }}
-                  key: {{ default "usage-token" $b.usageTokenRef.key }}
+                  name: {{ required "deployments[].controlPlaneTokenSecretRef.name is required" $cp.name }}
+                  key: {{ default "control-plane-token" $cp.key }}
+            {{- with $deployment.usageTokenSecretRef }}
+            {{- if .name }}
+            - name: BIGBRAIN_USAGE_TOKEN_{{ $i }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .name }}
+                  key: {{ default "usage-token" .key }}
+            {{- end }}
             {{- end }}
             {{- end }}
             - name: INSIGHTS_RING_CAP
               value: {{ $b.insightsRingCap | quote }}
-            {{- include "convex.controlPlaneEnv" . | nindent 12 }}
           ports:
             - { name: http, containerPort: {{ trimPrefix ":" $b.listen }} }
           readinessProbe:

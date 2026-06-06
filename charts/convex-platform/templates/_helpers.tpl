@@ -41,18 +41,14 @@ app.kubernetes.io/component: {{ .component }}
 {{- define "convex.usherName" -}}{{ include "convex.fullname" . }}-usher{{- end -}}
 {{- define "convex.bigbrainName" -}}{{ include "convex.fullname" . }}-bigbrain{{- end -}}
 
-{{- define "convex.controlPlaneEnabled" -}}
-{{- if .Values.controlPlane.tokenSecretRef.name -}}true{{- end -}}
+{{- define "convex.bigbrainDeployments" -}}
+{{- $pairs := list -}}
+{{- range .Values.deployments -}}
+{{- $name := required "deployments[].name is required" .name -}}
+{{- $namespace := required "deployments[].namespace is required" .namespace -}}
+{{- $pairs = append $pairs (printf "%s=%s" $name $namespace) -}}
 {{- end -}}
-
-{{- define "convex.controlPlaneEnv" -}}
-{{- if eq (include "convex.controlPlaneEnabled" .) "true" }}
-- name: BIGBRAIN_CONTROL_PLANE_TOKEN
-  valueFrom:
-    secretKeyRef:
-      name: {{ .Values.controlPlane.tokenSecretRef.name }}
-      key: {{ default "control-plane-token" .Values.controlPlane.tokenSecretRef.key }}
-{{- end }}
+{{- join "," $pairs -}}
 {{- end -}}
 
 {{- define "convex.imagePullSecrets" -}}

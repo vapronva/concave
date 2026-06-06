@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -48,13 +49,19 @@ func racePod(name, ip string) *corev1.Pod {
 
 func TestController_ReconcileConcurrentWithActuation(t *testing.T) {
 	t.Parallel()
+	var promoteCalls atomic.Int64
 	ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(k8sclient.BackendPort)))
 	if err != nil {
 		t.Skipf("cannot bind 127.0.0.1:%d (in use): %v", k8sclient.BackendPort, err)
 	}
 	srv := &httptest.Server{
 		Listener: ln,
-		Config: &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		Config: &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodPost && r.URL.Path == "/instance/promote" {
+				promoteCalls.Add(1)
+				w.WriteHeader(http.StatusAccepted)
+				return
+			}
 			_, _ = io.WriteString(w, `{"role":"follower","is_leader":false,"latest_ts":1,"lease_ts":null}`)
 		})},
 	}
@@ -68,8 +75,7 @@ func TestController_ReconcileConcurrentWithActuation(t *testing.T) {
 	k8s := k8sclient.NewFromInterface(cs, "convex")
 	reg := registry.New()
 	reg.EnsureDeployment("race", "race")
-	c := New(Config{Interval: time.Millisecond, PromoteDebounce: 1_000_000}, k8s, backend.New(""), reg, quietLogger())
-	st := c.deploymentState("race")
+	c := New(Config{Interval: time.Millisecond, PromoteDebounce: 1}, k8s, backend.New(nil), reg, quietLogger())
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 	for range 3 {
@@ -79,20 +85,16 @@ func TestController_ReconcileConcurrentWithActuation(t *testing.T) {
 			}
 		})
 	}
-	for w := range 4 {
-		pod := "backend-" + string(rune('0'+w%3))
-		wg.Go(func() {
-			for ctx.Err() == nil {
-				c.markUnpromotable(st, pod)
-			}
-		})
-	}
 	time.Sleep(150 * time.Millisecond)
 	cancel()
 	wg.Wait()
+	c.actWG.Wait()
+	if promoteCalls.Load() == 0 {
+		t.Fatal("test did not exercise concurrent actuation")
+	}
 }
 
-func TestController_SnapshotCommitConcurrentWithMark(t *testing.T) {
+func TestController_SnapshotCommitConcurrent(t *testing.T) {
 	t.Parallel()
 	c := New(Config{}, nil, nil, registry.New(), quietLogger())
 	st := c.deploymentState("d")
@@ -106,17 +108,14 @@ func TestController_SnapshotCommitConcurrentWithMark(t *testing.T) {
 	wg.Go(func() {
 		for range iterations {
 			snap := c.snapshotState(st)
-			dec := decide(in, decideParams{incumbent: "backend-0", skipPromote: snap.unpromotable})
+			dec := decide(in, decideParams{incumbent: "backend-0"})
 			c.commitState(st, snap, dec, false)
 		}
 	})
-	for w := range 3 {
-		pod := "backend-" + string(rune('0'+w))
-		wg.Go(func() {
-			for range iterations {
-				c.markUnpromotable(st, pod)
-			}
-		})
-	}
+	wg.Go(func() {
+		for range iterations {
+			_ = c.snapshotState(st)
+		}
+	})
 	wg.Wait()
 }

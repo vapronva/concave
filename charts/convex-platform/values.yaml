@@ -4,6 +4,8 @@ labelPrefix: convex
 namespace:
   system: convex-system
 
+deployments: []
+
 image:
   registry: docker.horse
   pullPolicy: IfNotPresent
@@ -16,10 +18,8 @@ usher:
     repository: vapronva/concave/usher
     tag: ""
   bigbrainUrl: ""
-  preferredNode: bho-core-v2
+  preferredNode: ""
   nodes: []
-  config:
-    deployments: []
   resources: {}
 
 bigbrain:
@@ -29,11 +29,6 @@ bigbrain:
   image:
     repository: vapronva/concave/bigbrain
     tag: ""
-  deployments: ""
-  usageToken: ""
-  usageTokenRef:
-    name: ""
-    key: usage-token
   insightsRingCap: 50000
   reconcileInterval: 2s
   promoteDebounce: 3
@@ -41,13 +36,8 @@ bigbrain:
     enabled: false
     stability: 15s
     warmthLag: 5000000000
-  preferredNode: bho-core-v2
+  preferredNode: ""
   nodes: []
   rbac:
     create: true
   resources: {}
-
-controlPlane:
-  tokenSecretRef:
-    name: ""
-    key: control-plane-token

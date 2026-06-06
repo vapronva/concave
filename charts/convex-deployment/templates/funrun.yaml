@@ -57,9 +57,14 @@ spec:
           command: ["/convex/convex-funrun"]
           ports:
             - { name: grpc, containerPort: {{ trimPrefix ":" .Values.funrun.listen }} }
+            - { name: health, containerPort: {{ trimPrefix ":" .Values.funrun.healthListen }} }
           env:
             - name: FUNRUN_LISTEN
               value: "0.0.0.0:{{ trimPrefix ":" .Values.funrun.listen }}"
+            - name: FUNRUN_HEALTH_LISTEN
+              value: "0.0.0.0:{{ trimPrefix ":" .Values.funrun.healthListen }}"
+            - name: FUNRUN_MAX_SNAPSHOT_LAG_SECS
+              value: {{ .Values.funrun.maxSnapshotLagSeconds | quote }}
             - name: FUNRUN_INSTANCE_NAME
               value: {{ required "instance.name is required" .Values.instance.name | quote }}
             - name: FUNRUN_INSTANCE_SECRET
@@ -79,10 +84,15 @@ spec:
           volumeMounts:
             {{- include "convex.dataVolumeMount" . | nindent 12 }}
           readinessProbe:
-            tcpSocket: { port: grpc }
+            httpGet: { path: /readyz, port: health }
             initialDelaySeconds: 5
             periodSeconds: 10
             failureThreshold: 20
+          livenessProbe:
+            httpGet: { path: /healthz, port: health }
+            initialDelaySeconds: 120
+            failureThreshold: 6
+            periodSeconds: 10
           lifecycle:
             preStop:
               exec:

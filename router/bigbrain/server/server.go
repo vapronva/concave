@@ -9,7 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
-	"sync/atomic"
+	"sync"
 	"time"
 
 	"git.horse/vapronva/concave/router/bigbrain/insights"
@@ -19,23 +19,26 @@ import (
 const (
 	keepaliveInterval = 25 * time.Second
 	usageBodyLimit    = 4 * 1024 * 1024
-	bearerPrefixLen   = len("bearer ")
-	maxLeaderStreams  = 256
 )
 
 type Server struct {
-	reg           *registry.Registry
-	ins           *insights.Insights
-	usageToken    string
-	log           *slog.Logger
-	leaderStreams atomic.Int64
+	reg         *registry.Registry
+	ins         *insights.Insights
+	usageTokens map[string]string
+	log         *slog.Logger
+	done        chan struct{}
+	stopOnce    sync.Once
 }
 
-func New(reg *registry.Registry, ins *insights.Insights, usageToken string, log *slog.Logger) *Server {
+func New(reg *registry.Registry, ins *insights.Insights, usageTokens map[string]string, log *slog.Logger) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Server{reg: reg, ins: ins, usageToken: usageToken, log: log}
+	return &Server{reg: reg, ins: ins, usageTokens: usageTokens, log: log, done: make(chan struct{})}
+}
+
+func (s *Server) Shutdown() {
+	s.stopOnce.Do(func() { close(s.done) })
 }
 
 func (s *Server) Handler() http.Handler {
@@ -47,36 +50,43 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /registry/deployments/{name}/leader", s.handleGetLeader)
 	mux.HandleFunc("GET /registry/deployments/{name}/leader-stream", s.handleLeaderStream)
 	mux.HandleFunc("POST /internal/usage", s.handleUsageIngest)
-	mux.HandleFunc("GET /api/dashboard/teams/{teamId}/usage/query", s.handleUsageQuery)
+	mux.HandleFunc("GET /api/dashboard/teams/0/usage/query", s.handleUsageQuery)
 	return logging(s.log, mux)
 }
 
-func (s *Server) bearerOK(r *http.Request) bool {
-	if s.usageToken == "" {
+func (s *Server) bearerOK(r *http.Request, deployment string) bool {
+	expected := s.usageTokens[deployment]
+	if expected == "" {
 		return false
 	}
 	provided := bearerToken(r.Header.Get("Authorization"))
 	a := sha256.Sum256([]byte(provided))
-	b := sha256.Sum256([]byte(s.usageToken))
+	b := sha256.Sum256([]byte(expected))
 	return provided != "" && subtle.ConstantTimeCompare(a[:], b[:]) == 1
 }
 
 func (s *Server) handleUsageIngest(w http.ResponseWriter, r *http.Request) {
-	if !s.bearerOK(r) {
-		writeErr(w, http.StatusUnauthorized, "invalid usage token")
-		return
-	}
 	r.Body = http.MaxBytesReader(w, r.Body, usageBodyLimit)
 	var body struct {
 		Deployment string              `json:"deployment"`
 		Events     []insights.AnyEvent `json:"events"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	dec := json.NewDecoder(r.Body)
+	dec.UseNumber()
+	if err := dec.Decode(&body); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid usage body")
 		return
 	}
 	if body.Deployment == "" {
 		writeErr(w, http.StatusBadRequest, "missing deployment")
+		return
+	}
+	if _, ok := s.reg.Namespace(body.Deployment); !ok {
+		writeErr(w, http.StatusNotFound, "unknown deployment "+body.Deployment)
+		return
+	}
+	if !s.bearerOK(r, body.Deployment) {
+		writeErr(w, http.StatusUnauthorized, "invalid usage token")
 		return
 	}
 	if s.ins == nil {
@@ -93,14 +103,6 @@ func (s *Server) handleUsageIngest(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUsageQuery(w http.ResponseWriter, r *http.Request) {
-	if !s.bearerOK(r) {
-		writeErr(w, http.StatusUnauthorized, "invalid usage token")
-		return
-	}
-	if s.ins == nil {
-		writeErr(w, http.StatusServiceUnavailable, "insights disabled")
-		return
-	}
 	q := r.URL.Query()
 	dep := q.Get("deploymentName")
 	if dep == "" {
@@ -109,6 +111,14 @@ func (s *Server) handleUsageQuery(w http.ResponseWriter, r *http.Request) {
 	}
 	if _, ok := s.reg.Namespace(dep); !ok {
 		writeErr(w, http.StatusNotFound, "unknown deployment "+dep)
+		return
+	}
+	if !s.bearerOK(r, dep) {
+		writeErr(w, http.StatusUnauthorized, "invalid usage token")
+		return
+	}
+	if s.ins == nil {
+		writeErr(w, http.StatusServiceUnavailable, "insights disabled")
 		return
 	}
 	now := time.Now().UTC()
@@ -134,15 +144,15 @@ func (s *Server) handleUsageQuery(w http.ResponseWriter, r *http.Request) {
 }
 
 func bearerToken(authHeader string) string {
-	h := strings.TrimSpace(authHeader)
-	if len(h) < bearerPrefixLen {
+	scheme, token, ok := strings.Cut(strings.TrimSpace(authHeader), " ")
+	if !ok || !strings.EqualFold(scheme, "bearer") {
 		return ""
 	}
-	if !strings.EqualFold(h[:bearerPrefixLen-1], "bearer") {
+	token = strings.TrimSpace(token)
+	if token == "" || strings.ContainsAny(token, " \t") {
 		return ""
 	}
-	rest := strings.TrimLeft(h[bearerPrefixLen-1:], " \t")
-	return rest
+	return token
 }
 
 type leaderResponse struct {
@@ -167,15 +177,13 @@ func (s *Server) handleGetLeader(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleLeaderStream(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	if s.leaderStreams.Add(1) > maxLeaderStreams {
-		s.leaderStreams.Add(-1)
-		writeErr(w, http.StatusServiceUnavailable, "too many leader streams")
+	if _, ok := s.reg.Namespace(name); !ok {
+		writeErr(w, http.StatusNotFound, "unknown deployment "+name)
 		return
 	}
-	defer s.leaderStreams.Add(-1)
 	ch, cancel, ok := s.reg.Subscribe(name)
 	if !ok {
-		writeErr(w, http.StatusNotFound, "unknown deployment "+name)
+		writeErr(w, http.StatusServiceUnavailable, "too many leader-stream subscribers")
 		return
 	}
 	defer cancel()
@@ -186,7 +194,6 @@ func (s *Server) handleLeaderStream(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
 	w.WriteHeader(http.StatusOK)
 	pod, url, _ := s.reg.Leader(name)
 	writeSSE(w, registry.LeaderEvent{Name: name, LeaderPod: pod, LeaderURL: url})
@@ -195,6 +202,8 @@ func (s *Server) handleLeaderStream(w http.ResponseWriter, r *http.Request) {
 	defer keepalive.Stop()
 	for {
 		select {
+		case <-s.done:
+			return
 		case <-r.Context().Done():
 			return
 		case ev, open := <-ch:
@@ -213,10 +222,7 @@ func (s *Server) handleLeaderStream(w http.ResponseWriter, r *http.Request) {
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	enc := json.NewEncoder(w)
-	if err := enc.Encode(v); err != nil && !errors.Is(err, http.ErrHandlerTimeout) {
-		_ = err
-	}
+	_ = json.NewEncoder(w).Encode(v)
 }
 
 func writeErr(w http.ResponseWriter, code int, msg string) {
@@ -260,11 +266,16 @@ type statusWriter struct {
 	wrote  bool
 }
 
+func (w *statusWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
 func (w *statusWriter) WriteHeader(code int) {
-	if !w.wrote {
-		w.status = code
-		w.wrote = true
+	if w.wrote {
+		return
 	}
+	w.status = code
+	w.wrote = true
 	w.ResponseWriter.WriteHeader(code)
 }
 

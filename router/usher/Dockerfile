@@ -6,11 +6,10 @@ RUN sed --in-place 's!https://dl-cdn.alpinelinux.org/alpine!https://linux.sex/dl
     apk --verbose update && \
     apk --no-cache --verbose upgrade --available && \
     apk add --no-cache git ca-certificates tzdata && \
-    update-ca-certificates
+    update-ca-certificates && \
+    apk cache clean
 
 COPY go.mod ./
-
-RUN go mod download
 
 COPY main.go ./
 
@@ -31,5 +30,7 @@ COPY --from=build /usher /usher
 EXPOSE 8080
 
 USER 65532:65532
+
+HEALTHCHECK --interval=10s --timeout=3s --retries=3 CMD wget --quiet --spider http://127.0.0.1:8080/usher/healthz || exit 1
 
 ENTRYPOINT ["/usher"]

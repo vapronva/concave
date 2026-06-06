@@ -1,9 +1,9 @@
 diff --git a/crates/pb/protos/funrun.proto b/crates/pb/protos/funrun.proto
 new file mode 100644
-index 000000000..64370d857
+index 000000000..1af6bd062
 --- /dev/null
 +++ b/crates/pb/protos/funrun.proto
-@@ -0,0 +1,151 @@
+@@ -0,0 +1,150 @@
 +syntax = "proto3";
 +
 +package funrun;
@@ -113,8 +113,7 @@ index 000000000..64370d857
 +  uint64 num_intervals = 2;
 +  ReadSize user_tx_size = 3;
 +  ReadSize system_tx_size = 4;
-+  reserved 5;
-+  repeated SearchReads search = 6;
++  repeated SearchReads search = 5;
 +}
 +
 +message IndexedReads {

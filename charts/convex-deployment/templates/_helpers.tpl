@@ -153,11 +153,12 @@ imagePullSecrets:
 {{- end -}}
 
 {{- define "convex.controlPlaneEnv" -}}
-{{- if eq (include "convex.controlPlaneEnabled" .) "true" }}
+{{- if gt (int .Values.ha.standbyReplicas) 0 }}
+{{- $name := required "controlPlane.tokenSecretRef.name is required when ha.standbyReplicas > 0" .Values.controlPlane.tokenSecretRef.name }}
 - name: CONVEX_CONTROL_PLANE_TOKEN
   valueFrom:
     secretKeyRef:
-      name: {{ .Values.controlPlane.tokenSecretRef.name }}
+      name: {{ $name }}
       key: {{ default "control-plane-token" .Values.controlPlane.tokenSecretRef.key }}
 {{- end }}
 {{- end -}}
@@ -180,5 +181,5 @@ http://{{ include "convex.funrunName" . }}.{{ .Release.Namespace }}.svc.cluster.
       name: {{ include "convex.insightsTokenSecretName" . }}
       key: {{ .Values.insights.tokenRef.key }}
 - name: CONVEX_INSIGHTS_QUERY_URL
-  value: {{ $sink | trimSuffix "/internal/usage" | quote }}
+  value: {{ required "insights.queryUrl is required when insights.enabled" .Values.insights.queryUrl | quote }}
 {{- end -}}
