@@ -1,9 +1,9 @@
 diff --git a/crates/funrun_server/Cargo.toml b/crates/funrun_server/Cargo.toml
 new file mode 100644
-index 000000000..3b7b5576b
+index 000000000..8375eb65c
 --- /dev/null
 +++ b/crates/funrun_server/Cargo.toml
-@@ -0,0 +1,50 @@
+@@ -0,0 +1,51 @@
 +[package]
 +name = "funrun_server"
 +version = "0.1.0"
@@ -33,6 +33,7 @@ index 000000000..3b7b5576b
 +keybroker = { workspace = true }
 +model = { workspace = true }
 +metrics = { workspace = true }
++moka = { workspace = true }
 +pb = { workspace = true }
 +prost = { workspace = true }
 +reqwest = { workspace = true }
@@ -1708,10 +1709,10 @@ index 000000000..ff8667cf0
 +}
 diff --git a/crates/funrun_server/src/snapshot.rs b/crates/funrun_server/src/snapshot.rs
 new file mode 100644
-index 000000000..086b2bc62
+index 000000000..e9a0054df
 --- /dev/null
 +++ b/crates/funrun_server/src/snapshot.rs
-@@ -0,0 +1,593 @@
+@@ -0,0 +1,605 @@
 +use std::{
 +    collections::HashMap,
 +    sync::{
@@ -1763,8 +1764,10 @@ index 000000000..086b2bc62
 +    },
 +    virtual_system_mapping,
 +};
++use moka::future::Cache;
 +use search::searcher::InProcessSearcher;
 +use storage::Storage;
++use sync_types::Timestamp;
 +use tokio::sync::OnceCell;
 +use usage_tracking::FunctionUsageTracker;
 +
@@ -2010,6 +2013,7 @@ index 000000000..086b2bc62
 +    pub search_storage: Arc<dyn Storage>,
 +    pub core: FunctionRunnerCore<RT, DeploymentStorage>,
 +    pub database: Database<RT>,
++    cold_cache: Cache<Timestamp, SnapshotInputs>,
 +}
 +
 +impl<RT: Runtime> InstanceState<RT> {
@@ -2070,6 +2074,10 @@ index 000000000..086b2bc62
 +            storage_type,
 +            database.now_ts_for_reads(),
 +        );
++        let cold_cache = Cache::builder()
++            .max_capacity(*common::knobs::FUNRUN_SNAPSHOT_CACHE_SIZE)
++            .time_to_live(*common::knobs::FUNRUN_SNAPSHOT_CACHE_TTL)
++            .build();
 +        Ok(Self {
 +            rt,
 +            instance_name: config.instance_name.clone(),
@@ -2080,6 +2088,7 @@ index 000000000..086b2bc62
 +            search_storage,
 +            core,
 +            database,
++            cold_cache,
 +        })
 +    }
 +
@@ -2156,7 +2165,10 @@ index 000000000..086b2bc62
 +                    "[convex-funrun] warm snapshot miss at ts {} ({warm_err:#}); cold-loading",
 +                    *ts
 +                );
-+                self.cold_snapshot_inputs(ts, index_reader).await
++                self.cold_cache
++                    .try_get_with(*ts, self.cold_snapshot_inputs(ts, index_reader))
++                    .await
++                    .map_err(|e| anyhow::anyhow!("funrun cold snapshot load failed: {e}"))
 +            },
 +        }
 +    }
@@ -2233,6 +2245,7 @@ index 000000000..086b2bc62
 +    pub error: Option<String>,
 +}
 +
++#[derive(Clone)]
 +pub struct SnapshotInputs {
 +    pub index_reader: Arc<dyn IndexReader>,
 +    pub bootstrap_metadata: BootstrapMetadata,

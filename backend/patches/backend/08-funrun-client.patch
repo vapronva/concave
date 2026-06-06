@@ -69,7 +69,7 @@ index 48a574cf1..e70b22e0b 100644
  /// convenience) from allowing browsers to make these requests.
  pub fn platform_api_cors() -> CorsLayer {
 diff --git a/crates/common/src/knobs.rs b/crates/common/src/knobs.rs
-index 8f0960f9a..3d2b2f741 100644
+index 8f0960f9a..6943fbeab 100644
 --- a/crates/common/src/knobs.rs
 +++ b/crates/common/src/knobs.rs
 @@ -409,6 +409,11 @@ pub static MAX_REPEATABLE_TIMESTAMP_IDLE_FREQUENCY: LazyLock<Duration> = LazyLoc
@@ -84,6 +84,35 @@ index 8f0960f9a..3d2b2f741 100644
  /// The maximum delay between runs of retention, this is now only used for error
  /// backoff and the initial delay when backend is started.
  pub static MAX_RETENTION_DELAY_SECONDS: LazyLock<Duration> =
+@@ -1059,6 +1064,16 @@ pub static FUNRUN_MODULE_QUEUE_SIZE: LazyLock<usize> =
+ pub static FUNRUN_CODE_CACHE_SIZE: LazyLock<u64> =
+     LazyLock::new(|| env_config("FUNRUN_CODE_CACHE_SIZE", 500_000_000));
+ 
++/// Max number of cold-loaded funrun snapshots to cache, keyed by read
++/// timestamp. Coalesces concurrent same-timestamp cold loads (single-flight)
++/// and serves repeat timestamps from cache; also bounds the cache's memory.
++pub static FUNRUN_SNAPSHOT_CACHE_SIZE: LazyLock<u64> =
++    LazyLock::new(|| env_config("FUNRUN_SNAPSHOT_CACHE_SIZE", 64));
++
++/// How long a cached funrun cold-load snapshot stays valid before eviction.
++pub static FUNRUN_SNAPSHOT_CACHE_TTL: LazyLock<Duration> =
++    LazyLock::new(|| Duration::from_secs(env_config("FUNRUN_SNAPSHOT_CACHE_TTL_SECONDS", 60)));
++
+ /// The maximum number of fetch clients Funrun would create.
+ pub static FUNRUN_FETCH_CLIENT_CACHE_SIZE: LazyLock<usize> =
+     LazyLock::new(|| env_config("FUNRUN_FETCH_CLIENT_CACHE_SIZE", 100));
+@@ -1082,6 +1097,11 @@ pub static FUNRUN_CLIENT_MAX_REQUESTS_PER_UPSTREAM: LazyLock<usize> =
+ pub static FUNRUN_CLIENT_MAX_RETRIES: LazyLock<usize> =
+     LazyLock::new(|| env_config("FUNRUN_CLIENT_MAX_RETRIES", 4));
+ 
++/// How often the funrun client re-resolves the funrun service DNS to pick up
++/// added/removed pods and rebalance connections across them.
++pub static FUNRUN_LB_REFRESH_INTERVAL: LazyLock<Duration> =
++    LazyLock::new(|| Duration::from_secs(env_config("FUNRUN_LB_REFRESH_INTERVAL_SECONDS", 10)));
++
+ /// Value between 1 and 100 representing the percent of a the shared scheduler's
+ /// worker pool that a single client can use.
+ pub static FUNRUN_SCHEDULER_MAX_PERCENT_PER_CLIENT: LazyLock<usize> =
 diff --git a/crates/function_runner/Cargo.toml b/crates/function_runner/Cargo.toml
 index e02daa22b..d1d9b6348 100644
 --- a/crates/function_runner/Cargo.toml
@@ -350,10 +379,10 @@ index 000000000..17e83f819
 +}
 diff --git a/crates/function_runner/src/remote.rs b/crates/function_runner/src/remote.rs
 new file mode 100644
-index 000000000..fe8a6b4d3
+index 000000000..a2aba9b55
 --- /dev/null
 +++ b/crates/function_runner/src/remote.rs
-@@ -0,0 +1,739 @@
+@@ -0,0 +1,741 @@
 +use std::{
 +    collections::{
 +        BTreeMap,
@@ -597,7 +626,9 @@ index 000000000..fe8a6b4d3
 +                        tracing::warn!("[funrun-lb] DNS resolution for {host}:{port} failed: {e}")
 +                    },
 +                }
-+                refresh_rt.wait(Duration::from_secs(10)).await;
++                refresh_rt
++                    .wait(*common::knobs::FUNRUN_LB_REFRESH_INTERVAL)
++                    .await;
 +            }
 +        });
 +        let local = FunctionRunnerCore::new(rt.clone(), storage, 100)?;

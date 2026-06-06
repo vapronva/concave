@@ -418,7 +418,7 @@ index 4633f83f5..ca5ad758b 100644
  }
  
 diff --git a/crates/local_backend/src/main.rs b/crates/local_backend/src/main.rs
-index 4217d331d..1f14e3129 100644
+index 4217d331d..e8109ec0a 100644
 --- a/crates/local_backend/src/main.rs
 +++ b/crates/local_backend/src/main.rs
 @@ -12,11 +12,15 @@ use common::{
@@ -438,7 +438,7 @@ index 4217d331d..1f14e3129 100644
      ConnectPersistenceFlags,
  };
  use futures::{
-@@ -37,10 +41,11 @@ use local_backend::{
+@@ -37,11 +41,11 @@ use local_backend::{
          LocalConfig,
          Subcommand,
      },
@@ -447,11 +447,12 @@ index 4217d331d..1f14e3129 100644
      proxy::dev_site_proxy,
 -    router::router,
      HttpActionRouteMapper,
+-    MAX_CONCURRENT_REQUESTS,
 +    RolePersistence,
-     MAX_CONCURRENT_REQUESTS,
  };
  use runtime::prod::ProdRuntime;
-@@ -137,24 +142,52 @@ async fn run_server(runtime: ProdRuntime, config: LocalConfig) -> anyhow::Result
+ use tokio::{
+@@ -137,24 +141,52 @@ async fn run_server(runtime: ProdRuntime, config: LocalConfig) -> anyhow::Result
  }
  
  async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::Result<()> {
@@ -517,7 +518,7 @@ index 4217d331d..1f14e3129 100644
      let st = make_app(
          runtime.clone(),
          config.clone(),
-@@ -163,7 +196,7 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
+@@ -163,13 +195,13 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
          preempt_signal.clone(),
      )
      .await?;
@@ -526,6 +527,13 @@ index 4217d331d..1f14e3129 100644
      let mut shutdown_rx_ = shutdown_rx.clone();
      let http_service = ConvexHttpService::new(
          router,
+         "backend",
+         SERVER_VERSION_STR.to_string(),
+-        MAX_CONCURRENT_REQUESTS,
++        *common::knobs::HTTP_SERVER_MAX_CONCURRENT_REQUESTS,
+         *HTTP_SERVER_TIMEOUT_DURATION,
+         HttpActionRouteMapper,
+     );
 diff --git a/crates/local_backend/src/node_action_callbacks.rs b/crates/local_backend/src/node_action_callbacks.rs
 index 22d9c58bb..d80483fce 100644
 --- a/crates/local_backend/src/node_action_callbacks.rs
