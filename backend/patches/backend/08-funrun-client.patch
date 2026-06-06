@@ -350,10 +350,10 @@ index 000000000..17e83f819
 +}
 diff --git a/crates/function_runner/src/remote.rs b/crates/function_runner/src/remote.rs
 new file mode 100644
-index 000000000..0926a1d26
+index 000000000..fe8a6b4d3
 --- /dev/null
 +++ b/crates/function_runner/src/remote.rs
-@@ -0,0 +1,734 @@
+@@ -0,0 +1,739 @@
 +use std::{
 +    collections::{
 +        BTreeMap,
@@ -567,25 +567,30 @@ index 000000000..0926a1d26
 +        let refresh_rt = rt.clone();
 +        rt.spawn_background("funrun_lb_refresh", async move {
 +            let scheme = if is_https { "https" } else { "http" };
++            let mut current: BTreeSet<SocketAddr> = BTreeSet::new();
 +            loop {
 +                match lookup_host((host.as_str(), port)).await {
 +                    Ok(addrs) => {
 +                        let unique: BTreeSet<SocketAddr> = addrs.collect();
-+                        let mut next_channels = Vec::with_capacity(unique.len());
-+                        for addr in &unique {
-+                            match funrun_endpoint(&format!("{scheme}://{addr}"), &tls_config) {
-+                                Ok(endpoint) => next_channels.push(endpoint.connect_lazy()),
-+                                Err(e) => {
-+                                    tracing::warn!("[funrun-lb] skipping endpoint {addr}: {e}")
-+                                },
++                        if !unique.is_empty() && unique != current {
++                            let mut next_channels = Vec::with_capacity(unique.len());
++                            for addr in &unique {
++                                match funrun_endpoint(&format!("{scheme}://{addr}"), &tls_config) {
++                                    Ok(endpoint) => next_channels.push(endpoint.connect_lazy()),
++                                    Err(e) => {
++                                        tracing::warn!("[funrun-lb] skipping endpoint {addr}: {e}")
++                                    },
++                                }
 +                            }
-+                        }
-+                        if !next_channels.is_empty() {
-+                            let count = next_channels.len();
-+                            *refresh_channels.write() = next_channels;
-+                            tracing::debug!(
-+                                "[funrun-lb] balancing funrun traffic across {count} endpoint(s)"
-+                            );
++                            if !next_channels.is_empty() {
++                                let count = next_channels.len();
++                                *refresh_channels.write() = next_channels;
++                                current = unique;
++                                tracing::info!(
++                                    "[funrun-lb] funrun endpoints changed; balancing across \
++                                     {count} endpoint(s)"
++                                );
++                            }
 +                        }
 +                    },
 +                    Err(e) => {
