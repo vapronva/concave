@@ -69,7 +69,7 @@ index 48a574cf1..e70b22e0b 100644
  /// convenience) from allowing browsers to make these requests.
  pub fn platform_api_cors() -> CorsLayer {
 diff --git a/crates/common/src/knobs.rs b/crates/common/src/knobs.rs
-index 8f0960f9a..6943fbeab 100644
+index 8f0960f9a..cc7b109f3 100644
 --- a/crates/common/src/knobs.rs
 +++ b/crates/common/src/knobs.rs
 @@ -409,6 +409,11 @@ pub static MAX_REPEATABLE_TIMESTAMP_IDLE_FREQUENCY: LazyLock<Duration> = LazyLoc
@@ -101,7 +101,7 @@ index 8f0960f9a..6943fbeab 100644
  /// The maximum number of fetch clients Funrun would create.
  pub static FUNRUN_FETCH_CLIENT_CACHE_SIZE: LazyLock<usize> =
      LazyLock::new(|| env_config("FUNRUN_FETCH_CLIENT_CACHE_SIZE", 100));
-@@ -1082,6 +1097,11 @@ pub static FUNRUN_CLIENT_MAX_REQUESTS_PER_UPSTREAM: LazyLock<usize> =
+@@ -1082,6 +1097,16 @@ pub static FUNRUN_CLIENT_MAX_REQUESTS_PER_UPSTREAM: LazyLock<usize> =
  pub static FUNRUN_CLIENT_MAX_RETRIES: LazyLock<usize> =
      LazyLock::new(|| env_config("FUNRUN_CLIENT_MAX_RETRIES", 4));
  
@@ -109,6 +109,11 @@ index 8f0960f9a..6943fbeab 100644
 +/// added/removed pods and rebalance connections across them.
 +pub static FUNRUN_LB_REFRESH_INTERVAL: LazyLock<Duration> =
 +    LazyLock::new(|| Duration::from_secs(env_config("FUNRUN_LB_REFRESH_INTERVAL_SECONDS", 10)));
++
++/// Funrun client load-balancing policy across funrun pods: "p2c"
++/// (power-of-two-choices, load-aware) or "round_robin".
++pub static FUNRUN_LB_POLICY: LazyLock<String> =
++    LazyLock::new(|| env_config("FUNRUN_LB_POLICY", String::from("p2c")));
 +
  /// Value between 1 and 100 representing the percent of a the shared scheduler's
  /// worker pool that a single client can use.
@@ -379,16 +384,19 @@ index 000000000..17e83f819
 +}
 diff --git a/crates/function_runner/src/remote.rs b/crates/function_runner/src/remote.rs
 new file mode 100644
-index 000000000..a2aba9b55
+index 000000000..6f8133389
 --- /dev/null
 +++ b/crates/function_runner/src/remote.rs
-@@ -0,0 +1,741 @@
+@@ -0,0 +1,820 @@
 +use std::{
 +    collections::{
 +        BTreeMap,
 +        BTreeSet,
 +    },
-+    net::SocketAddr,
++    net::{
++        SocketAddr,
++        ToSocketAddrs,
++    },
 +    sync::{
 +        atomic::{
 +            AtomicUsize,
@@ -464,6 +472,7 @@ index 000000000..a2aba9b55
 +    sync::mpsc,
 +};
 +use tonic::transport::{
++    channel::Change,
 +    Certificate,
 +    Channel,
 +    ClientTlsConfig,
@@ -559,9 +568,16 @@ index 000000000..a2aba9b55
 +    Ok(endpoint)
 +}
 +
++enum LbChannels {
++    RoundRobin {
++        channels: Arc<RwLock<Vec<Channel>>>,
++        next: AtomicUsize,
++    },
++    Balanced(Channel),
++}
++
 +pub struct RemoteFunctionRunner<RT: Runtime> {
-+    channels: Arc<RwLock<Vec<Channel>>>,
-+    next: AtomicUsize,
++    lb: LbChannels,
 +    local: FunctionRunnerCore<RT, DeploymentStorage>,
 +    deployment: DeploymentMetadata,
 +    key_broker: KeyBroker,
@@ -590,51 +606,114 @@ index 000000000..a2aba9b55
 +            );
 +        }
 +        let (is_https, host, port) = parse_funrun_target(&funrun_addr)?;
-+        let fallback = funrun_endpoint(&funrun_addr, &tls_config)?.connect_lazy();
-+        let channels = Arc::new(RwLock::new(vec![fallback]));
-+        let refresh_channels = channels.clone();
-+        let refresh_rt = rt.clone();
-+        rt.spawn_background("funrun_lb_refresh", async move {
-+            let scheme = if is_https { "https" } else { "http" };
-+            let mut current: BTreeSet<SocketAddr> = BTreeSet::new();
-+            loop {
-+                match lookup_host((host.as_str(), port)).await {
-+                    Ok(addrs) => {
-+                        let unique: BTreeSet<SocketAddr> = addrs.collect();
-+                        if !unique.is_empty() && unique != current {
-+                            let mut next_channels = Vec::with_capacity(unique.len());
-+                            for addr in &unique {
-+                                match funrun_endpoint(&format!("{scheme}://{addr}"), &tls_config) {
-+                                    Ok(endpoint) => next_channels.push(endpoint.connect_lazy()),
-+                                    Err(e) => {
-+                                        tracing::warn!("[funrun-lb] skipping endpoint {addr}: {e}")
-+                                    },
++        let scheme = if is_https { "https" } else { "http" };
++        let lb = if common::knobs::FUNRUN_LB_POLICY.eq_ignore_ascii_case("round_robin") {
++            let fallback = funrun_endpoint(&funrun_addr, &tls_config)?.connect_lazy();
++            let channels = Arc::new(RwLock::new(vec![fallback]));
++            let refresh_channels = channels.clone();
++            let refresh_rt = rt.clone();
++            let refresh_tls = tls_config.clone();
++            rt.spawn_background("funrun_lb_refresh", async move {
++                let mut current: BTreeSet<SocketAddr> = BTreeSet::new();
++                loop {
++                    match lookup_host((host.as_str(), port)).await {
++                        Ok(addrs) => {
++                            let unique: BTreeSet<SocketAddr> = addrs.collect();
++                            if !unique.is_empty() && unique != current {
++                                let mut next_channels = Vec::with_capacity(unique.len());
++                                for addr in &unique {
++                                    match funrun_endpoint(
++                                        &format!("{scheme}://{addr}"),
++                                        &refresh_tls,
++                                    ) {
++                                        Ok(endpoint) => next_channels.push(endpoint.connect_lazy()),
++                                        Err(e) => {
++                                            tracing::warn!(
++                                                "[funrun-lb] skipping endpoint {addr}: {e}"
++                                            )
++                                        },
++                                    }
++                                }
++                                if !next_channels.is_empty() {
++                                    let count = next_channels.len();
++                                    *refresh_channels.write() = next_channels;
++                                    current = unique;
++                                    tracing::info!(
++                                        "[funrun-lb] round-robin across {count} endpoint(s)"
++                                    );
 +                                }
 +                            }
-+                            if !next_channels.is_empty() {
-+                                let count = next_channels.len();
-+                                *refresh_channels.write() = next_channels;
-+                                current = unique;
-+                                tracing::info!(
-+                                    "[funrun-lb] funrun endpoints changed; balancing across \
-+                                     {count} endpoint(s)"
-+                                );
-+                            }
-+                        }
-+                    },
-+                    Err(e) => {
-+                        tracing::warn!("[funrun-lb] DNS resolution for {host}:{port} failed: {e}")
-+                    },
++                        },
++                        Err(e) => {
++                            tracing::warn!(
++                                "[funrun-lb] DNS resolution for {host}:{port} failed: {e}"
++                            )
++                        },
++                    }
++                    refresh_rt
++                        .wait(*common::knobs::FUNRUN_LB_REFRESH_INTERVAL)
++                        .await;
 +                }
-+                refresh_rt
-+                    .wait(*common::knobs::FUNRUN_LB_REFRESH_INTERVAL)
-+                    .await;
++            });
++            LbChannels::RoundRobin {
++                channels,
++                next: AtomicUsize::new(0),
 +            }
-+        });
++        } else {
++            let (channel, tx) = Channel::balance_channel::<SocketAddr>(64);
++            let initial: BTreeSet<SocketAddr> = (host.as_str(), port)
++                .to_socket_addrs()
++                .map(|addrs| addrs.collect())
++                .unwrap_or_default();
++            for addr in &initial {
++                if let Ok(endpoint) = funrun_endpoint(&format!("{scheme}://{addr}"), &tls_config) {
++                    let _ = tx.try_send(Change::Insert(*addr, endpoint));
++                }
++            }
++            let refresh_rt = rt.clone();
++            let refresh_tls = tls_config.clone();
++            rt.spawn_background("funrun_lb_refresh", async move {
++                let mut current = initial;
++                loop {
++                    match lookup_host((host.as_str(), port)).await {
++                        Ok(addrs) => {
++                            let unique: BTreeSet<SocketAddr> = addrs.collect();
++                            if !unique.is_empty() {
++                                for addr in unique.difference(&current) {
++                                    if let Ok(endpoint) =
++                                        funrun_endpoint(&format!("{scheme}://{addr}"), &refresh_tls)
++                                    {
++                                        let _ = tx.send(Change::Insert(*addr, endpoint)).await;
++                                    }
++                                }
++                                for addr in current.difference(&unique) {
++                                    let _ = tx.send(Change::Remove(*addr)).await;
++                                }
++                                if unique != current {
++                                    tracing::info!(
++                                        "[funrun-lb] p2c across {} endpoint(s)",
++                                        unique.len()
++                                    );
++                                    current = unique;
++                                }
++                            }
++                        },
++                        Err(e) => {
++                            tracing::warn!(
++                                "[funrun-lb] DNS resolution for {host}:{port} failed: {e}"
++                            )
++                        },
++                    }
++                    refresh_rt
++                        .wait(*common::knobs::FUNRUN_LB_REFRESH_INTERVAL)
++                        .await;
++                }
++            });
++            LbChannels::Balanced(channel)
++        };
 +        let local = FunctionRunnerCore::new(rt.clone(), storage, 100)?;
 +        Ok(Self {
-+            channels,
-+            next: AtomicUsize::new(0),
++            lb,
 +            local,
 +            deployment,
 +            key_broker,
@@ -645,9 +724,14 @@ index 000000000..a2aba9b55
 +    }
 +
 +    fn pick_channel(&self) -> Channel {
-+        let channels = self.channels.read();
-+        let idx = self.next.fetch_add(1, Ordering::Relaxed) % channels.len();
-+        channels[idx].clone()
++        match &self.lb {
++            LbChannels::RoundRobin { channels, next } => {
++                let channels = channels.read();
++                let idx = next.fetch_add(1, Ordering::Relaxed) % channels.len();
++                channels[idx].clone()
++            },
++            LbChannels::Balanced(channel) => channel.clone(),
++        }
 +    }
 +
 +    fn funrun_auth_header(&self) -> String {

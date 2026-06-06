@@ -880,10 +880,10 @@ index 000000000..5acc369f4
 +}
 diff --git a/crates/funrun_server/src/main.rs b/crates/funrun_server/src/main.rs
 new file mode 100644
-index 000000000..735e46d77
+index 000000000..a58397638
 --- /dev/null
 +++ b/crates/funrun_server/src/main.rs
-@@ -0,0 +1,167 @@
+@@ -0,0 +1,168 @@
 +use std::sync::Arc;
 +
 +use anyhow::Context;
@@ -1018,6 +1018,7 @@ index 000000000..735e46d77
 +    let app = Router::new()
 +        .route("/healthz", get(liveness))
 +        .route("/readyz", get(readiness))
++        .route("/metrics", get(common::http::metrics))
 +        .with_state(HealthState {
 +            registry,
 +            max_snapshot_lag,
@@ -1709,10 +1710,10 @@ index 000000000..ff8667cf0
 +}
 diff --git a/crates/funrun_server/src/snapshot.rs b/crates/funrun_server/src/snapshot.rs
 new file mode 100644
-index 000000000..e9a0054df
+index 000000000..21a3e6cf5
 --- /dev/null
 +++ b/crates/funrun_server/src/snapshot.rs
-@@ -0,0 +1,605 @@
+@@ -0,0 +1,625 @@
 +use std::{
 +    collections::HashMap,
 +    sync::{
@@ -1757,6 +1758,10 @@ index 000000000..e9a0054df
 +    index_cache::IndexCache,
 +};
 +use keybroker::FunctionRunnerKeyBroker;
++use metrics::{
++    log_counter,
++    register_convex_counter,
++};
 +use model::{
 +    database_globals::{
 +        types::StorageType,
@@ -1775,6 +1780,19 @@ index 000000000..e9a0054df
 +    FunrunConfig,
 +    FunrunInstanceConfig,
 +};
++
++register_convex_counter!(
++    FUNRUN_SNAPSHOT_WARM_HIT_TOTAL,
++    "Funrun requests served from the warm follower snapshot"
++);
++register_convex_counter!(
++    FUNRUN_SNAPSHOT_COLD_TOTAL,
++    "Funrun requests that missed the warm snapshot and entered the cold-load path"
++);
++register_convex_counter!(
++    FUNRUN_SNAPSHOT_COLD_LOAD_TOTAL,
++    "Funrun cold snapshot loads executed against Postgres (snapshot cache misses)"
++);
 +
 +fn max_percent_per_client(num_tenants: usize) -> usize {
 +    let tenants = num_tenants.max(1);
@@ -2138,6 +2156,7 @@ index 000000000..e9a0054df
 +            Arc::new(repeatable_persistence.read_snapshot(ts)?);
 +        match self.database.snapshot(ts) {
 +            Ok(snapshot) => {
++                log_counter(&FUNRUN_SNAPSHOT_WARM_HIT_TOTAL, 1);
 +                let bootstrap_metadata = self.database.bootstrap_metadata.clone();
 +                let table_count_snapshot: Arc<dyn TableCountSnapshot> =
 +                    match snapshot.table_summaries.clone() {
@@ -2161,6 +2180,7 @@ index 000000000..e9a0054df
 +                })
 +            },
 +            Err(warm_err) => {
++                log_counter(&FUNRUN_SNAPSHOT_COLD_TOTAL, 1);
 +                tracing::debug!(
 +                    "[convex-funrun] warm snapshot miss at ts {} ({warm_err:#}); cold-loading",
 +                    *ts
@@ -2199,6 +2219,7 @@ index 000000000..e9a0054df
 +        ts: RepeatableTimestamp,
 +        index_reader: Arc<dyn IndexReader>,
 +    ) -> anyhow::Result<SnapshotInputs> {
++        log_counter(&FUNRUN_SNAPSHOT_COLD_LOAD_TOTAL, 1);
 +        let mut snapshot = DatabaseSnapshot::load(
 +            self.rt.clone(),
 +            self.reader.clone(),
