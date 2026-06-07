@@ -38,7 +38,6 @@ const (
 	streamBackoffCap      = 15 * time.Second
 	streamHealthyAfter    = 30 * time.Second
 	instancePrefix        = "/instance"
-	sitePort              = "3211"
 	routesPerDeployment   = 2
 	maxHeaderBytes        = 64 * 1024
 )
@@ -167,7 +166,7 @@ func (t *tracker) setLeader(leaderURL string) bool {
 	t.leaderURL, t.proxy = leaderURL, newReverseProxy(u, t.nudgeResolve, t.proxyTransport)
 	if t.siteHost != "" {
 		su := *u
-		su.Host = net.JoinHostPort(u.Hostname(), sitePort)
+		su.Path = "/http"
 		t.siteProxy = newReverseProxy(&su, t.nudgeResolve, t.proxyTransport)
 		log.Printf("usher: %s leader -> %s (site %s -> %s)", t.host, leaderURL, t.siteHost, su.String())
 	} else {

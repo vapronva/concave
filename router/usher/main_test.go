@@ -298,7 +298,7 @@ func TestValidateConfig(t *testing.T) {
 	}
 }
 
-func TestSetLeader_SiteProxyFollowsLeaderOnSitePort(t *testing.T) {
+func TestSetLeader_SiteProxyRoutesToHttpPathOnCloudPort(t *testing.T) {
 	t.Parallel()
 	tr := &tracker{
 		host:     "api.convex.localtest.me",
@@ -311,18 +311,19 @@ func TestSetLeader_SiteProxyFollowsLeaderOnSitePort(t *testing.T) {
 	if ap := tr.currentLeader(false); ap == nil {
 		t.Fatal("api proxy should be installed")
 	}
-	if got := siteUpstreamHost(t, tr); got != net.JoinHostPort("10.0.0.7", sitePort) {
-		t.Errorf("site upstream host = %q, want %q", got, net.JoinHostPort("10.0.0.7", sitePort))
+	if host, path := siteUpstream(t, tr); host != "10.0.0.7:3210" || path != "/http/api/actions" {
+		t.Errorf("site upstream = %q %q, want host %q path %q (cloud port + /http prefix, not the dev site proxy)",
+			host, path, "10.0.0.7:3210", "/http/api/actions")
 	}
 	if !tr.setLeader("http://10.0.0.42:3210") {
 		t.Fatal("setLeader should swap to the new leader")
 	}
-	if got := siteUpstreamHost(t, tr); got != net.JoinHostPort("10.0.0.42", sitePort) {
-		t.Errorf("after failover site upstream host = %q, want %q", got, net.JoinHostPort("10.0.0.42", sitePort))
+	if host, _ := siteUpstream(t, tr); host != "10.0.0.42:3210" {
+		t.Errorf("after failover site upstream host = %q, want %q", host, "10.0.0.42:3210")
 	}
 }
 
-func siteUpstreamHost(t *testing.T, tr *tracker) string {
+func siteUpstream(t *testing.T, tr *tracker) (string, string) {
 	t.Helper()
 	sp := tr.currentLeader(true)
 	if sp == nil {
@@ -331,7 +332,7 @@ func siteUpstreamHost(t *testing.T, tr *tracker) string {
 	in := httptest.NewRequest(http.MethodGet, "/api/actions", nil)
 	out := in.Clone(in.Context())
 	sp.Rewrite(&httputil.ProxyRequest{In: in, Out: out})
-	return out.URL.Host
+	return out.URL.Host, out.URL.Path
 }
 
 func TestSetLeader_NoSiteProxyWithoutSiteHost(t *testing.T) {
