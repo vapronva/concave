@@ -80,8 +80,8 @@ func (c *Controller) actLeaderless(
 			"deployment", name, "streak", streak, "need", c.cfg.PromoteDebounce)
 		return
 	}
-	c.setLeader(name, st, "", "")
 	if d.promoteTarget == nil {
+		c.setLeader(name, st, "", "")
 		c.log.WarnContext(ctx, "election: leaderless and no promotable standby",
 			"deployment", name, "streak", streak)
 		return
@@ -89,6 +89,7 @@ func (c *Controller) actLeaderless(
 	if !c.tryAcquire(st) {
 		return
 	}
+	c.setLeader(name, st, "", "")
 	target := *d.promoteTarget
 	base := context.WithoutCancel(ctx)
 	c.actWG.Go(func() {
@@ -163,6 +164,7 @@ func (c *Controller) runActions(ctx context.Context, name string, st *deployment
 
 func (c *Controller) setLeader(name string, st *deploymentState, pod, url string) {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	if st.incumbentPod != pod {
 		if pod == "" {
 			c.log.Warn("election: deployment is now leaderless", "deployment", name, "was", st.incumbentPod)
@@ -171,7 +173,6 @@ func (c *Controller) setLeader(name string, st *deploymentState, pod, url string
 		}
 		st.incumbentPod = pod
 	}
-	c.mu.Unlock()
 	c.reg.Update(name, pod, url)
 }
 

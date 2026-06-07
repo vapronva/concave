@@ -66,3 +66,19 @@ func TestCommitState_LeaderfulClearsStreak(t *testing.T) {
 		t.Fatalf("a live leader must reset the streak to 0, got %d", got)
 	}
 }
+
+func TestActLeaderless_RetainsLeaderWhenPromotionBlockedByInflight(t *testing.T) {
+	t.Parallel()
+	reg := registry.New()
+	reg.EnsureDeployment("prod", "convex-prod")
+	const debounce = 3
+	c := New(Config{PromoteDebounce: debounce}, nil, nil, reg, quietLogger())
+	st := c.deploymentState("prod")
+	c.setLeader("prod", st, "backend-0", "http://10.0.0.1:3210")
+	st.inflight = true
+	d := decision{liveLeaderCount: 0, promoteTarget: &observation{}}
+	c.actLeaderless(context.Background(), "prod", st, d, debounce)
+	if pod, ok := leaderOf(t, reg, "prod"); !ok || pod != "backend-0" {
+		t.Fatalf("promotion blocked by inflight must retain last-known leader, got %q ok=%v", pod, ok)
+	}
+}

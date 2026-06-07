@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -185,30 +186,39 @@ func (t *tracker) currentLeader(site bool) *httputil.ReverseProxy {
 }
 
 func (t *tracker) resolveOnce(ctx context.Context) {
-	if leader, ok := t.queryBigbrain(ctx); ok {
-		t.setLeader(leader)
+	leaderURL, hasLeader, err := t.queryBigbrain(ctx)
+	if err != nil {
+		return
 	}
+	if !hasLeader {
+		t.setLeader("")
+		return
+	}
+	t.setLeader(leaderURL)
 }
 
-func (t *tracker) queryBigbrain(ctx context.Context) (string, bool) {
+func (t *tracker) queryBigbrain(ctx context.Context) (string, bool, error) {
 	u := strings.TrimRight(t.bigbrainURL, "/") + "/registry/deployments/" + t.name + "/leader"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
-		return "", false
+		return "", false, err
 	}
 	resp, err := t.client.Do(req) //nolint:bodyclose // drainClose drains and closes the body
 	if err != nil {
-		return "", false
+		return "", false, err
 	}
 	defer drainClose(resp.Body)
+	if resp.StatusCode == http.StatusServiceUnavailable {
+		return "", false, nil
+	}
 	if resp.StatusCode != http.StatusOK {
-		return "", false
+		return "", false, fmt.Errorf("bigbrain leader query: unexpected status %d", resp.StatusCode)
 	}
 	var lr leaderResponse
-	if json.NewDecoder(io.LimitReader(resp.Body, bodyReadLimit)).Decode(&lr) != nil || lr.LeaderURL == "" {
-		return "", false
+	if err = json.NewDecoder(io.LimitReader(resp.Body, bodyReadLimit)).Decode(&lr); err != nil {
+		return "", false, err
 	}
-	return lr.LeaderURL, true
+	return lr.LeaderURL, lr.LeaderURL != "", nil
 }
 
 func (t *tracker) streamBigbrain(ctx context.Context) {

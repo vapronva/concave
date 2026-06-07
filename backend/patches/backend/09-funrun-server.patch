@@ -1710,10 +1710,10 @@ index 000000000..ff8667cf0
 +}
 diff --git a/crates/funrun_server/src/snapshot.rs b/crates/funrun_server/src/snapshot.rs
 new file mode 100644
-index 000000000..21a3e6cf5
+index 000000000..0d9634c89
 --- /dev/null
 +++ b/crates/funrun_server/src/snapshot.rs
-@@ -0,0 +1,625 @@
+@@ -0,0 +1,637 @@
 +use std::{
 +    collections::HashMap,
 +    sync::{
@@ -1792,6 +1792,10 @@ index 000000000..21a3e6cf5
 +register_convex_counter!(
 +    FUNRUN_SNAPSHOT_COLD_LOAD_TOTAL,
 +    "Funrun cold snapshot loads executed against Postgres (snapshot cache misses)"
++);
++register_convex_counter!(
++    FUNRUN_SNAPSHOT_REQUESTS_TOTAL,
++    "Funrun snapshot_inputs calls; cache hit rate = 1 - (warm_hit + cold) / requests"
 +);
 +
 +fn max_percent_per_client(num_tenants: usize) -> usize {
@@ -2031,7 +2035,7 @@ index 000000000..21a3e6cf5
 +    pub search_storage: Arc<dyn Storage>,
 +    pub core: FunctionRunnerCore<RT, DeploymentStorage>,
 +    pub database: Database<RT>,
-+    cold_cache: Cache<Timestamp, SnapshotInputs>,
++    snapshot_cache: Cache<Timestamp, SnapshotInputs>,
 +}
 +
 +impl<RT: Runtime> InstanceState<RT> {
@@ -2092,7 +2096,7 @@ index 000000000..21a3e6cf5
 +            storage_type,
 +            database.now_ts_for_reads(),
 +        );
-+        let cold_cache = Cache::builder()
++        let snapshot_cache = Cache::builder()
 +            .max_capacity(*common::knobs::FUNRUN_SNAPSHOT_CACHE_SIZE)
 +            .time_to_live(*common::knobs::FUNRUN_SNAPSHOT_CACHE_TTL)
 +            .build();
@@ -2106,7 +2110,7 @@ index 000000000..21a3e6cf5
 +            search_storage,
 +            core,
 +            database,
-+            cold_cache,
++            snapshot_cache,
 +        })
 +    }
 +
@@ -2150,6 +2154,17 @@ index 000000000..21a3e6cf5
 +    }
 +
 +    pub async fn snapshot_inputs(&self, ts: RepeatableTimestamp) -> anyhow::Result<SnapshotInputs> {
++        log_counter(&FUNRUN_SNAPSHOT_REQUESTS_TOTAL, 1);
++        self.snapshot_cache
++            .try_get_with(*ts, self.build_snapshot_inputs(ts))
++            .await
++            .map_err(|e| anyhow::anyhow!("funrun snapshot inputs failed: {e}"))
++    }
++
++    async fn build_snapshot_inputs(
++        &self,
++        ts: RepeatableTimestamp,
++    ) -> anyhow::Result<SnapshotInputs> {
 +        let repeatable_persistence =
 +            RepeatablePersistence::new(self.reader.clone(), ts, self.retention_validator.clone());
 +        let index_reader: Arc<dyn IndexReader> =
@@ -2185,10 +2200,7 @@ index 000000000..21a3e6cf5
 +                    "[convex-funrun] warm snapshot miss at ts {} ({warm_err:#}); cold-loading",
 +                    *ts
 +                );
-+                self.cold_cache
-+                    .try_get_with(*ts, self.cold_snapshot_inputs(ts, index_reader))
-+                    .await
-+                    .map_err(|e| anyhow::anyhow!("funrun cold snapshot load failed: {e}"))
++                self.cold_snapshot_inputs(ts, index_reader).await
 +            },
 +        }
 +    }

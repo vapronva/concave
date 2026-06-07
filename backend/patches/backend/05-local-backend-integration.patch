@@ -720,3 +720,62 @@ index 22d9c58bb..d80483fce 100644
              Some(v) => v.to_str().context("Convex-Root-Request must be a string")? == "true",
              None => false,
          };
+diff --git a/crates/local_backend/src/proxy.rs b/crates/local_backend/src/proxy.rs
+index 0ea3363be..d401785cc 100644
+--- a/crates/local_backend/src/proxy.rs
++++ b/crates/local_backend/src/proxy.rs
+@@ -1,6 +1,10 @@
+-use std::net::SocketAddr;
++use std::{
++    net::SocketAddr,
++    sync::LazyLock,
++};
+ 
+ use axum::{
++    body::Body,
+     extract::{
+         Request,
+         State,
+@@ -15,9 +19,21 @@ use common::{
+         HttpResponseError,
+         NoopRouteMapper,
+     },
+-    knobs::HTTP_SERVER_TIMEOUT_DURATION,
++    knobs::{
++        HTTP_SERVER_MAX_CONCURRENT_REQUESTS,
++        HTTP_SERVER_TIMEOUT_DURATION,
++    },
+ };
+-use hyper_util::rt::TokioExecutor;
++use hyper_util::{
++    client::legacy::{
++        connect::HttpConnector,
++        Client,
++    },
++    rt::TokioExecutor,
++};
++
++static PROXY_CLIENT: LazyLock<Client<HttpConnector, Body>> =
++    LazyLock::new(|| Client::builder(TokioExecutor::new()).build_http());
+ 
+ /// Routes HTTP actions to the main webserver
+ pub async fn dev_site_proxy(
+@@ -37,8 +53,7 @@ pub async fn dev_site_proxy(
+     ) -> Result<impl IntoResponse, HttpResponseError> {
+         let new_uri = format!("{}{}", site_forward_prefix, request.uri());
+         *request.uri_mut() = new_uri.parse().map_err(anyhow::Error::new)?;
+-        let resp = hyper_util::client::legacy::Client::builder(TokioExecutor::new())
+-            .build_http()
++        let resp = PROXY_CLIENT
+             .request(request)
+             .await
+             .map_err(anyhow::Error::new)?;
+@@ -60,7 +75,7 @@ pub async fn dev_site_proxy(
+         Router::new().fallback_service(router),
+         "backend_http_proxy",
+         "unknown".to_string(),
+-        4,
++        *HTTP_SERVER_MAX_CONCURRENT_REQUESTS,
+         *HTTP_SERVER_TIMEOUT_DURATION,
+         NoopRouteMapper,
+     );

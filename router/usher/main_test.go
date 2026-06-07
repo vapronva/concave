@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"io"
 	"net"
 	"net/http"
@@ -342,4 +343,60 @@ func TestSetLeader_NoSiteProxyWithoutSiteHost(t *testing.T) {
 	if sp := tr.currentLeader(true); sp != nil {
 		t.Error("site proxy should be nil when siteHost is unset")
 	}
+}
+
+func TestResolveOnce_ClearsLeaderOnAuthoritativeNoLeader(t *testing.T) {
+	t.Parallel()
+	t.Run("status_503_clears", func(t *testing.T) {
+		t.Parallel()
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"error":"no leader"}`))
+		}))
+		defer srv.Close()
+		tr := &tracker{name: "test", bigbrainURL: srv.URL, client: &http.Client{}}
+		tr.setLeader("http://10.0.0.5:3210")
+		tr.resolveOnce(context.Background())
+		if tr.currentLeader(false) != nil {
+			t.Fatal("503 no-leader must clear the leader, matching SSE")
+		}
+	})
+	t.Run("status_200_empty_url_clears", func(t *testing.T) {
+		t.Parallel()
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(`{"leaderUrl":""}`))
+		}))
+		defer srv.Close()
+		tr := &tracker{name: "test", bigbrainURL: srv.URL, client: &http.Client{}}
+		tr.setLeader("http://10.0.0.5:3210")
+		tr.resolveOnce(context.Background())
+		if tr.currentLeader(false) != nil {
+			t.Fatal("200 with empty leaderUrl must clear the leader")
+		}
+	})
+	t.Run("transport_error_preserves", func(t *testing.T) {
+		t.Parallel()
+		tr := &tracker{
+			name:        "test",
+			bigbrainURL: "http://127.0.0.1:1",
+			client:      &http.Client{Timeout: 250 * time.Millisecond},
+		}
+		tr.setLeader("http://10.0.0.5:3210")
+		tr.resolveOnce(context.Background())
+		if tr.currentLeader(false) == nil {
+			t.Fatal("transport error must preserve last-known leader")
+		}
+	})
+	t.Run("status_200_sets_leader", func(t *testing.T) {
+		t.Parallel()
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(`{"leaderUrl":"http://10.0.0.9:3210"}`))
+		}))
+		defer srv.Close()
+		tr := &tracker{name: "test", bigbrainURL: srv.URL, client: &http.Client{}}
+		tr.resolveOnce(context.Background())
+		if tr.currentLeader(false) == nil {
+			t.Fatal("200 with a leader URL must set the leader")
+		}
+	})
 }
