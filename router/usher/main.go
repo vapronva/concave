@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -111,10 +112,13 @@ func newReverseProxy(u *url.URL, nudge func(), tr *http.Transport) *httputil.Rev
 				http.Error(w, "request entity too large", http.StatusRequestEntityTooLarge)
 				return
 			}
-			if r.Context().Err() == nil {
-				nudge()
+			if r.Context().Err() != nil {
+				http.Error(w, "client closed request", http.StatusBadGateway)
+				return
 			}
-			http.Error(w, "bad gateway", http.StatusBadGateway)
+			nudge()
+			w.Header().Set("Retry-After", "1")
+			http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			if resp.StatusCode != http.StatusMisdirectedRequest {
@@ -123,13 +127,13 @@ func newReverseProxy(u *url.URL, nudge func(), tr *http.Transport) *httputil.Rev
 			_ = resp.Body.Close()
 			body := []byte("service unavailable\n")
 			resp.StatusCode = http.StatusServiceUnavailable
-			resp.Status = http.StatusText(http.StatusServiceUnavailable)
+			resp.Status = "503 " + http.StatusText(http.StatusServiceUnavailable)
 			resp.Header = make(http.Header)
 			resp.Header.Set("Content-Type", "text/plain; charset=utf-8")
 			resp.Header.Set("Content-Length", strconv.Itoa(len(body)))
 			resp.Header.Set("Retry-After", "1")
 			resp.ContentLength = int64(len(body))
-			resp.Body = io.NopCloser(strings.NewReader(string(body)))
+			resp.Body = io.NopCloser(bytes.NewReader(body))
 			resp.Trailer = nil
 			resp.TransferEncoding = nil
 			nudge()
@@ -236,8 +240,9 @@ func (t *tracker) streamBigbrain(ctx context.Context) {
 			return
 		case <-time.After(backoff):
 		}
-		if backoff < streamBackoffCap {
-			backoff *= 2
+		backoff *= 2
+		if backoff > streamBackoffCap {
+			backoff = streamBackoffCap
 		}
 	}
 }
@@ -275,7 +280,7 @@ func (t *tracker) consumeStream(ctx context.Context, u string) bool {
 }
 
 func isBlockedControlPath(p string) bool {
-	c := strings.ToLower(path.Clean("/" + strings.TrimSuffix(p, "/")))
+	c := strings.ToLower(path.Clean("/" + p))
 	return c == instancePrefix || strings.HasPrefix(c, instancePrefix+"/")
 }
 
@@ -332,9 +337,6 @@ func startTracker(ctx context.Context, client *http.Client, bigbrainURL string, 
 		proxyTransport: newProxyTransport(),
 		resolveCh:      make(chan struct{}, 1),
 	}
-	initCtx, cancel := context.WithTimeout(ctx, resolveTimeout)
-	t.resolveOnce(initCtx)
-	cancel()
 	go t.resolveLoop(ctx)
 	go t.streamBigbrain(ctx)
 	log.Printf("usher: configured host=%s siteHost=%q name=%s bigbrain=%q", d.Host, d.SiteHost, name, bigbrainURL)
@@ -344,20 +346,23 @@ func startTracker(ctx context.Context, client *http.Client, bigbrainURL string, 
 func (t *tracker) resolveLoop(ctx context.Context) {
 	tick := time.NewTicker(resolveInterval)
 	defer tick.Stop()
+	t.resolveWithTimeout(ctx)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.resolveCh:
-			rctx, rcancel := context.WithTimeout(ctx, resolveTimeout)
-			t.resolveOnce(rctx)
-			rcancel()
+			t.resolveWithTimeout(ctx)
 		case <-tick.C:
-			rctx, rcancel := context.WithTimeout(ctx, resolveTimeout)
-			t.resolveOnce(rctx)
-			rcancel()
+			t.resolveWithTimeout(ctx)
 		}
 	}
+}
+
+func (t *tracker) resolveWithTimeout(ctx context.Context) {
+	rctx, cancel := context.WithTimeout(ctx, resolveTimeout)
+	defer cancel()
+	t.resolveOnce(rctx)
 }
 
 func (t *tracker) nudgeResolve() {

@@ -1,7 +1,6 @@
 package insights
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"regexp"
@@ -87,7 +86,7 @@ func New(ringCap int) *Insights {
 
 type AnyEvent map[string]map[string]any
 
-func (i *Insights) Ingest(_ context.Context, deployment string, events []AnyEvent) (int, error) {
+func (i *Insights) Ingest(deployment string, events []AnyEvent) int {
 	kept := 0
 	for _, ev := range events {
 		for k, payload := range ev {
@@ -99,7 +98,7 @@ func (i *Insights) Ingest(_ context.Context, deployment string, events []AnyEven
 			kept++
 		}
 	}
-	return kept, nil
+	return kept
 }
 
 func (i *Insights) store(r Row) {
@@ -107,11 +106,11 @@ func (i *Insights) store(r Row) {
 	defer i.memMu.Unlock()
 	dep := i.mem[r.Deployment]
 	if dep == nil {
-		dep = &deploymentRows{rows: make([]Row, i.cap)}
+		dep = &deploymentRows{}
 		i.mem[r.Deployment] = dep
 	}
-	if dep.size < len(dep.rows) {
-		dep.rows[(dep.start+dep.size)%len(dep.rows)] = r
+	if len(dep.rows) < i.cap {
+		dep.rows = append(dep.rows, r)
 		dep.size++
 		return
 	}
@@ -147,7 +146,7 @@ func (i *Insights) rows(deployment string, fromMs, toMs int64) []Row {
 	return out
 }
 
-func (i *Insights) Query(_ context.Context, deployment, fromDate, toDate string) ([][]any, error) {
+func (i *Insights) Query(deployment, fromDate, toDate string) ([][]any, error) {
 	if !dateRE.MatchString(fromDate) || !dateRE.MatchString(toDate) {
 		return nil, ErrBadDateRange
 	}
@@ -223,20 +222,10 @@ func buildOCCRow(udfID, comp, occTable string, grp []Row) []any {
 		"hourlyCounts": hourly,
 		"recentEvents": recent,
 	}
-	if occTableField := pickOCCTableField(occTable, grp); occTableField != nil {
-		body["occTableName"] = occTableField
+	if occTable != "" {
+		body["occTableName"] = occTable
 	}
 	return []any{kind, udfID, comp, string(mustJSON(body))}
-}
-
-func pickOCCTableField(occTable string, grp []Row) any {
-	if occTable != "" {
-		return occTable
-	}
-	if len(grp) > 0 && grp[0].OCCTableName != nil {
-		return *grp[0].OCCTableName
-	}
-	return nil
 }
 
 func groupByOCC(rows []Row) map[string][]Row {
@@ -404,10 +393,13 @@ func makeRow(deployment, kind string, p map[string]any) (Row, bool) {
 }
 
 func eventTime(p map[string]any) time.Time {
-	if v, ok := p["timestamp"].(json.Number); ok {
+	switch v := p["timestamp"].(type) {
+	case json.Number:
 		if ms, err := v.Int64(); err == nil {
 			return time.UnixMilli(ms).UTC()
 		}
+	case float64:
+		return time.UnixMilli(int64(v)).UTC()
 	}
 	return time.Now().UTC()
 }
@@ -457,29 +449,23 @@ func getInt(m map[string]any, k string) int {
 }
 
 func getCalls(m map[string]any, k string) []Call {
-	v, ok := m[k]
+	xs, ok := m[k].([]any)
 	if !ok {
 		return nil
 	}
-	switch xs := v.(type) {
-	case []any:
-		out := make([]Call, 0, len(xs))
-		for _, x := range xs {
-			obj, isObj := x.(map[string]any)
-			if !isObj {
-				continue
-			}
-			out = append(out, Call{
-				TableName:     getString(obj, "table_name"),
-				BytesRead:     getInt(obj, "bytes_read"),
-				DocumentsRead: getInt(obj, "documents_read"),
-			})
+	out := make([]Call, 0, len(xs))
+	for _, x := range xs {
+		obj, isObj := x.(map[string]any)
+		if !isObj {
+			continue
 		}
-		return out
-	case []Call:
-		return xs
+		out = append(out, Call{
+			TableName:     getString(obj, "table_name"),
+			BytesRead:     getInt(obj, "bytes_read"),
+			DocumentsRead: getInt(obj, "documents_read"),
+		})
 	}
-	return nil
+	return out
 }
 
 func derefOr(p *string, def string) string {

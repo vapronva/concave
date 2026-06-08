@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -23,26 +24,26 @@ import (
 )
 
 const (
-	defaultAddr              = ":8081"
-	defaultLabelPrefix       = "convex"
-	defaultInterval          = 2 * time.Second
-	defaultPromoteDebounce   = 3
-	defaultFailbackStability = 15 * time.Second
-	defaultFailbackWarmthLag = 5_000_000_000
-	defaultInsightsRingCap   = 50_000
-	readHeaderTimeout        = 10 * time.Second
-	readTimeout              = 15 * time.Second
-	idleTimeout              = 60 * time.Second
-	maxHeaderBytes           = 64 * 1024
-	shutdownTimeout          = 10 * time.Second
+	defaultAddr            = ":8081"
+	defaultInsightsRingCap = 50_000
+	readHeaderTimeout      = 10 * time.Second
+	readTimeout            = 15 * time.Second
+	idleTimeout            = 60 * time.Second
+	maxHeaderBytes         = 64 * 1024
+	shutdownTimeout        = 10 * time.Second
+	actuationDrainTimeout  = 15 * time.Second
 )
 
 func main() {
+	os.Exit(run())
+}
+
+func run() int {
 	addr := flag.String("addr", env("BIGBRAIN_ADDR", defaultAddr), "HTTP listen address")
 	kubeconfig := flag.String("kubeconfig", env("KUBECONFIG", ""), "path to kubeconfig (empty is in-cluster)")
 	labelPrefix := flag.String(
 		"label-prefix",
-		env("BIGBRAIN_LABEL_PREFIX", defaultLabelPrefix),
+		env("BIGBRAIN_LABEL_PREFIX", k8sclient.DefaultLabelPrefix),
 		"k8s label-key prefix for discovery (<prefix>/instance, <prefix>/role, <prefix>/component, <prefix>/leader-priority)",
 	)
 	bootstrap := flag.String(
@@ -50,19 +51,23 @@ func main() {
 		env("BIGBRAIN_DEPLOYMENTS", ""),
 		"comma-separated name=namespace pairs to register at boot (e.g., convex-dev=convex-dev,convex-prod=convex-prod)",
 	)
-	interval := flag.Duration("interval", envDuration("BIGBRAIN_INTERVAL", defaultInterval), "reconcile interval")
+	interval := flag.Duration(
+		"interval",
+		envDuration("BIGBRAIN_INTERVAL", election.DefaultInterval),
+		"reconcile interval",
+	)
 	debounce := flag.Int(
 		"promote-debounce",
-		envInt("BIGBRAIN_PROMOTE_DEBOUNCE", defaultPromoteDebounce),
+		envInt("BIGBRAIN_PROMOTE_DEBOUNCE", election.DefaultPromoteDebounce),
 		"leaderless polls before promoting",
 	)
 	failbackEnabled := flag.Bool("failback-enabled", envBool("BIGBRAIN_FAILBACK_ENABLED", true),
 		"fail back to a recovered higher-priority pod (the primary) once it is warm and stable")
 	failbackStability := flag.Duration("failback-stability",
-		envDuration("BIGBRAIN_FAILBACK_STABILITY", defaultFailbackStability),
+		envDuration("BIGBRAIN_FAILBACK_STABILITY", election.DefaultFailbackStability),
 		"how long the higher-priority pod must stay warm and ready before failback")
 	failbackWarmthLag := flag.Uint64("failback-warmth-lag",
-		envUint64("BIGBRAIN_FAILBACK_WARMTH_LAG", defaultFailbackWarmthLag),
+		envUint64("BIGBRAIN_FAILBACK_WARMTH_LAG", election.DefaultFailbackWarmthLagNs),
 		"max latest_ts lag for the candidate to count as warm/caught-up")
 	insightsRingCap := flag.Int("insights-ring-cap", envInt("INSIGHTS_RING_CAP", defaultInsightsRingCap),
 		"in-memory insights ring-buffer capacity (rows retained per process)")
@@ -74,7 +79,7 @@ func main() {
 	controlPlaneTokens, usageTokens := loadDeploymentTokens(reg, deployments, log)
 	if len(reg.Names()) == 0 {
 		log.Error("bigbrain: refusing to start without registered deployments")
-		os.Exit(1)
+		return 1
 	}
 	var ctrl *election.Controller
 	k8s, err := k8sclient.New(*kubeconfig, *labelPrefix)
@@ -119,15 +124,21 @@ func main() {
 			"failbackEnabled", *failbackEnabled, "failbackStability", failbackStability.String(),
 			"failbackWarmthLag", *failbackWarmthLag)
 	}
+	var listenFailed atomic.Bool
 	go func() {
 		log.Info("bigbrain: listening", "addr", *addr)
 		if serr := httpSrv.ListenAndServe(); serr != nil && !errors.Is(serr, http.ErrServerClosed) {
 			log.Error("bigbrain: http server failed", "err", serr)
+			listenFailed.Store(true)
 			stop()
 		}
 	}()
 	<-ctx.Done()
 	shutdown(httpSrv, srv, ctrlDone, log)
+	if listenFailed.Load() {
+		return 1
+	}
+	return 0
 }
 
 func shutdown(httpSrv *http.Server, srv *server.Server, ctrlDone <-chan struct{}, log *slog.Logger) {
@@ -138,12 +149,15 @@ func shutdown(httpSrv *http.Server, srv *server.Server, ctrlDone <-chan struct{}
 	if serr := httpSrv.Shutdown(shutCtx); serr != nil {
 		log.Error("bigbrain: http shutdown failed", "err", serr)
 	}
-	if ctrlDone != nil {
-		select {
-		case <-ctrlDone:
-		case <-shutCtx.Done():
-			log.Error("bigbrain: election shutdown timed out", "err", shutCtx.Err())
-		}
+	if ctrlDone == nil {
+		return
+	}
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), actuationDrainTimeout)
+	defer drainCancel()
+	select {
+	case <-ctrlDone:
+	case <-drainCtx.Done():
+		log.Error("bigbrain: election shutdown timed out", "err", drainCtx.Err())
 	}
 }
 

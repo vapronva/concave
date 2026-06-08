@@ -1,5 +1,5 @@
 diff --git a/crates/common/src/persistence.rs b/crates/common/src/persistence.rs
-index 9da2989bb..ce43c7d16 100644
+index 9da2989bb..783c4eec6 100644
 --- a/crates/common/src/persistence.rs
 +++ b/crates/common/src/persistence.rs
 @@ -292,6 +292,22 @@ pub trait Persistence: Sync + Send + 'static {
@@ -33,6 +33,25 @@ index 9da2989bb..ce43c7d16 100644
  }
  
  /// Timestamp that is repeatable because the caller is holding the lease and
+@@ -593,7 +608,17 @@ pub async fn new_idle_repeatable_ts<RT: Runtime>(
+ ) -> anyhow::Result<RepeatableTimestamp> {
+     let reader = persistence.reader();
+     let max_ts = reader.max_ts().await?.unwrap_or(Timestamp::MIN);
+-    let now = cmp::max(max_ts, rt.generate_timestamp()?);
++    let persisted_max_repeatable = match reader
++        .get_persistence_global(PersistenceGlobalKey::MaxRepeatableTimestamp)
++        .await?
++    {
++        Some(value) => Timestamp::try_from(value)?,
++        None => Timestamp::MIN,
++    };
++    let now = cmp::max(
++        cmp::max(max_ts, rt.generate_timestamp()?),
++        persisted_max_repeatable,
++    );
+     // Enforce that all subsequent commits are > now by writing to MaxRepeatableTs.
+     persistence
+         .write_persistence_global(PersistenceGlobalKey::MaxRepeatableTimestamp, now.into())
 diff --git a/crates/postgres/src/lib.rs b/crates/postgres/src/lib.rs
 index cce12606d..941d5fde1 100644
 --- a/crates/postgres/src/lib.rs

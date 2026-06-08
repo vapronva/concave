@@ -107,9 +107,9 @@ func TestController_SnapshotCommitConcurrent(t *testing.T) {
 	const iterations = 2000
 	wg.Go(func() {
 		for range iterations {
-			snap := c.snapshotState(st)
+			_ = c.snapshotState(st)
 			dec := decide(in, decideParams{incumbent: "backend-0"})
-			c.commitState(st, snap, dec, false)
+			c.commitState(st, dec, false)
 		}
 	})
 	wg.Go(func() {

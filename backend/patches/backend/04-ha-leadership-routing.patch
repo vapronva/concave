@@ -28,10 +28,10 @@ index 986cfe59a..e7da231d6 100644
  }
 diff --git a/crates/local_backend/src/leadership.rs b/crates/local_backend/src/leadership.rs
 new file mode 100644
-index 000000000..9c72bc6b5
+index 000000000..960e202fe
 --- /dev/null
 +++ b/crates/local_backend/src/leadership.rs
-@@ -0,0 +1,722 @@
+@@ -0,0 +1,770 @@
 +use std::sync::{
 +    atomic::{
 +        AtomicU8,
@@ -154,12 +154,20 @@ index 000000000..9c72bc6b5
 +            Ok(_) => PromotionAttempt::Started,
 +            Err(ROLE_PROMOTING) => PromotionAttempt::AlreadyInProgress,
 +            Err(ROLE_LEADER) => PromotionAttempt::AlreadyLeader,
++            Err(ROLE_DEMOTING) => PromotionAttempt::DemotionInProgress,
 +            Err(_) => PromotionAttempt::AlreadyInProgress,
 +        }
 +    }
 +
-+    fn finish_promotion_success(&self) {
-+        self.role.store(ROLE_LEADER, Ordering::SeqCst);
++    fn finish_promotion_success(&self) -> bool {
++        self.role
++            .compare_exchange(
++                ROLE_PROMOTING,
++                ROLE_LEADER,
++                Ordering::SeqCst,
++                Ordering::SeqCst,
++            )
++            .is_ok()
 +    }
 +
 +    fn abort_promotion(&self) {
@@ -180,6 +188,7 @@ index 000000000..9c72bc6b5
 +        ) {
 +            Ok(_) => DemotionAttempt::Started,
 +            Err(ROLE_DEMOTING) => DemotionAttempt::AlreadyInProgress,
++            Err(ROLE_PROMOTING) => DemotionAttempt::PromotionInProgress,
 +            Err(ROLE_FOLLOWER) => DemotionAttempt::AlreadyFollower,
 +            Err(_) => DemotionAttempt::AlreadyFollower,
 +        }
@@ -194,12 +203,14 @@ index 000000000..9c72bc6b5
 +    Started,
 +    AlreadyInProgress,
 +    AlreadyLeader,
++    DemotionInProgress,
 +}
 +
 +pub(crate) enum DemotionAttempt {
 +    Started,
 +    AlreadyInProgress,
 +    AlreadyFollower,
++    PromotionInProgress,
 +}
 +
 +pub type PersistenceFactory =
@@ -322,6 +333,17 @@ index 000000000..9c72bc6b5
 +            )
 +                .into_response();
 +        },
++        PromotionAttempt::DemotionInProgress => {
++            return (
++                StatusCode::CONFLICT,
++                axum::Json(PromoteResponse {
++                    role: BackendRole::Follower.as_str().to_string(),
++                    is_leader: false,
++                    message: "a demotion is in progress; retry after it completes".to_string(),
++                }),
++            )
++                .into_response();
++        },
 +        PromotionAttempt::Started => {},
 +    }
 +    let runtime = st.application.runtime();
@@ -362,8 +384,16 @@ index 000000000..9c72bc6b5
 +        Ok(()) => {
 +            st.leader_handle.set_rw_persistence(rw_persistence.clone());
 +            install_lease_lost_handler(&st, rw_persistence);
-+            st.role.finish_promotion_success();
-+            tracing::info!("[concave] promotion succeeded; now serving as leader");
++            if st.role.finish_promotion_success() {
++                tracing::info!("[concave] promotion succeeded; now serving as leader");
++            } else {
++                tracing::error!(
++                    "[concave] promotion preempted (lease lost mid-promote); restarting"
++                );
++                st.leader_handle.preempt_signal.signal(anyhow::anyhow!(
++                    "promotion preempted: lease lost mid-promote"
++                ));
++            }
 +        },
 +        Err(e) => {
 +            tracing::error!("[concave] promotion failed after lease acquisition: {e:#}");
@@ -411,6 +441,17 @@ index 000000000..9c72bc6b5
 +            )
 +                .into_response();
 +        },
++        DemotionAttempt::PromotionInProgress => {
++            return (
++                StatusCode::CONFLICT,
++                axum::Json(DemoteResponse {
++                    role: BackendRole::Follower.as_str().to_string(),
++                    is_leader: false,
++                    message: "a promotion is in progress; retry after it completes".to_string(),
++                }),
++            )
++                .into_response();
++        },
 +        DemotionAttempt::Started => {},
 +    }
 +    let Some(rw_persistence) = st.leader_handle.rw_persistence() else {
@@ -431,6 +472,7 @@ index 000000000..9c72bc6b5
 +            .into_response();
 +    };
 +    let runtime = st.application.runtime();
++    st.application.database().stop_lease_watch();
 +    runtime.spawn_background("in_process_demotion", async move {
 +        perform_demotion(st, rw_persistence).await;
 +    });
@@ -477,15 +519,17 @@ index 000000000..9c72bc6b5
 +            match role.begin_demotion() {
 +                DemotionAttempt::Started => {},
 +                DemotionAttempt::AlreadyFollower => return true,
-+                DemotionAttempt::AlreadyInProgress => return false,
++                DemotionAttempt::AlreadyInProgress => return true,
++                DemotionAttempt::PromotionInProgress => {
++                    role.abort_promotion();
++                    return false;
++                },
 +            }
 +            match application.become_follower(rw_persistence).await {
 +                Ok(()) => {
 +                    leader_handle.clear_rw_persistence();
 +                    role.finish_demotion_success();
-+                    tracing::info!(
-+                        "[concave] in-process self-demote SUCCESS; now a warm follower"
-+                    );
++                    tracing::info!("[concave] in-process self-demote SUCCESS; now a warm follower");
 +                    true
 +                },
 +                Err(e) => {
@@ -517,7 +561,11 @@ index 000000000..9c72bc6b5
 +fn is_gate_exempt(path: &str) -> bool {
 +    matches!(
 +        path,
-+        "/" | "/instance/leadership" | "/instance/promote" | "/instance/demote"
++        "/" | "/instance/leadership"
++            | "/instance/promote"
++            | "/instance/demote"
++            | "/instance_name"
++            | "/instance_version"
 +    )
 +}
 +
@@ -610,11 +658,11 @@ index 000000000..9c72bc6b5
 +        );
 +        assert_eq!(
 +            status_of(gated_router(role.clone()), "GET", "/instance_name").await,
-+            StatusCode::MISDIRECTED_REQUEST,
++            StatusCode::OK,
 +        );
 +        assert_eq!(
 +            status_of(gated_router(role.clone()), "GET", "/instance_version").await,
-+            StatusCode::MISDIRECTED_REQUEST,
++            StatusCode::OK,
 +        );
 +        assert_eq!(
 +            status_of(gated_router(role.clone()), "GET", "/instance/leadership").await,

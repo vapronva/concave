@@ -1,7 +1,6 @@
 package insights_test
 
 import (
-	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -31,10 +30,7 @@ func TestIngestRecognizesOCCAndReadLimit(t *testing.T) {
 		}},
 		{"UnknownVariant": map[string]any{"v": 1}},
 	}
-	n, err := i.Ingest(context.Background(), "convex-prod", events)
-	if err != nil {
-		t.Fatal(err)
-	}
+	n := i.Ingest("convex-prod", events)
 	if n != 2 {
 		t.Errorf("kept=%d want 2", n)
 	}
@@ -47,7 +43,7 @@ func TestRingBufferCap(t *testing.T) {
 	t.Parallel()
 	i := insights.New(3)
 	for range 5 {
-		_, _ = i.Ingest(context.Background(), "d", []insights.AnyEvent{
+		_ = i.Ingest("d", []insights.AnyEvent{
 			{"FunctionCall": map[string]any{"is_occ": true, "udf_id": "f", "id": "x"}},
 		})
 	}
@@ -60,11 +56,11 @@ func TestRingBufferCapPerDeployment(t *testing.T) {
 	t.Parallel()
 	i := insights.New(3)
 	floodA := func() {
-		_, _ = i.Ingest(context.Background(), "A", []insights.AnyEvent{
+		_ = i.Ingest("A", []insights.AnyEvent{
 			{"FunctionCall": map[string]any{"is_occ": true, "udf_id": "fa", "id": "xa"}},
 		})
 	}
-	_, _ = i.Ingest(context.Background(), "B", []insights.AnyEvent{
+	_ = i.Ingest("B", []insights.AnyEvent{
 		{"FunctionCall": map[string]any{
 			"is_occ": true, "udf_id": "fb", "id": "xb", "request_id": "rb",
 			"component_path": "_default", "occ_table_name": "tb", "status": "retried",
@@ -77,14 +73,14 @@ func TestRingBufferCapPerDeployment(t *testing.T) {
 		t.Errorf("MemLen=%d want 4 (A capped at 3 + B's 1)", i.MemLen())
 	}
 	today := time.Now().UTC().Format("2006-01-02")
-	out, err := i.Query(context.Background(), "B", today, today)
+	out, err := i.Query("B", today, today)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(out) != 1 || out[0][1] != "fb" {
 		t.Fatalf("flooding A evicted B's row: %v", out)
 	}
-	outA, err := i.Query(context.Background(), "A", today, today)
+	outA, err := i.Query("A", today, today)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,14 +95,14 @@ func TestRingBufferCapPerDeployment(t *testing.T) {
 func TestQueryIsolatedPerDeployment(t *testing.T) {
 	t.Parallel()
 	i := insights.New(100)
-	_, _ = i.Ingest(context.Background(), "A", []insights.AnyEvent{
+	_ = i.Ingest("A", []insights.AnyEvent{
 		{"FunctionCall": map[string]any{
 			"is_occ": true, "udf_id": "fa", "id": "xa",
 			"component_path": "_default", "status": "retried",
 		}},
 	})
 	today := time.Now().UTC().Format("2006-01-02")
-	out, err := i.Query(context.Background(), "B", today, today)
+	out, err := i.Query("B", today, today)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,12 +114,12 @@ func TestQueryIsolatedPerDeployment(t *testing.T) {
 func TestQueryDateValidation(t *testing.T) {
 	t.Parallel()
 	i := insights.New(10)
-	if _, err := i.Query(context.Background(), "x", "bad", "2026-05-21"); err == nil {
+	if _, err := i.Query("x", "bad", "2026-05-21"); err == nil {
 		t.Error("expected bad-date error")
 	} else if !errors.Is(err, insights.ErrBadDateRange) {
 		t.Errorf("expected ErrBadDateRange, got %v", err)
 	}
-	if _, err := i.Query(context.Background(), "x", "2026-05-22", "2026-05-21"); err == nil {
+	if _, err := i.Query("x", "2026-05-22", "2026-05-21"); err == nil {
 		t.Error("expected reversed-range error")
 	}
 }
@@ -132,7 +128,7 @@ func TestQueryOCCAggregation(t *testing.T) {
 	t.Parallel()
 	i := insights.New(100)
 	for k := range 5 {
-		_, _ = i.Ingest(context.Background(), "p", []insights.AnyEvent{
+		_ = i.Ingest("p", []insights.AnyEvent{
 			{"FunctionCall": map[string]any{
 				"is_occ": true, "udf_id": "counters:increment",
 				"id": "id" + string(rune('A'+k)), "request_id": "r" + string(rune('A'+k)),
@@ -142,7 +138,7 @@ func TestQueryOCCAggregation(t *testing.T) {
 		})
 	}
 	today := time.Now().UTC().Format("2006-01-02")
-	out, err := i.Query(context.Background(), "p", today, today)
+	out, err := i.Query("p", today, today)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +164,7 @@ func TestQueryOCCAggregation(t *testing.T) {
 func TestQueryOCCFailedPermanentlyUsesExplicitSignal(t *testing.T) {
 	t.Parallel()
 	i := insights.New(100)
-	_, _ = i.Ingest(context.Background(), "p", []insights.AnyEvent{
+	_ = i.Ingest("p", []insights.AnyEvent{
 		{"FunctionCall": map[string]any{
 			"is_occ": true, "udf_id": "f", "id": "i",
 			"component_path":         "_default",
@@ -177,7 +173,7 @@ func TestQueryOCCFailedPermanentlyUsesExplicitSignal(t *testing.T) {
 		}},
 	})
 	today := time.Now().UTC().Format("2006-01-02")
-	out, _ := i.Query(context.Background(), "p", today, today)
+	out, _ := i.Query("p", today, today)
 	if len(out) == 0 || out[0][0] != "occFailedPermanently" {
 		t.Errorf("expected occFailedPermanently; got %v", out)
 	}
@@ -186,7 +182,7 @@ func TestQueryOCCFailedPermanentlyUsesExplicitSignal(t *testing.T) {
 func TestQueryReadLimitBytesThresholdAndLimit(t *testing.T) {
 	t.Parallel()
 	i := insights.New(100)
-	_, _ = i.Ingest(context.Background(), "p", []insights.AnyEvent{
+	_ = i.Ingest("p", []insights.AnyEvent{
 		{"InsightReadLimit": map[string]any{
 			"udf_id": "q", "id": "i", "request_id": "r",
 			"calls": []any{
@@ -195,7 +191,7 @@ func TestQueryReadLimitBytesThresholdAndLimit(t *testing.T) {
 		}},
 	})
 	today := time.Now().UTC().Format("2006-01-02")
-	out, _ := i.Query(context.Background(), "p", today, today)
+	out, _ := i.Query("p", today, today)
 	var sawLimit bool
 	for _, row := range out {
 		if row[0] == "bytesReadLimit" {
@@ -211,7 +207,7 @@ func TestOCCGroupKeySpaceSafe(t *testing.T) {
 	t.Parallel()
 	i := insights.New(100)
 	for _, table := range []string{"users by_name", "users by_idx"} {
-		_, _ = i.Ingest(context.Background(), "p", []insights.AnyEvent{
+		_ = i.Ingest("p", []insights.AnyEvent{
 			{"FunctionCall": map[string]any{
 				"is_occ": true, "udf_id": "u:f", "id": "x",
 				"component_path": "_default", "occ_table_name": table,
@@ -220,7 +216,7 @@ func TestOCCGroupKeySpaceSafe(t *testing.T) {
 		})
 	}
 	today := time.Now().UTC().Format("2006-01-02")
-	out, _ := i.Query(context.Background(), "p", today, today)
+	out, _ := i.Query("p", today, today)
 	if len(out) != 2 {
 		t.Errorf("expected 2 groups (one per table), got %d (%v)", len(out), out)
 	}
@@ -229,7 +225,7 @@ func TestOCCGroupKeySpaceSafe(t *testing.T) {
 func TestIngestQueryRoundTripRowShapes(t *testing.T) {
 	t.Parallel()
 	i := insights.New(100)
-	_, _ = i.Ingest(context.Background(), "p", []insights.AnyEvent{
+	_ = i.Ingest("p", []insights.AnyEvent{
 		{"FunctionCall": map[string]any{
 			"is_occ": true, "udf_id": "mod:occFn", "id": "occ1", "request_id": "rq1",
 			"component_path": "-root-component-", "occ_table_name": "docs",
@@ -244,7 +240,7 @@ func TestIngestQueryRoundTripRowShapes(t *testing.T) {
 		}},
 	})
 	today := time.Now().UTC().Format("2006-01-02")
-	out, err := i.Query(context.Background(), "p", today, today)
+	out, err := i.Query("p", today, today)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -280,7 +276,7 @@ func TestIngestQueryRoundTripRowShapes(t *testing.T) {
 func TestRingGrowsInMemory(t *testing.T) {
 	t.Parallel()
 	i := insights.New(10)
-	_, _ = i.Ingest(context.Background(), "p", []insights.AnyEvent{
+	_ = i.Ingest("p", []insights.AnyEvent{
 		{"FunctionCall": map[string]any{"is_occ": true, "udf_id": "f", "id": "i"}},
 	})
 	if i.MemLen() != 1 {

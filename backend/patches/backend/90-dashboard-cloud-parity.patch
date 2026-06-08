@@ -50,10 +50,10 @@ index 715c4eed5..c3701fe9c 100644
      "@types/react-window-infinite-loader": "^1.0.4",
 diff --git a/npm-packages/dashboard-common/src/features/health/components/ChartForInsight.tsx b/npm-packages/dashboard-common/src/features/health/components/ChartForInsight.tsx
 new file mode 100644
-index 000000000..10fda8f76
+index 000000000..8bff059c4
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/health/components/ChartForInsight.tsx
-@@ -0,0 +1,295 @@
+@@ -0,0 +1,294 @@
 +import {
 +  useInsightsPeriod,
 +  Insight,
@@ -134,7 +134,6 @@ index 000000000..10fda8f76
 +      )} ${String(creationDate.getUTCHours()).padStart(2, "0")}:00:00`;
 +      return { hour, timestamp: log._creationTime };
 +    },
-+    {} as Record<string, { hour: string; timestamp: number }[]>,
 +  );
 +  const midnightTicks = (data ?? [])
 +    .filter((d) => new Date(toNumericUTCWithHour(d.hour)).getHours() === 0)
@@ -1046,10 +1045,10 @@ index 000000000..71eb950fa
 +}
 diff --git a/npm-packages/dashboard-common/src/features/health/components/HealthWithInsights.tsx b/npm-packages/dashboard-common/src/features/health/components/HealthWithInsights.tsx
 new file mode 100644
-index 000000000..b7b422b44
+index 000000000..a0b09525c
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/health/components/HealthWithInsights.tsx
-@@ -0,0 +1,345 @@
+@@ -0,0 +1,348 @@
 +import React, {
 +  useState,
 +  useCallback,
@@ -1068,6 +1067,7 @@ index 000000000..b7b422b44
 +import {
 +  Insight,
 +  useInsights,
++  useInsightsErrored,
 +  useInsightsPeriod,
 +  useIsInsightsNotConfigured,
 +  getInsightPageIdentifier,
@@ -1295,6 +1295,7 @@ index 000000000..b7b422b44
 +  const { insights, selectedFunctions, page } =
 +    useContext(InsightsContext) || {};
 +  const notConfigured = useIsInsightsNotConfigured();
++  const errored = useInsightsErrored();
 +  return (
 +    <div
 +      className={cn(
@@ -1328,6 +1329,7 @@ index 000000000..b7b422b44
 +              );
 +            })}
 +            notConfigured={notConfigured}
++            errored={errored}
 +          />
 +        </Sheet>
 +      </div>
@@ -1397,14 +1399,18 @@ index 000000000..b7b422b44
 +}
 diff --git a/npm-packages/dashboard-common/src/features/health/components/InsightsSummary.tsx b/npm-packages/dashboard-common/src/features/health/components/InsightsSummary.tsx
 new file mode 100644
-index 000000000..48eebad95
+index 000000000..4330c9163
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/health/components/InsightsSummary.tsx
-@@ -0,0 +1,86 @@
+@@ -0,0 +1,109 @@
 +import { Insight } from "@common/features/health/lib/insights";
 +import { Loading } from "@ui/Loading";
 +import { EmptySection } from "@common/elements/EmptySection";
-+import { CheckCircledIcon, InfoCircledIcon } from "@radix-ui/react-icons";
++import {
++  CheckCircledIcon,
++  ExclamationTriangleIcon,
++  InfoCircledIcon,
++} from "@radix-ui/react-icons";
 +import { InsightsSummaryListItem } from "./InsightsSummaryListItem";
 +import { getInsightPageIdentifier } from "../lib/insights";
 +
@@ -1413,9 +1419,11 @@ index 000000000..48eebad95
 +export function InsightsSummary({
 +  insights,
 +  notConfigured = false,
++  errored = false,
 +}: {
 +  insights: InsightsSummaryData[] | undefined;
 +  notConfigured?: boolean;
++  errored?: boolean;
 +}) {
 +  if (notConfigured) {
 +    return (
@@ -1426,6 +1434,23 @@ index 000000000..48eebad95
 +          color="none"
 +          sheet={false}
 +          body="Insights are not configured for this deployment."
++          learnMoreButton={{
++            href: "https://docs.convex.dev/dashboard/deployments/health#insights",
++            children: "Learn more about Insights",
++          }}
++        />
++      </div>
++    );
++  }
++  if (errored) {
++    return (
++      <div className="py-16">
++        <EmptySection
++          Icon={ExclamationTriangleIcon}
++          header="Insights could not be loaded"
++          color="red"
++          sheet={false}
++          body="The insights backend returned an error. Verify the insights service is reachable."
 +          learnMoreButton={{
 +            href: "https://docs.convex.dev/dashboard/deployments/health#insights",
 +            children: "Learn more about Insights",
@@ -1908,12 +1933,13 @@ index 000000000..62f51cdd1
 +}
 diff --git a/npm-packages/dashboard-common/src/features/health/components/SmallInsightsSummary.tsx b/npm-packages/dashboard-common/src/features/health/components/SmallInsightsSummary.tsx
 new file mode 100644
-index 000000000..99237bc47
+index 000000000..09c01fd4f
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/health/components/SmallInsightsSummary.tsx
-@@ -0,0 +1,93 @@
+@@ -0,0 +1,100 @@
 +import {
 +  useInsights,
++  useInsightsErrored,
 +  useInsightsPeriod,
 +  useIsInsightsNotConfigured,
 +} from "@common/features/health/lib/insights";
@@ -1931,7 +1957,14 @@ index 000000000..99237bc47
 +export function SmallInsightsSummary({ onViewAll }: { onViewAll: () => void }) {
 +  const insights = useInsights();
 +  const notConfigured = useIsInsightsNotConfigured();
++  const errored = useInsightsErrored();
 +  const { from } = useInsightsPeriod();
++  let summaryText = "No issues";
++  if (errored) {
++    summaryText = "Could not load";
++  } else if (notConfigured) {
++    summaryText = "Not configured";
++  }
 +  const criticalCount =
 +    insights?.filter(
 +      (insight) => severityForInsightKind[insight.kind] === "error",
@@ -1954,9 +1987,7 @@ index 000000000..99237bc47
 +          {warningCount} warning{warningCount !== 1 ? "s" : ""}
 +        </span>
 +      )}
-+      {criticalCount === 0 &&
-+        warningCount === 0 &&
-+        (notConfigured ? "Not configured" : "No issues")}
++      {criticalCount === 0 && warningCount === 0 && summaryText}
 +    </span>
 +  ) : null;
 +  return (
@@ -1985,6 +2016,7 @@ index 000000000..99237bc47
 +        <InsightsSummary
 +          insights={insights?.slice(0, 5)}
 +          notConfigured={notConfigured}
++          errored={errored}
 +        />
 +      </Sheet>
 +      <div className="flex">
@@ -2073,10 +2105,10 @@ index 000000000..fef3752c9
 +}
 diff --git a/npm-packages/dashboard-common/src/features/health/lib/insights.ts b/npm-packages/dashboard-common/src/features/health/lib/insights.ts
 new file mode 100644
-index 000000000..62ee3025b
+index 000000000..b87d07a20
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/health/lib/insights.ts
-@@ -0,0 +1,211 @@
+@@ -0,0 +1,230 @@
 +import {
 +  rootComponentPath,
 +  useUsageQuery,
@@ -2273,7 +2305,26 @@ index 000000000..62ee3025b
 +  });
 +  return (
 +    error?.status === 404 ||
-+    (error instanceof Error && error.message.includes("404"))
++    (error instanceof Error &&
++      error.message.startsWith("Server responded with 404"))
++  );
++}
++
++export function useInsightsErrored(): boolean {
++  const period = useInsightsPeriod();
++  const { error } = useUsageQuery({
++    period: {
++      from: period.from.split("T")[0],
++      to: period.to.split("T")[0],
++    },
++  });
++  if (!error) {
++    return false;
++  }
++  return !(
++    error?.status === 404 ||
++    (error instanceof Error &&
++      error.message.startsWith("Server responded with 404"))
 +  );
 +}
 +

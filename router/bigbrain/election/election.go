@@ -20,26 +20,26 @@ type Config struct {
 }
 
 const (
-	defaultInterval                   = 2 * time.Second
-	defaultPromoteDebounce            = 3
+	DefaultInterval                   = 2 * time.Second
+	DefaultPromoteDebounce            = 3
+	DefaultFailbackStability          = 15 * time.Second
+	DefaultFailbackWarmthLagNs uint64 = 5_000_000_000
 	discoverTimeout                   = 5 * time.Second
 	pollTimeout                       = 2 * time.Second
-	defaultFailbackStability          = 15 * time.Second
-	defaultFailbackWarmthLagNs uint64 = 5_000_000_000
 )
 
 func (c Config) withDefaults() Config {
 	if c.Interval <= 0 {
-		c.Interval = defaultInterval
+		c.Interval = DefaultInterval
 	}
 	if c.PromoteDebounce <= 0 {
-		c.PromoteDebounce = defaultPromoteDebounce
+		c.PromoteDebounce = DefaultPromoteDebounce
 	}
 	if c.FailbackStability <= 0 {
-		c.FailbackStability = defaultFailbackStability
+		c.FailbackStability = DefaultFailbackStability
 	}
 	if c.FailbackWarmthLagNs == 0 {
-		c.FailbackWarmthLagNs = defaultFailbackWarmthLagNs
+		c.FailbackWarmthLagNs = DefaultFailbackWarmthLagNs
 	}
 	return c
 }
@@ -94,15 +94,25 @@ func (c *Controller) runDeployment(ctx context.Context, name string) {
 	defer c.log.InfoContext(ctx, "election: stopping reconcile loop", "deployment", name)
 	tick := time.NewTicker(c.cfg.Interval)
 	defer tick.Stop()
-	c.reconcile(ctx, name)
+	c.reconcileSafe(ctx, name)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-tick.C:
-			c.reconcile(ctx, name)
+			c.reconcileSafe(ctx, name)
 		}
 	}
+}
+
+func (c *Controller) reconcileSafe(ctx context.Context, name string) {
+	defer func() {
+		if r := recover(); r != nil {
+			c.log.ErrorContext(ctx, "election: reconcile panicked; retrying next tick",
+				"deployment", name, "panic", r)
+		}
+	}()
+	c.reconcile(ctx, name)
 }
 
 func (c *Controller) deploymentState(name string) *deploymentState {
@@ -123,18 +133,16 @@ type observation struct {
 }
 
 type stateSnapshot struct {
-	incumbentPod     string
-	leaderlessStreak int
-	failback         failbackState
+	incumbentPod string
+	failback     failbackState
 }
 
 func (c *Controller) snapshotState(st *deploymentState) stateSnapshot {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return stateSnapshot{
-		incumbentPod:     st.incumbentPod,
-		leaderlessStreak: st.leaderlessStreak,
-		failback:         st.failback,
+		incumbentPod: st.incumbentPod,
+		failback:     st.failback,
 	}
 }
 
@@ -167,17 +175,17 @@ func (c *Controller) reconcile(ctx context.Context, name string) {
 			prior:           snap.failback,
 		},
 	})
-	streak := c.commitState(st, snap, dec, len(pods) == 0)
+	streak := c.commitState(st, dec, len(pods) == 0)
 	c.act(ctx, name, st, dec, streak)
 }
 
-func (c *Controller) commitState(st *deploymentState, snap stateSnapshot, dec decision, emptyList bool) int {
+func (c *Controller) commitState(st *deploymentState, dec decision, emptyList bool) int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	st.failback = dec.failbackState
 	if dec.liveLeaderCount == 0 {
 		if !emptyList {
-			st.leaderlessStreak = snap.leaderlessStreak + 1
+			st.leaderlessStreak++
 		}
 	} else {
 		st.leaderlessStreak = 0

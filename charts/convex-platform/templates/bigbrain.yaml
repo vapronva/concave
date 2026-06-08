@@ -84,6 +84,7 @@ spec:
       labels:
         {{- include "convex.componentLabels" (dict "ctx" . "component" "bigbrain") | nindent 8 }}
     spec:
+      terminationGracePeriodSeconds: 40
       {{- if $b.rbac.create }}
       serviceAccountName: {{ include "convex.bigbrainName" . }}
       {{- end }}

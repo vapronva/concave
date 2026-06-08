@@ -170,6 +170,30 @@ func TestServeHTTP_MisdirectedResponseIsCleanAndNudgesResolve(t *testing.T) {
 	}
 }
 
+func TestServeHTTP_DeadLeaderReturns503AndNudges(t *testing.T) {
+	t.Parallel()
+	dead := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	deadURL := dead.URL
+	dead.Close()
+	tr := &tracker{host: "api.example", resolveCh: make(chan struct{}, 1)}
+	if !tr.setLeader(deadURL) {
+		t.Fatal("setLeader should install proxy")
+	}
+	rr := httptest.NewRecorder()
+	tr.serveHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/query", nil), false)
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d want 503 for a dead leader (retriable failover signal)", rr.Code)
+	}
+	if rr.Header().Get("Retry-After") != "1" {
+		t.Fatalf("Retry-After=%q want 1", rr.Header().Get("Retry-After"))
+	}
+	select {
+	case <-tr.resolveCh:
+	case <-time.After(time.Second):
+		t.Fatal("dead-leader transport error did not nudge resolution")
+	}
+}
+
 func TestServeHTTP_ForwardsPublicRequestMetadata(t *testing.T) {
 	t.Parallel()
 	var gotProto, gotHost, gotXFF string

@@ -1,15 +1,31 @@
 diff --git a/crates/database/src/committer.rs b/crates/database/src/committer.rs
-index fc4a16678..5e42ba5ad 100644
+index fc4a16678..9acb169c8 100644
 --- a/crates/database/src/committer.rs
 +++ b/crates/database/src/committer.rs
-@@ -440,12 +440,90 @@ impl<RT: Runtime> Committer<RT> {
+@@ -41,6 +41,7 @@ use common::{
+     knobs::{
+         COMMITTER_QUEUE_SIZE,
+         COMMIT_TRACE_THRESHOLD,
++        DEMOTION_DRAIN_TIMEOUT,
+         MAX_REPEATABLE_TIMESTAMP_COMMIT_DELAY,
+         MAX_REPEATABLE_TIMESTAMP_IDLE_FREQUENCY,
+         SEND_COMMIT_MESSAGE_TIMEOUT_MILLIS,
+@@ -440,12 +441,98 @@ impl<RT: Runtime> Committer<RT> {
                              let response = self.load_indexes_into_memory(tables).await;
                              let _ = result.send(response);
                          },
 +                        Some(CommitterMessage::RecoverWriter { result }) => {
 +                            rx.close();
 +                            Self::reject_queued_messages(&mut rx);
-+                            match self.drain_in_flight_writes().await {
++                            let drain_timeout = self.runtime.wait(*DEMOTION_DRAIN_TIMEOUT);
++                            let drained = select_biased! {
++                                drained = self.drain_in_flight_writes().fuse() => drained,
++                                _ = drain_timeout.fuse() => Err(anyhow::anyhow!(
++                                    "demotion drain timed out after {:?}; persistence may be down",
++                                    *DEMOTION_DRAIN_TIMEOUT
++                                )),
++                            };
++                            match drained {
 +                                Ok(()) => {
 +                                    tracing::info!(
 +                                        "[demote] committer drained in-flight writes; handing back \
@@ -93,7 +109,7 @@ index fc4a16678..5e42ba5ad 100644
      async fn update_indexes_since_bootstrap(
          BootstrappedSearchIndexes {
              text_index_manager,
-@@ -674,6 +752,12 @@ impl<RT: Runtime> Committer<RT> {
+@@ -674,6 +761,12 @@ impl<RT: Runtime> Committer<RT> {
                              break;
                          },
                          Err(mut e) => {
@@ -106,7 +122,7 @@ index fc4a16678..5e42ba5ad 100644
                              let delay = backoff.fail(&mut runtime.rng());
                              report_error(&mut e).await;
                              tracing::error!(
-@@ -1304,7 +1388,10 @@ impl CommitterClient {
+@@ -1304,7 +1397,10 @@ impl CommitterClient {
          // This makes it resilient to the committer being full.
          select_biased! {
              result = self.sender.send(message).fuse() => {
@@ -118,7 +134,7 @@ index fc4a16678..5e42ba5ad 100644
              },
              _ = rt.wait(*SEND_COMMIT_MESSAGE_TIMEOUT_MILLIS) => {
                  anyhow::bail!(metrics::committer_full_error());
-@@ -1324,6 +1411,23 @@ impl CommitterClient {
+@@ -1324,6 +1420,23 @@ impl CommitterClient {
          self.handle.lock().shutdown();
      }
  
@@ -142,7 +158,7 @@ index fc4a16678..5e42ba5ad 100644
      async fn check_generated_ids<RT: Runtime>(
          &self,
          transaction: &Transaction<RT>,
-@@ -1404,6 +1508,9 @@ enum CommitterMessage {
+@@ -1404,6 +1517,9 @@ enum CommitterMessage {
      FinishTableSummaryBootstrap {
          result: oneshot::Sender<anyhow::Result<()>>,
      },
@@ -153,7 +169,7 @@ index fc4a16678..5e42ba5ad 100644
  
  // Within a single transaction that writes multiple documents, this is the order
 diff --git a/crates/database/src/database.rs b/crates/database/src/database.rs
-index 3ed756279..6b3358a1f 100644
+index 3ed756279..785b3c016 100644
 --- a/crates/database/src/database.rs
 +++ b/crates/database/src/database.rs
 @@ -54,12 +54,14 @@ use common::{
@@ -258,7 +274,7 @@ index 3ed756279..6b3358a1f 100644
              virtual_system_mapping,
              bootstrap_metadata,
              invalidation_callback,
-@@ -1065,11 +1083,379 @@ impl<RT: Runtime> Database<RT> {
+@@ -1065,11 +1083,385 @@ impl<RT: Runtime> Database<RT> {
              by_id_indexes_snapshot_cache,
              component_paths_snapshot_cache,
              list_snapshot_table_iterator_cache,
@@ -310,6 +326,7 @@ index 3ed756279..6b3358a1f 100644
 +            retention_manager.clone(),
 +            virtual_system_mapping.clone(),
 +            ts,
++            false,
 +        );
 +        let follower_tailer_handle = Arc::new(tokio::sync::Mutex::new(Some(follower_tailer)));
 +        let (log_owner, log_reader, _log_writer) = new_write_log(*ts);
@@ -531,6 +548,7 @@ index 3ed756279..6b3358a1f 100644
 +            retention_manager.clone(),
 +            self.virtual_system_mapping.clone(),
 +            tailed_ts,
++            true,
 +        );
 +        let (log_owner, log_reader, _log_writer) = new_write_log(*tailed_ts);
 +        let mut index_cache_handle = self
@@ -558,6 +576,10 @@ index 3ed756279..6b3358a1f 100644
 +            "[demote] Database demoted to follower at ts {tailed_ts}; tailer resumed, no committer"
 +        );
 +        Ok(())
++    }
++
++    pub fn stop_lease_watch(&self) {
++        drop(self.lease_watch_handle.lock().take());
 +    }
 +
 +    pub fn spawn_lease_watch(
@@ -638,7 +660,7 @@ index 3ed756279..6b3358a1f 100644
      /// Sets the invalidation callback for tracking which mutations invalidate
      /// subscriptions. Must be called after `load` and before any subscriptions
      /// are invalidated.
-@@ -1087,45 +1473,72 @@ impl<RT: Runtime> Database<RT> {
+@@ -1087,45 +1479,72 @@ impl<RT: Runtime> Database<RT> {
          tracing::info!("Set search storage to {search_storage:?}");
      }
  
@@ -725,7 +747,7 @@ index 3ed756279..6b3358a1f 100644
      }
  
      /// Load the set of documents and tombstones in the given table between
-@@ -1555,7 +1968,7 @@ impl<RT: Runtime> Database<RT> {
+@@ -1555,7 +1974,7 @@ impl<RT: Runtime> Database<RT> {
              Arc::new(snapshot.in_memory_indexes),
              snapshot.table_registry.table_mapping().clone(),
              Arc::new(persistence_snapshot),
@@ -734,7 +756,7 @@ index 3ed756279..6b3358a1f 100644
              None,
          );
          let (results, cursor) = db_index_snapshot
-@@ -1810,11 +2223,11 @@ impl<RT: Runtime> Database<RT> {
+@@ -1810,11 +2229,11 @@ impl<RT: Runtime> Database<RT> {
                      RepeatablePersistence::new(
                          self.reader.clone(),
                          repeatable_ts,
@@ -748,7 +770,7 @@ index 3ed756279..6b3358a1f 100644
                  index_cache,
              ),
              Arc::new(TextIndexManagerSnapshot::new(
-@@ -1878,7 +2291,7 @@ impl<RT: Runtime> Database<RT> {
+@@ -1878,7 +2297,7 @@ impl<RT: Runtime> Database<RT> {
              bootstrap_metadata: self.bootstrap_metadata.clone(),
              snapshot,
              persistence_snapshot: repeatable_persistence.read_snapshot(ts)?,
@@ -757,7 +779,7 @@ index 3ed756279..6b3358a1f 100644
              persistence_reader: self.reader.clone(),
              retention_validator: self.retention_validator(),
          })
-@@ -1900,7 +2313,7 @@ impl<RT: Runtime> Database<RT> {
+@@ -1900,7 +2319,7 @@ impl<RT: Runtime> Database<RT> {
          task::consume_budget().await;
          let readonly = transaction.is_readonly();
          let result = self
@@ -766,7 +788,7 @@ index 3ed756279..6b3358a1f 100644
              .commit(transaction, write_source.into())
              .await?;
          if !readonly {
-@@ -1914,7 +2327,7 @@ impl<RT: Runtime> Database<RT> {
+@@ -1914,7 +2333,7 @@ impl<RT: Runtime> Database<RT> {
          &self,
          tables: BTreeSet<TableName>,
      ) -> anyhow::Result<()> {
@@ -775,7 +797,7 @@ index 3ed756279..6b3358a1f 100644
      }
  
      pub fn write_commits_since_load(&self) -> usize {
-@@ -1925,14 +2338,14 @@ impl<RT: Runtime> Database<RT> {
+@@ -1925,14 +2344,14 @@ impl<RT: Runtime> Database<RT> {
      /// N.B. Only use this function for user subscriptions. System subscriptions
      /// should use `subscribe_and_wait_for_invalidation`.
      pub async fn subscribe(&self, token: Token) -> anyhow::Result<Subscription> {
@@ -792,7 +814,7 @@ index 3ed756279..6b3358a1f 100644
          let invalid_ts = subscription.wait_for_invalidation().await;
          let current_ts = self.now_ts_for_reads();
          metrics::log_subscription_invalidation_lag(invalid_ts, *current_ts);
-@@ -2401,11 +2814,19 @@ impl<RT: Runtime> Database<RT> {
+@@ -2401,11 +2820,19 @@ impl<RT: Runtime> Database<RT> {
          ts: Timestamp,
      ) -> anyhow::Result<Result<Token, Option<Timestamp>>> {
          let _timer = metrics::refresh_token_timer();
@@ -817,10 +839,10 @@ index 3ed756279..6b3358a1f 100644
      pub fn memory_consistency_check(&self) -> anyhow::Result<()> {
 diff --git a/crates/database/src/follower_tailer.rs b/crates/database/src/follower_tailer.rs
 new file mode 100644
-index 000000000..2656d3a0f
+index 000000000..b46a8a5ca
 --- /dev/null
 +++ b/crates/database/src/follower_tailer.rs
-@@ -0,0 +1,427 @@
+@@ -0,0 +1,432 @@
 +use std::{
 +    ops::Bound,
 +    sync::Arc,
@@ -923,6 +945,7 @@ index 000000000..2656d3a0f
 +        retention_validator: Arc<dyn RetentionValidator>,
 +        virtual_system_mapping: VirtualSystemMapping,
 +        tailed_ts: RepeatableTimestamp,
++        already_warm: bool,
 +    ) -> FollowerTailerHandle {
 +        let poll_interval = *MAX_REPEATABLE_TIMESTAMP_COMMIT_DELAY / 2;
 +        let worker = Self {
@@ -934,7 +957,10 @@ index 000000000..2656d3a0f
 +            poll_interval,
 +        };
 +        let (promote_tx, promote_rx) = oneshot::channel();
-+        let join = runtime.spawn("follower_log_tailer", worker.go(tailed_ts, promote_rx));
++        let join = runtime.spawn(
++            "follower_log_tailer",
++            worker.go(tailed_ts, already_warm, promote_rx),
++        );
 +        FollowerTailerHandle {
 +            promote_tx: Some(promote_tx),
 +            join,
@@ -944,11 +970,12 @@ index 000000000..2656d3a0f
 +    async fn go(
 +        mut self,
 +        mut tailed_ts: RepeatableTimestamp,
++        already_warm: bool,
 +        promote_rx: oneshot::Receiver<PromoteRequest>,
 +    ) {
 +        let mut backoff = Backoff::new(INITIAL_BACKOFF, MAX_BACKOFF);
 +        let mut promote_rx = promote_rx.fuse();
-+        loop {
++        while !already_warm {
 +            match self.bootstrap_search_into_snapshot(tailed_ts).await {
 +                Ok(()) => break,
 +                Err(e) if e.is_out_of_retention() => {

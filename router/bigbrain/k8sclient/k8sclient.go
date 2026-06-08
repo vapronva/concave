@@ -24,11 +24,10 @@ const (
 const BackendPort = 3210
 
 type Backend struct {
-	Pod       string
-	Namespace string
-	URL       string
-	Priority  int
-	Ready     bool
+	Pod      string
+	URL      string
+	Priority int
+	Ready    bool
 }
 
 type labelKeys struct {
@@ -104,11 +103,10 @@ func (c *Client) DiscoverBackends(ctx context.Context, ns, name string) ([]Backe
 		}
 		role := p.Labels[c.labels.role]
 		out = append(out, Backend{
-			Pod:       p.Name,
-			Namespace: p.Namespace,
-			URL:       fmt.Sprintf("http://%s", net.JoinHostPort(p.Status.PodIP, strconv.Itoa(BackendPort))),
-			Priority:  priorityFor(p.Labels[c.labels.leaderPriority], role),
-			Ready:     podReady(p),
+			Pod:      p.Name,
+			URL:      fmt.Sprintf("http://%s", net.JoinHostPort(p.Status.PodIP, strconv.Itoa(BackendPort))),
+			Priority: priorityFor(p.Labels[c.labels.leaderPriority], role),
+			Ready:    podReady(p),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Pod < out[j].Pod })
@@ -121,14 +119,10 @@ func priorityFor(label, role string) int {
 			return n
 		}
 	}
-	switch role {
-	case "leader":
+	if role == "leader" {
 		return priorityLeaderDefault
-	case "follower":
-		return priorityFollowerDefault
-	default:
-		return priorityFollowerDefault
 	}
+	return priorityFollowerDefault
 }
 
 func podReady(p *corev1.Pod) bool {

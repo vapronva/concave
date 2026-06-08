@@ -84,7 +84,10 @@ func (r *Registry) Update(name, leaderPod, leaderURL string) {
 			case <-ch:
 			default:
 			}
-			ch <- ev
+			select {
+			case ch <- ev:
+			default:
+			}
 		}
 	}
 }

@@ -46,13 +46,11 @@ func TestActLeaderless_EmptyListDoesNotAdvanceStreak(t *testing.T) {
 	reg.EnsureDeployment("dev", "convex-dev")
 	c := New(Config{PromoteDebounce: 3}, nil, nil, reg, quietLogger())
 	st := c.deploymentState("dev")
-	snap := c.snapshotState(st)
 	emptyDecision := decision{liveLeaderCount: 0}
 	for range 10 {
-		if got := c.commitState(st, snap, emptyDecision, true); got != 0 {
+		if got := c.commitState(st, emptyDecision, true); got != 0 {
 			t.Fatalf("empty backend list must not advance the leaderless streak, got %d", got)
 		}
-		snap = c.snapshotState(st)
 	}
 }
 
@@ -60,9 +58,8 @@ func TestCommitState_LeaderfulClearsStreak(t *testing.T) {
 	t.Parallel()
 	c := New(Config{}, nil, nil, registry.New(), quietLogger())
 	st := c.deploymentState("dev")
-	snap := c.snapshotState(st)
-	snap.leaderlessStreak = 5
-	if got := c.commitState(st, snap, decision{liveLeaderCount: 1}, false); got != 0 {
+	st.leaderlessStreak = 5
+	if got := c.commitState(st, decision{liveLeaderCount: 1}, false); got != 0 {
 		t.Fatalf("a live leader must reset the streak to 0, got %d", got)
 	}
 }

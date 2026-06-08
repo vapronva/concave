@@ -19,6 +19,7 @@ import (
 const (
 	keepaliveInterval = 25 * time.Second
 	usageBodyLimit    = 4 * 1024 * 1024
+	writeTimeout      = 10 * time.Second
 )
 
 type Server struct {
@@ -93,12 +94,7 @@ func (s *Server) handleUsageIngest(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusServiceUnavailable, "insights disabled")
 		return
 	}
-	kept, err := s.ins.Ingest(r.Context(), body.Deployment, body.Events)
-	if err != nil {
-		s.log.ErrorContext(r.Context(), "usage ingest failed", "deployment", body.Deployment, "err", err)
-		writeErr(w, http.StatusInternalServerError, "internal error")
-		return
-	}
+	kept := s.ins.Ingest(body.Deployment, body.Events)
 	writeJSON(w, http.StatusOK, map[string]int{"ingested": kept})
 }
 
@@ -130,7 +126,7 @@ func (s *Server) handleUsageQuery(w http.ResponseWriter, r *http.Request) {
 	if from == "" {
 		from = now.AddDate(0, 0, -3).Format("2006-01-02")
 	}
-	out, err := s.ins.Query(r.Context(), dep, from, to)
+	out, err := s.ins.Query(dep, from, to)
 	if err != nil {
 		if errors.Is(err, insights.ErrBadDateRange) {
 			writeErr(w, http.StatusBadRequest, err.Error())
@@ -155,12 +151,6 @@ func bearerToken(authHeader string) string {
 	return token
 }
 
-type leaderResponse struct {
-	Name      string `json:"name"`
-	LeaderPod string `json:"leaderPod"`
-	LeaderURL string `json:"leaderUrl"`
-}
-
 func (s *Server) handleGetLeader(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	if _, ok := s.reg.Namespace(name); !ok {
@@ -172,7 +162,7 @@ func (s *Server) handleGetLeader(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusServiceUnavailable, "no leader for "+name)
 		return
 	}
-	writeJSON(w, http.StatusOK, leaderResponse{Name: name, LeaderPod: pod, LeaderURL: url})
+	writeJSON(w, http.StatusOK, registry.LeaderEvent{Name: name, LeaderPod: pod, LeaderURL: url})
 }
 
 func (s *Server) handleLeaderStream(w http.ResponseWriter, r *http.Request) {
@@ -192,12 +182,14 @@ func (s *Server) handleLeaderStream(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "streaming unsupported")
 		return
 	}
+	rc := http.NewResponseController(w)
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(http.StatusOK)
 	pod, url, _ := s.reg.Leader(name)
-	writeSSE(w, registry.LeaderEvent{Name: name, LeaderPod: pod, LeaderURL: url})
-	flusher.Flush()
+	if !emitSSE(w, rc, flusher, registry.LeaderEvent{Name: name, LeaderPod: pod, LeaderURL: url}) {
+		return
+	}
 	keepalive := time.NewTicker(keepaliveInterval)
 	defer keepalive.Stop()
 	for {
@@ -210,11 +202,13 @@ func (s *Server) handleLeaderStream(w http.ResponseWriter, r *http.Request) {
 			if !open {
 				return
 			}
-			writeSSE(w, ev)
-			flusher.Flush()
+			if !emitSSE(w, rc, flusher, ev) {
+				return
+			}
 		case <-keepalive.C:
-			_, _ = fmt.Fprint(w, ": keepalive\n\n")
-			flusher.Flush()
+			if !emitKeepalive(w, rc, flusher) {
+				return
+			}
 		}
 	}
 }
@@ -229,9 +223,23 @@ func writeErr(w http.ResponseWriter, code int, msg string) {
 	writeJSON(w, code, map[string]string{"error": msg})
 }
 
-func writeSSE(w http.ResponseWriter, ev registry.LeaderEvent) {
+func emitSSE(w http.ResponseWriter, rc *http.ResponseController, flusher http.Flusher, ev registry.LeaderEvent) bool {
+	_ = rc.SetWriteDeadline(time.Now().Add(writeTimeout))
 	b, _ := json.Marshal(ev)
-	_, _ = fmt.Fprintf(w, "event: leader\ndata: %s\n\n", b)
+	if _, err := fmt.Fprintf(w, "event: leader\ndata: %s\n\n", b); err != nil {
+		return false
+	}
+	flusher.Flush()
+	return true
+}
+
+func emitKeepalive(w http.ResponseWriter, rc *http.ResponseController, flusher http.Flusher) bool {
+	_ = rc.SetWriteDeadline(time.Now().Add(writeTimeout))
+	if _, err := fmt.Fprint(w, ": keepalive\n\n"); err != nil {
+		return false
+	}
+	flusher.Flush()
+	return true
 }
 
 func logging(log *slog.Logger, next http.Handler) http.Handler {

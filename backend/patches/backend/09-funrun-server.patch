@@ -57,10 +57,10 @@ index 000000000..8375eb65c
 +workspace = true
 diff --git a/crates/funrun_server/src/callbacks.rs b/crates/funrun_server/src/callbacks.rs
 new file mode 100644
-index 000000000..70bb913ba
+index 000000000..21cc060b0
 --- /dev/null
 +++ b/crates/funrun_server/src/callbacks.rs
-@@ -0,0 +1,540 @@
+@@ -0,0 +1,539 @@
 +use anyhow::Context;
 +use async_trait::async_trait;
 +use common::{
@@ -78,7 +78,6 @@ index 000000000..70bb913ba
 +        CONVEX_EXECUTION_ID_HEADER,
 +        CONVEX_REQUEST_ID_HEADER,
 +        CONVEX_ROOT_REQUEST_HEADER,
-+        STATUS_CODE_UDF_FAILED,
 +    },
 +    runtime::UnixTimestamp,
 +    types::ConvexOrigin,
@@ -190,7 +189,7 @@ index 000000000..70bb913ba
 +            .with_context(|| format!("funrun action callback to {path} failed"))?;
 +        let status = response.status();
 +        let text = response.text().await?;
-+        if !status.is_success() && status.as_u16() != STATUS_CODE_UDF_FAILED {
++        if !status.is_success() {
 +            anyhow::bail!("funrun callback {path} returned {status}: {text}");
 +        }
 +        let parsed: RunFunctionResponse = serde_json::from_str(&text)
@@ -1054,10 +1053,10 @@ index 000000000..a58397638
 +}
 diff --git a/crates/funrun_server/src/service.rs b/crates/funrun_server/src/service.rs
 new file mode 100644
-index 000000000..ff8667cf0
+index 000000000..760459c48
 --- /dev/null
 +++ b/crates/funrun_server/src/service.rs
-@@ -0,0 +1,650 @@
+@@ -0,0 +1,652 @@
 +use std::{
 +    collections::BTreeMap,
 +    pin::Pin,
@@ -1509,7 +1508,9 @@ index 000000000..ff8667cf0
 +                    anyhow::bail!(ErrorMetadata::client_disconnect());
 +                },
 +                part = inner_response_stream.select_next_some() => {
-+                    let _ = forward_http_part(part_tx, part).await;
++                    if forward_http_part(part_tx, part).await.is_err() {
++                        anyhow::bail!(ErrorMetadata::client_disconnect());
++                    }
 +                },
 +                log_line = log_lines.select_next_some() => {
 +                    forward_http_log_line(part_tx, log_line).await;
@@ -1710,10 +1711,10 @@ index 000000000..ff8667cf0
 +}
 diff --git a/crates/funrun_server/src/snapshot.rs b/crates/funrun_server/src/snapshot.rs
 new file mode 100644
-index 000000000..0d9634c89
+index 000000000..f565390cd
 --- /dev/null
 +++ b/crates/funrun_server/src/snapshot.rs
-@@ -0,0 +1,637 @@
+@@ -0,0 +1,625 @@
 +use std::{
 +    collections::HashMap,
 +    sync::{
@@ -1833,9 +1834,8 @@ index 000000000..0d9634c89
 +            instances.len(),
 +        );
 +        let idle_ttl = Duration::from_secs(15 * 60);
-+        let max_warm_instances = instances.len().max(1);
 +        let states = Arc::new(Mutex::new(HashMap::new()));
-+        Self::spawn_eviction_worker(rt.clone(), states.clone(), idle_ttl, max_warm_instances);
++        Self::spawn_eviction_worker(rt.clone(), states.clone(), idle_ttl);
 +        Ok(Self {
 +            rt,
 +            db: config.db,
@@ -1938,13 +1938,12 @@ index 000000000..0d9634c89
 +        rt: RT,
 +        states: Arc<Mutex<HashMap<String, RegistryEntry<RT>>>>,
 +        idle_ttl: Duration,
-+        max_warm_instances: usize,
 +    ) {
 +        let worker_rt = rt.clone();
 +        rt.spawn_background("funrun_instance_eviction", async move {
 +            loop {
 +                worker_rt.wait(Duration::from_secs(60)).await;
-+                evict_states(&states, idle_ttl, max_warm_instances).await;
++                evict_states(&states, idle_ttl).await;
 +            }
 +        });
 +    }
@@ -1971,7 +1970,7 @@ index 000000000..0d9634c89
 +    RT: Runtime,
 +    Fut: std::future::Future<Output = anyhow::Result<Arc<InstanceState<RT>>>>,
 +{
-+    let cell = {
++    let (cell, existing) = {
 +        let mut guard = states.lock().expect("InstanceRegistry lock poisoned");
 +        let entry = guard
 +            .entry(key.to_owned())
@@ -1980,8 +1979,11 @@ index 000000000..0d9634c89
 +                last_used: Instant::now(),
 +            });
 +        entry.last_used = Instant::now();
-+        entry.cell.clone()
++        (entry.cell.clone(), entry.cell.get().cloned())
 +    };
++    if let Some(value) = existing {
++        return Ok(value);
++    }
 +    let value = cell.get_or_try_init(build).await?;
 +    Ok(value.clone())
 +}
@@ -1989,29 +1991,20 @@ index 000000000..0d9634c89
 +async fn evict_states<RT: Runtime>(
 +    states: &Mutex<HashMap<String, RegistryEntry<RT>>>,
 +    idle_ttl: Duration,
-+    max_warm_instances: usize,
 +) {
 +    let now = Instant::now();
 +    let mut evicted = Vec::new();
 +    {
 +        let mut guard = states.lock().expect("InstanceRegistry lock poisoned");
-+        let mut candidates = guard
++        let stale: Vec<(String, Arc<InstanceState<RT>>)> = guard
 +            .iter()
 +            .filter_map(|(name, entry)| {
 +                let state = entry.cell.get()?;
-+                (Arc::strong_count(state) == 1).then_some((
-+                    name.clone(),
-+                    entry.last_used,
-+                    state.clone(),
-+                ))
++                (Arc::strong_count(state) == 1 && now.duration_since(entry.last_used) >= idle_ttl)
++                    .then(|| (name.clone(), state.clone()))
 +            })
-+            .collect::<Vec<_>>();
-+        candidates.sort_by_key(|(_, last_used, _)| *last_used);
-+        let excess = guard.len().saturating_sub(max_warm_instances);
-+        for (index, (name, last_used, state)) in candidates.into_iter().enumerate() {
-+            if now.duration_since(last_used) < idle_ttl && index >= excess {
-+                continue;
-+            }
++            .collect();
++        for (name, state) in stale {
 +            guard.remove(&name);
 +            evicted.push((name, state));
 +        }
@@ -2155,16 +2148,6 @@ index 000000000..0d9634c89
 +
 +    pub async fn snapshot_inputs(&self, ts: RepeatableTimestamp) -> anyhow::Result<SnapshotInputs> {
 +        log_counter(&FUNRUN_SNAPSHOT_REQUESTS_TOTAL, 1);
-+        self.snapshot_cache
-+            .try_get_with(*ts, self.build_snapshot_inputs(ts))
-+            .await
-+            .map_err(|e| anyhow::anyhow!("funrun snapshot inputs failed: {e}"))
-+    }
-+
-+    async fn build_snapshot_inputs(
-+        &self,
-+        ts: RepeatableTimestamp,
-+    ) -> anyhow::Result<SnapshotInputs> {
 +        let repeatable_persistence =
 +            RepeatablePersistence::new(self.reader.clone(), ts, self.retention_validator.clone());
 +        let index_reader: Arc<dyn IndexReader> =
@@ -2200,7 +2183,13 @@ index 000000000..0d9634c89
 +                    "[convex-funrun] warm snapshot miss at ts {} ({warm_err:#}); cold-loading",
 +                    *ts
 +                );
-+                self.cold_snapshot_inputs(ts, index_reader).await
++                self.snapshot_cache
++                    .try_get_with(*ts, self.cold_snapshot_inputs(ts, index_reader))
++                    .await
++                    .map_err(|e| match e.downcast_ref::<errors::ErrorMetadata>() {
++                        Some(metadata) => anyhow::anyhow!(metadata.clone()),
++                        None => anyhow::anyhow!("funrun snapshot inputs failed: {e:#}"),
++                    })
 +            },
 +        }
 +    }

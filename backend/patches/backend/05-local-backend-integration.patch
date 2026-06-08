@@ -80,7 +80,7 @@ index f280d1494..9208b0c0a 100644
 +    }
 +}
 diff --git a/crates/local_backend/src/lib.rs b/crates/local_backend/src/lib.rs
-index 4633f83f5..ca5ad758b 100644
+index 4633f83f5..59233fb2c 100644
 --- a/crates/local_backend/src/lib.rs
 +++ b/crates/local_backend/src/lib.rs
 @@ -33,7 +33,10 @@ use common::{
@@ -114,15 +114,16 @@ index 4633f83f5..ca5ad758b 100644
  pub mod log_sinks;
  pub mod logs;
  pub mod node_action_callbacks;
-@@ -109,6 +117,7 @@ pub mod storage;
+@@ -109,7 +117,7 @@ pub mod storage;
  pub mod streaming_export;
  pub mod streaming_import;
  pub mod subs;
+-pub const MAX_CONCURRENT_REQUESTS: usize = 128;
 +pub mod usage_forwarder;
- pub const MAX_CONCURRENT_REQUESTS: usize = 128;
  
  #[derive(Clone)]
-@@ -119,6 +128,11 @@ pub struct LocalAppState {
+ pub struct LocalAppState {
+@@ -119,6 +127,11 @@ pub struct LocalAppState {
      pub site_origin: ConvexSite,
      // Name of the instance. (e.g. crazy-giraffe-123)
      pub instance_name: String,
@@ -134,7 +135,7 @@ index 4633f83f5..ca5ad758b 100644
      pub application: Application<ProdRuntime>,
      pub zombify_rx: async_broadcast::Receiver<()>,
  }
-@@ -143,10 +157,31 @@ pub struct RouterState {
+@@ -143,10 +156,31 @@ pub struct RouterState {
  #[derive(Serialize)]
  pub struct EmptyResponse {}
  
@@ -167,7 +168,7 @@ index 4633f83f5..ca5ad758b 100644
      zombify_rx: async_broadcast::Receiver<()>,
      preempt_tx: ShutdownSignal,
  ) -> anyhow::Result<LocalAppState> {
-@@ -156,29 +191,61 @@ pub async fn make_app(
+@@ -156,29 +190,66 @@ pub async fn make_app(
      // TODO(CX-6572) Separate `SegmentMetadataFetcher` from `SearcherImpl`
      let segment_metadata_fetcher: Arc<dyn SegmentTermMetadataFetcher> = in_process_searcher;
      let (deleted_tablet_sender, deleted_tablet_receiver) = tokio::sync::mpsc::channel(100);
@@ -209,7 +210,7 @@ index 4633f83f5..ca5ad758b 100644
 +            .await?
 +        },
 +        RolePersistence::Follower(reader) => {
-+            tracing::info!("[backend-role] starting in FOLLOWER mode (read-only, no lease)");
++            tracing::info!("[concave] starting in FOLLOWER mode (read-only, no lease)");
 +            drop(deleted_tablet_sender);
 +            Database::load_follower(
 +                reader.clone(),
@@ -221,6 +222,11 @@ index 4633f83f5..ca5ad758b 100644
 +            .await?
 +        },
 +    };
++    if config.role.is_leader() && std::env::var_os("CONVEX_BACKEND_ROLE").is_none() {
++        tracing::warn!(
++            "[concave] CONVEX_BACKEND_ROLE unset; an HA standby must set it to follower"
++        );
++    }
 +    if config.role.is_leader() {
 +        initialize_application_system_tables(&database).await?;
 +    }
@@ -251,7 +257,7 @@ index 4633f83f5..ca5ad758b 100644
  
      let file_storage = FileStorage {
          transactional_file_storage: TransactionalFileStorage::new(
-@@ -221,21 +288,41 @@ pub async fn make_app(
+@@ -221,21 +292,41 @@ pub async fn make_app(
          reqwest::redirect::Policy::default(),
      );
      let function_runner: Arc<dyn FunctionRunner<ProdRuntime>> =
@@ -305,7 +311,7 @@ index 4633f83f5..ca5ad758b 100644
          runtime.clone(),
          database.clone(),
          file_storage.clone(),
-@@ -252,7 +339,7 @@ pub async fn make_app(
+@@ -252,7 +343,7 @@ pub async fn make_app(
          config.convex_site_url()?,
          searcher.clone(),
          segment_metadata_fetcher,
@@ -314,7 +320,7 @@ index 4633f83f5..ca5ad758b 100644
          actions,
          Arc::new(RedactLogsToClient::new(config.redact_logs_to_client)),
          Arc::new(ApplicationAuth::new(
-@@ -273,7 +360,7 @@ pub async fn make_app(
+@@ -273,7 +364,7 @@ pub async fn make_app(
      let origin = config.convex_origin_url()?;
      let instance_name = config.name();
  
@@ -323,7 +329,7 @@ index 4633f83f5..ca5ad758b 100644
          let beacon_future = beacon::start_beacon(
              runtime.clone(),
              database.clone(),
-@@ -283,14 +370,93 @@ pub async fn make_app(
+@@ -283,14 +374,99 @@ pub async fn make_app(
          runtime.spawn_background("beacon_worker", beacon_future);
      }
  
@@ -385,8 +391,8 @@ index 4633f83f5..ca5ad758b 100644
 +        .map(Arc::new);
 +    if control_plane_token.is_some() {
 +        tracing::info!(
-+            "[backend-role] CONVEX_CONTROL_PLANE_TOKEN set; /instance/promote and \
-+             /instance/demote require the X-Convex-Control-Plane-Token header"
++            "[concave] CONVEX_CONTROL_PLANE_TOKEN set; /instance/promote and /instance/demote \
++             require the X-Convex-Control-Plane-Token header"
 +        );
 +    } else {
 +        tracing::warn!(
@@ -408,11 +414,17 @@ index 4633f83f5..ca5ad758b 100644
      };
  
 +    if let Some(rw_persistence) = leader_handle.rw_persistence() {
-+        crate::leadership::install_lease_lost_handler(&app_state, rw_persistence.clone());
-+        app_state
-+            .application
-+            .database()
-+            .spawn_lease_watch(rw_persistence, preempt_tx.clone());
++        if rw_persistence.supports_lease() {
++            crate::leadership::install_lease_lost_handler(&app_state, rw_persistence.clone());
++            app_state
++                .application
++                .database()
++                .spawn_lease_watch(rw_persistence, preempt_tx.clone());
++        } else {
++            tracing::info!(
++                "[concave] no lease primitive; skipping lease-watch (commit-time fencing)"
++            );
++        }
 +    }
      Ok(app_state)
  }

@@ -119,8 +119,7 @@ func decide(obs []observation, p decideParams) decision {
 	d := decision{liveLeaderCount: len(claims)}
 	if len(claims) == 0 {
 		if cand, ok := bestCandidate(obs); ok {
-			c := cand
-			d.promoteTarget = &c
+			d.promoteTarget = &cand
 		}
 		return d
 	}
@@ -160,8 +159,7 @@ func evaluateFailback(
 	}
 	st := failbackState{candidate: cand.be.Pod, eligibleSince: since}
 	if p.now.Sub(since) >= p.stabilityWindow {
-		c := cand
-		return &c, st
+		return &cand, st
 	}
 	return nil, st
 }

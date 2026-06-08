@@ -46,25 +46,7 @@ func (c *Controller) actFailback(
 		c.log.InfoContext(base, "election: failback: promoting higher-priority pod over incumbent",
 			"deployment", name, "promoting", target.be.Pod, "over", incumbent,
 			"candidatePriority", target.be.Priority, "candidateLatestTs", target.status.LatestTS)
-		actx, cancel := context.WithTimeout(base, actuationTimeout)
-		defer cancel()
-		code, err := c.backend.Promote(actx, name, target.be.URL)
-		if err != nil {
-			c.log.ErrorContext(base, "election: failback promote failed",
-				"deployment", name, "pod", target.be.Pod, "err", err)
-			return
-		}
-		switch code {
-		case http.StatusOK, http.StatusAccepted:
-			c.log.InfoContext(base, "election: failback promote accepted",
-				"deployment", name, "pod", target.be.Pod, "status", code)
-		case http.StatusForbidden:
-			c.log.ErrorContext(base, "election: failback promote forbidden; control-plane token mismatch",
-				"deployment", name, "pod", target.be.Pod)
-		default:
-			c.log.WarnContext(base, "election: failback promote unexpected status",
-				"deployment", name, "pod", target.be.Pod, "status", code)
-		}
+		c.promoteAndLog(base, name, "failback promote", target)
 	})
 }
 
@@ -94,37 +76,35 @@ func (c *Controller) actLeaderless(
 	base := context.WithoutCancel(ctx)
 	c.actWG.Go(func() {
 		defer c.release(st)
-		c.log.InfoContext(
-			base,
-			"election: promoting preferred warm standby",
-			"deployment",
-			name,
-			"pod",
-			target.be.Pod,
-			"priority",
-			target.be.Priority,
-			"latestTs",
-			target.status.LatestTS,
-		)
-		actx, cancel := context.WithTimeout(base, actuationTimeout)
-		defer cancel()
-		code, err := c.backend.Promote(actx, name, target.be.URL)
-		if err != nil {
-			c.log.ErrorContext(base, "election: promote failed", "deployment", name, "pod", target.be.Pod, "err", err)
-			return
-		}
-		switch code {
-		case http.StatusOK, http.StatusAccepted:
-			c.log.InfoContext(base, "election: promote accepted",
-				"deployment", name, "pod", target.be.Pod, "status", code)
-		case http.StatusForbidden:
-			c.log.ErrorContext(base, "election: promote forbidden; control-plane token mismatch",
-				"deployment", name, "pod", target.be.Pod)
-		default:
-			c.log.WarnContext(base, "election: promote unexpected status",
-				"deployment", name, "pod", target.be.Pod, "status", code)
-		}
+		c.log.InfoContext(base, "election: promoting preferred warm standby",
+			"deployment", name, "pod", target.be.Pod,
+			"priority", target.be.Priority, "latestTs", target.status.LatestTS)
+		c.promoteAndLog(base, name, "promote", target)
 	})
+}
+
+func (c *Controller) promoteAndLog(base context.Context, name, kind string, target observation) {
+	actx, cancel := context.WithTimeout(base, actuationTimeout)
+	defer cancel()
+	code, err := c.backend.Promote(actx, name, target.be.URL)
+	if err != nil {
+		c.log.ErrorContext(base, "election: "+kind+" failed", "deployment", name, "pod", target.be.Pod, "err", err)
+		return
+	}
+	switch code {
+	case http.StatusOK, http.StatusAccepted:
+		c.log.InfoContext(base, "election: "+kind+" accepted",
+			"deployment", name, "pod", target.be.Pod, "status", code)
+	case http.StatusConflict:
+		c.log.InfoContext(base, "election: "+kind+" deferred; backend is mid-transition, will retry",
+			"deployment", name, "pod", target.be.Pod, "status", code)
+	case http.StatusForbidden:
+		c.log.ErrorContext(base, "election: "+kind+" forbidden; control-plane token mismatch",
+			"deployment", name, "pod", target.be.Pod)
+	default:
+		c.log.WarnContext(base, "election: "+kind+" unexpected status",
+			"deployment", name, "pod", target.be.Pod, "status", code)
+	}
 }
 
 func (c *Controller) runActions(ctx context.Context, name string, st *deploymentState, actions []action) {

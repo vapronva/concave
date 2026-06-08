@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -41,7 +42,7 @@ func (c *Client) Leadership(ctx context.Context, deployment, base string) (Leade
 		return Leadership{}, err
 	}
 	if status != http.StatusOK {
-		return Leadership{}, fmt.Errorf("leadership %s: status %d", base, status)
+		return Leadership{}, fmt.Errorf("leadership %s: status %d: %s", base, status, bytes.TrimSpace(body))
 	}
 	var l Leadership
 	if derr := json.Unmarshal(body, &l); derr != nil {
