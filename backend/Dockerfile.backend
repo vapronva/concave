@@ -18,7 +18,7 @@ EOF
 
 WORKDIR /convex
 
-ARG CONVEX_REF=e77f64f7f2545d3657ea7a1bdcc9906587721af4
+ARG CONVEX_REF=b6aaa1abad6c90d0f5f427ef598f936873f15d44
 
 RUN <<EOF
 set -o errexit -o nounset -o xtrace

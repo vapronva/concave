@@ -28,10 +28,10 @@ index 986cfe59a..e7da231d6 100644
  }
 diff --git a/crates/local_backend/src/leadership.rs b/crates/local_backend/src/leadership.rs
 new file mode 100644
-index 000000000..960e202fe
+index 000000000..c8c7c7355
 --- /dev/null
 +++ b/crates/local_backend/src/leadership.rs
-@@ -0,0 +1,770 @@
+@@ -0,0 +1,792 @@
 +use std::sync::{
 +    atomic::{
 +        AtomicU8,
@@ -89,10 +89,10 @@ index 000000000..960e202fe
 +const ROLE_DEMOTING: u8 = 3;
 +
 +fn reject_unauthorized_control_plane(
-+    st: &LocalAppState,
++    control_plane_token: &Option<Arc<String>>,
 +    headers: &http::HeaderMap,
 +) -> Option<Response> {
-+    let Some(expected) = st.control_plane_token.as_ref() else {
++    let Some(expected) = control_plane_token.as_ref() else {
 +        return Some(
 +            (
 +                StatusCode::FORBIDDEN,
@@ -105,7 +105,7 @@ index 000000000..960e202fe
 +        .get(CONTROL_PLANE_TOKEN_HEADER)
 +        .map(|v| v.as_bytes())
 +        .unwrap_or_default();
-+    if keybroker::constant_time_eq(presented, expected.as_bytes()) {
++    if keybroker::constant_time_eq_sha256(presented, expected.as_bytes()) {
 +        None
 +    } else {
 +        Some(
@@ -138,10 +138,6 @@ index 000000000..960e202fe
 +
 +    pub fn is_leader(&self) -> bool {
 +        self.role.load(Ordering::SeqCst) == ROLE_LEADER
-+    }
-+
-+    pub fn as_str(&self) -> &'static str {
-+        self.current().as_str()
 +    }
 +
 +    fn begin_promotion(&self) -> PromotionAttempt {
@@ -274,25 +270,38 @@ index 000000000..960e202fe
 +    pub latest_ts: u64,
 +}
 +
-+pub async fn leadership<S>(
-+    headers: http::HeaderMap,
-+    MtState(st): MtState<LocalAppState>,
-+) -> Response
++pub async fn leadership<S>(MtState(st): MtState<LocalAppState>) -> Response
 +where
 +    LocalAppState: FromMtState<S>,
 +{
-+    if let Some(rejection) = reject_unauthorized_control_plane(&st, &headers) {
-+        return rejection;
-+    }
 +    let latest_ts: Timestamp = *st.application.now_ts_for_reads();
 +    let lease_ts = st.leader_handle.lease_ts();
 +    axum::Json(LeadershipResponse {
-+        role: st.role.as_str().to_string(),
++        role: st.role.current().as_str().to_string(),
 +        is_leader: st.role.is_leader(),
 +        lease_ts,
 +        latest_ts: u64::from(latest_ts),
 +    })
 +    .into_response()
++}
++
++pub async fn readyz<S>(MtState(st): MtState<LocalAppState>) -> Response
++where
++    LocalAppState: FromMtState<S>,
++{
++    let healthy = match st.configured_role {
++        BackendRole::Leader => st.role.is_leader(),
++        BackendRole::Follower => !st.role.is_leader(),
++    };
++    if healthy {
++        (StatusCode::OK, "ready").into_response()
++    } else {
++        (
++            StatusCode::SERVICE_UNAVAILABLE,
++            "not ready for configured role",
++        )
++            .into_response()
++    }
 +}
 +
 +#[derive(Serialize)]
@@ -302,13 +311,10 @@ index 000000000..960e202fe
 +    pub message: String,
 +}
 +
-+pub async fn promote<S>(headers: http::HeaderMap, MtState(st): MtState<LocalAppState>) -> Response
++pub async fn promote<S>(MtState(st): MtState<LocalAppState>) -> Response
 +where
 +    LocalAppState: FromMtState<S>,
 +{
-+    if let Some(rejection) = reject_unauthorized_control_plane(&st, &headers) {
-+        return rejection;
-+    }
 +    let promote_ctx = st.promote_ctx.clone();
 +    match st.role.begin_promotion() {
 +        PromotionAttempt::AlreadyLeader => {
@@ -411,13 +417,10 @@ index 000000000..960e202fe
 +    pub message: String,
 +}
 +
-+pub async fn demote<S>(headers: http::HeaderMap, MtState(st): MtState<LocalAppState>) -> Response
++pub async fn demote<S>(MtState(st): MtState<LocalAppState>) -> Response
 +where
 +    LocalAppState: FromMtState<S>,
 +{
-+    if let Some(rejection) = reject_unauthorized_control_plane(&st, &headers) {
-+        return rejection;
-+    }
 +    match st.role.begin_demotion() {
 +        DemotionAttempt::AlreadyFollower => {
 +            return (
@@ -542,15 +545,33 @@ index 000000000..960e202fe
 +    st.application.database().set_lease_lost_handler(handler);
 +}
 +
-+pub fn leadership_routes<S>() -> Router<S>
++async fn control_plane_gate(
++    axum::extract::State(control_plane_token): axum::extract::State<Option<Arc<String>>>,
++    headers: http::HeaderMap,
++    req: Request<Body>,
++    next: Next,
++) -> Response {
++    if let Some(rejection) = reject_unauthorized_control_plane(&control_plane_token, &headers) {
++        return rejection;
++    }
++    next.run(req).await
++}
++
++pub fn leadership_routes<S>(control_plane_token: Option<Arc<String>>) -> Router<S>
 +where
 +    LocalAppState: FromMtState<S>,
 +    S: Clone + Send + Sync + 'static,
 +{
-+    Router::new()
-+        .route("/instance/leadership", get(leadership::<S>))
++    let control = Router::new()
 +        .route("/instance/promote", post(promote::<S>))
 +        .route("/instance/demote", post(demote::<S>))
++        .layer(axum::middleware::from_fn_with_state(
++            control_plane_token,
++            control_plane_gate,
++        ));
++    Router::new()
++        .route("/instance/leadership", get(leadership::<S>))
++        .merge(control)
 +}
 +
 +pub fn follower_router(st: LocalAppState) -> Router {
@@ -561,7 +582,8 @@ index 000000000..960e202fe
 +fn is_gate_exempt(path: &str) -> bool {
 +    matches!(
 +        path,
-+        "/" | "/instance/leadership"
++        "/" | "/readyz"
++            | "/instance/leadership"
 +            | "/instance/promote"
 +            | "/instance/demote"
 +            | "/instance_name"
@@ -803,7 +825,7 @@ index 000000000..960e202fe
 +    }
 +}
 diff --git a/crates/local_backend/src/router.rs b/crates/local_backend/src/router.rs
-index 5e8fdcc1d..d664fc0ab 100644
+index 5e8fdcc1d..a53b7c0ca 100644
 --- a/crates/local_backend/src/router.rs
 +++ b/crates/local_backend/src/router.rs
 @@ -1,6 +1,9 @@
@@ -869,15 +891,17 @@ index 5e8fdcc1d..d664fc0ab 100644
          .nest("/v1", platform_routes);
  
      // Endpoints migrated to use the RouterState trait instead of application.
-@@ -404,6 +410,7 @@ pub fn router(st: LocalAppState) -> Router {
+@@ -404,6 +410,9 @@ pub fn router(st: LocalAppState) -> Router {
      Router::new()
          .nest("/api", api_routes)
          .merge(health_check_routes(version))
-+        .merge(crate::leadership::leadership_routes::<LocalAppState>())
++        .merge(crate::leadership::leadership_routes::<LocalAppState>(
++            st.control_plane_token.clone(),
++        ))
          .layer(cors())
          .with_state(st)
          .merge(migrated)
-@@ -447,6 +454,9 @@ where
+@@ -447,6 +456,9 @@ where
          .route("/storage_get_url", post(storage_get_url))
          .route("/storage_get_metadata", post(storage_get_metadata))
          .route("/storage_delete", post(storage_delete))
@@ -887,7 +911,15 @@ index 5e8fdcc1d..d664fc0ab 100644
          .route("/audit_log", post(audit_log))
          // All routes above this line get the increased limit
          .layer(DefaultBodyLimit::max(*MAX_BACKEND_RPC_REQUEST_SIZE))
-@@ -590,18 +600,66 @@ where
+@@ -527,6 +539,7 @@ where
+             get(|MtState(st): MtState<LocalAppState>| async move { st.instance_name.clone() }),
+         )
+         .route("/instance_version", get(|| async move { version }))
++        .route("/readyz", get(crate::leadership::readyz::<S>))
+         .route(
+             "/",
+             get(|| async { "This Convex deployment is running. See https://docs.convex.dev/." }),
+@@ -590,18 +603,66 @@ where
          .route("/get_table_column_names", get(get_table_column_names))
  }
  

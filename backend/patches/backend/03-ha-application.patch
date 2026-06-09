@@ -501,7 +501,7 @@ index f81b976ac..17c49408a 100644
          self.runner.shutdown().await?;
          self.database.shutdown().await?;
 diff --git a/crates/log_streaming/src/lib.rs b/crates/log_streaming/src/lib.rs
-index 2cf993c59..8d25f4eb0 100644
+index 6ff4d3f66..e11ddf229 100644
 --- a/crates/log_streaming/src/lib.rs
 +++ b/crates/log_streaming/src/lib.rs
 @@ -94,6 +94,11 @@ use crate::sinks::{

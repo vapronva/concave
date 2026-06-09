@@ -602,10 +602,10 @@ index 000000000..21cc060b0
 +}
 diff --git a/crates/funrun_server/src/config.rs b/crates/funrun_server/src/config.rs
 new file mode 100644
-index 000000000..5acc369f4
+index 000000000..7713e0faa
 --- /dev/null
 +++ b/crates/funrun_server/src/config.rs
-@@ -0,0 +1,271 @@
+@@ -0,0 +1,282 @@
 +use std::net::SocketAddr;
 +
 +use clusters::DbDriverTag;
@@ -655,6 +655,7 @@ index 000000000..5acc369f4
 +    pub listen: SocketAddr,
 +    pub health_listen: SocketAddr,
 +    pub max_snapshot_lag: std::time::Duration,
++    pub drain_delay: std::time::Duration,
 +    pub instances: Vec<FunrunInstanceConfig>,
 +    pub db: DbDriverTag,
 +    pub require_ssl: bool,
@@ -680,6 +681,15 @@ index 000000000..5acc369f4
 +            })
 +            .transpose()?
 +            .unwrap_or(std::time::Duration::from_secs(30));
++        let drain_delay = std::env::var("CONVEX_FUNRUN_DRAIN_DELAY_SECS")
++            .ok()
++            .map(|v| {
++                v.parse::<u64>()
++                    .map(std::time::Duration::from_secs)
++                    .map_err(|e| anyhow::anyhow!("Invalid CONVEX_FUNRUN_DRAIN_DELAY_SECS: {e}"))
++            })
++            .transpose()?
++            .unwrap_or(std::time::Duration::from_secs(8));
 +        let db = match std::env::var("FUNRUN_DB").ok() {
 +            Some(s) => s
 +                .parse::<DbDriverTag>()
@@ -698,6 +708,7 @@ index 000000000..5acc369f4
 +            listen,
 +            health_listen,
 +            max_snapshot_lag,
++            drain_delay,
 +            instances,
 +            db,
 +            require_ssl,
@@ -879,11 +890,17 @@ index 000000000..5acc369f4
 +}
 diff --git a/crates/funrun_server/src/main.rs b/crates/funrun_server/src/main.rs
 new file mode 100644
-index 000000000..a58397638
+index 000000000..f595f373c
 --- /dev/null
 +++ b/crates/funrun_server/src/main.rs
-@@ -0,0 +1,168 @@
-+use std::sync::Arc;
+@@ -0,0 +1,265 @@
++use std::sync::{
++    atomic::{
++        AtomicBool,
++        Ordering,
++    },
++    Arc,
++};
 +
 +use anyhow::Context;
 +use axum::{
@@ -942,6 +959,7 @@ index 000000000..a58397638
 +        .prewarm_all()
 +        .await
 +        .context("failed to prewarm configured funrun instances")?;
++    spawn_pod_deletion_cost_updater(registry.clone());
 +    let service = FunrunService::new(runtime.clone(), registry.clone())?;
 +    let server = pb::funrun::funrun_server::FunrunServer::new(service)
 +        .max_decoding_message_size(MAX_GRPC_MESSAGE_BYTES)
@@ -962,11 +980,18 @@ index 000000000..a58397638
 +             gRPC -- use only for local/dev"
 +        );
 +    }
++    let shutting_down = Arc::new(AtomicBool::new(false));
 +    let (shutdown_tx, shutdown_rx) = watch::channel(false);
-+    tokio::spawn(async move {
-+        shutdown_signal().await;
-+        let _ = shutdown_tx.send(true);
-+    });
++    {
++        let shutting_down = shutting_down.clone();
++        let drain_delay = config.drain_delay;
++        tokio::spawn(async move {
++            shutdown_signal().await;
++            shutting_down.store(true, Ordering::Release);
++            tokio::time::sleep(drain_delay).await;
++            let _ = shutdown_tx.send(true);
++        });
++    }
 +    tracing::info!(
 +        "[convex-funrun] listening on {} (health {})",
 +        config.listen,
@@ -980,6 +1005,7 @@ index 000000000..a58397638
 +        config.max_snapshot_lag,
 +        registry,
 +        shutdown_rx,
++        shutting_down,
 +    );
 +    tokio::try_join!(
 +        async { grpc.await.context("convex-funrun gRPC server exited") },
@@ -992,6 +1018,7 @@ index 000000000..a58397638
 +struct HealthState {
 +    registry: Arc<InstanceRegistry<ProdRuntime>>,
 +    max_snapshot_lag: std::time::Duration,
++    shutting_down: Arc<AtomicBool>,
 +}
 +
 +async fn liveness() -> &'static str {
@@ -1000,10 +1027,11 @@ index 000000000..a58397638
 +
 +async fn readiness(State(state): State<HealthState>) -> impl IntoResponse {
 +    let report = state.registry.health_report(state.max_snapshot_lag).await;
-+    let status = if report.healthy {
-+        StatusCode::OK
-+    } else {
++    let draining = state.shutting_down.load(Ordering::Acquire);
++    let status = if draining || !report.healthy {
 +        StatusCode::SERVICE_UNAVAILABLE
++    } else {
++        StatusCode::OK
 +    };
 +    (status, Json(report))
 +}
@@ -1013,6 +1041,7 @@ index 000000000..a58397638
 +    max_snapshot_lag: std::time::Duration,
 +    registry: Arc<InstanceRegistry<ProdRuntime>>,
 +    shutdown_rx: watch::Receiver<bool>,
++    shutting_down: Arc<AtomicBool>,
 +) -> anyhow::Result<()> {
 +    let app = Router::new()
 +        .route("/healthz", get(liveness))
@@ -1021,12 +1050,91 @@ index 000000000..a58397638
 +        .with_state(HealthState {
 +            registry,
 +            max_snapshot_lag,
++            shutting_down,
 +        });
 +    let listener = tokio::net::TcpListener::bind(listen).await?;
 +    axum::serve(listener, app)
 +        .with_graceful_shutdown(wait_for_shutdown(shutdown_rx))
 +        .await
 +        .context("convex-funrun health server exited")
++}
++
++fn spawn_pod_deletion_cost_updater(registry: Arc<InstanceRegistry<ProdRuntime>>) {
++    if std::env::var_os("CONVEX_FUNRUN_POD_DELETION_COST").is_none() {
++        return;
++    }
++    let (Ok(pod), Ok(namespace)) = (std::env::var("POD_NAME"), std::env::var("POD_NAMESPACE"))
++    else {
++        tracing::warn!(
++            "[convex-funrun] pod-deletion-cost on but POD_NAME/POD_NAMESPACE unset; disabled"
++        );
++        return;
++    };
++    let client = match std::fs::read("/var/run/secrets/kubernetes.io/serviceaccount/ca.crt")
++        .map_err(|e| anyhow::anyhow!("{e}"))
++        .and_then(|ca| Ok(reqwest::Certificate::from_pem(&ca)?))
++        .and_then(|cert| {
++            Ok(reqwest::Client::builder()
++                .add_root_certificate(cert)
++                .build()?)
++        }) {
++        Ok(client) => client,
++        Err(e) => {
++            tracing::warn!("[convex-funrun] pod-deletion-cost: no in-cluster API client ({e}); disabled");
++            return;
++        },
++    };
++    let url = format!("https://kubernetes.default.svc/api/v1/namespaces/{namespace}/pods/{pod}");
++    tracing::info!("[convex-funrun] pod-deletion-cost updater active for {namespace}/{pod}");
++    tokio::spawn(async move {
++        let mut last: Option<i64> = None;
++        loop {
++            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
++            let (busy, total) = registry.isolate_workers();
++            let cost = if total == 0 {
++                0
++            } else {
++                (100i64 * busy as i64) / total as i64
++            };
++            if last == Some(cost) {
++                continue;
++            }
++            let token = match std::fs::read_to_string(
++                "/var/run/secrets/kubernetes.io/serviceaccount/token",
++            ) {
++                Ok(token) => token,
++                Err(e) => {
++                    tracing::debug!("[convex-funrun] pod-deletion-cost: token read failed: {e}");
++                    continue;
++                },
++            };
++            let body = format!(
++                "{{\"metadata\":{{\"annotations\":{{\"controller.kubernetes.io/pod-deletion-cost\":\"{cost}\"}}}}}}"
++            );
++            match client
++                .patch(&url)
++                .bearer_auth(token.trim())
++                .header(
++                    reqwest::header::CONTENT_TYPE,
++                    "application/strategic-merge-patch+json",
++                )
++                .body(body)
++                .send()
++                .await
++            {
++                Ok(resp) if resp.status().is_success() => {
++                    last = Some(cost);
++                    tracing::debug!(
++                        "[convex-funrun] pod-deletion-cost={cost} (isolates {busy}/{total})"
++                    );
++                },
++                Ok(resp) => {
++                    tracing::debug!("[convex-funrun] pod-deletion-cost patch: HTTP {}", resp.status())
++                },
++                Err(e) => tracing::debug!("[convex-funrun] pod-deletion-cost patch failed: {e}"),
++            }
++        }
++    });
 +}
 +
 +async fn wait_for_shutdown(mut shutdown_rx: watch::Receiver<bool>) {
@@ -1049,14 +1157,14 @@ index 000000000..a58397638
 +    {
 +        let _ = tokio::signal::ctrl_c().await;
 +    }
-+    tracing::info!("[convex-funrun] shutdown requested; draining gRPC connections");
++    tracing::info!("[convex-funrun] shutdown signal; readiness now 503, draining before gRPC stop");
 +}
 diff --git a/crates/funrun_server/src/service.rs b/crates/funrun_server/src/service.rs
 new file mode 100644
-index 000000000..760459c48
+index 000000000..fbc80637c
 --- /dev/null
 +++ b/crates/funrun_server/src/service.rs
-@@ -0,0 +1,652 @@
+@@ -0,0 +1,653 @@
 +use std::{
 +    collections::BTreeMap,
 +    pin::Pin,
@@ -1190,10 +1298,11 @@ index 000000000..760459c48
 +        instance_name: &str,
 +        metadata: &tonic::metadata::MetadataMap,
 +    ) -> Result<Arc<InstanceState<RT>>, Status> {
-+        let config = self
-+            .registry
-+            .instance_config(instance_name)
-+            .map_err(|e| Status::not_found(format!("funrun: {e:#}")))?;
++        let Ok(config) = self.registry.instance_config(instance_name) else {
++            return Err(Status::unauthenticated(
++                "funrun: missing or invalid deployment authorization",
++            ));
++        };
 +        let presented = metadata
 +            .get(FUNRUN_AUTH_METADATA_KEY)
 +            .and_then(|v| v.to_str().ok())
@@ -1711,10 +1820,10 @@ index 000000000..760459c48
 +}
 diff --git a/crates/funrun_server/src/snapshot.rs b/crates/funrun_server/src/snapshot.rs
 new file mode 100644
-index 000000000..f565390cd
+index 000000000..07c6ab5ea
 --- /dev/null
 +++ b/crates/funrun_server/src/snapshot.rs
-@@ -0,0 +1,625 @@
+@@ -0,0 +1,659 @@
 +use std::{
 +    collections::HashMap,
 +    sync::{
@@ -1761,7 +1870,9 @@ index 000000000..f565390cd
 +use keybroker::FunctionRunnerKeyBroker;
 +use metrics::{
 +    log_counter,
++    log_gauge,
 +    register_convex_counter,
++    register_convex_gauge,
 +};
 +use model::{
 +    database_globals::{
@@ -1797,6 +1908,14 @@ index 000000000..f565390cd
 +register_convex_counter!(
 +    FUNRUN_SNAPSHOT_REQUESTS_TOTAL,
 +    "Funrun snapshot_inputs calls; cache hit rate = 1 - (warm_hit + cold) / requests"
++);
++register_convex_gauge!(
++    FUNRUN_ISOLATE_BUSY_THREADS,
++    "Busy funrun V8 isolate worker threads (servicing a request) across the shared pool"
++);
++register_convex_gauge!(
++    FUNRUN_ISOLATE_TOTAL_THREADS,
++    "Total funrun V8 isolate worker threads in the shared pool (MAX_ISOLATE_WORKERS)"
 +);
 +
 +fn max_percent_per_client(num_tenants: usize) -> usize {
@@ -1836,6 +1955,7 @@ index 000000000..f565390cd
 +        let idle_ttl = Duration::from_secs(15 * 60);
 +        let states = Arc::new(Mutex::new(HashMap::new()));
 +        Self::spawn_eviction_worker(rt.clone(), states.clone(), idle_ttl);
++        Self::spawn_isolate_pool_sampler(rt.clone(), shared_isolate.clone());
 +        Ok(Self {
 +            rt,
 +            db: config.db,
@@ -1844,6 +1964,13 @@ index 000000000..f565390cd
 +            shared_isolate,
 +            states,
 +        })
++    }
++
++    pub fn isolate_workers(&self) -> (usize, usize) {
++        (
++            self.shared_isolate.active_isolate_workers(),
++            self.shared_isolate.max_isolate_workers(),
++        )
 +    }
 +
 +    pub fn instance_config(
@@ -1947,6 +2074,23 @@ index 000000000..f565390cd
 +            }
 +        });
 +    }
++
++    fn spawn_isolate_pool_sampler(rt: RT, shared_isolate: SharedIsolateResources<RT>) {
++        let worker_rt = rt.clone();
++        rt.spawn_background("funrun_isolate_pool_sampler", async move {
++            loop {
++                log_gauge(
++                    &FUNRUN_ISOLATE_TOTAL_THREADS,
++                    shared_isolate.max_isolate_workers() as f64,
++                );
++                log_gauge(
++                    &FUNRUN_ISOLATE_BUSY_THREADS,
++                    shared_isolate.active_isolate_workers() as f64,
++                );
++                worker_rt.wait(Duration::from_secs(2)).await;
++            }
++        });
++    }
 +}
 +
 +fn lookup_instance_config(
@@ -2017,7 +2161,6 @@ index 000000000..f565390cd
 +    }
 +}
 +
-+#[derive(Clone)]
 +pub struct InstanceState<RT: Runtime> {
 +    pub rt: RT,
 +    pub instance_name: String,

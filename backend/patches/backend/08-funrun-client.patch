@@ -68,7 +68,7 @@ index 48a574cf1..c7f888e86 100644
  /// convenience) from allowing browsers to make these requests.
  pub fn platform_api_cors() -> CorsLayer {
 diff --git a/crates/common/src/knobs.rs b/crates/common/src/knobs.rs
-index 8f0960f9a..ecefddc23 100644
+index 8f0960f9a..d36b1ead5 100644
 --- a/crates/common/src/knobs.rs
 +++ b/crates/common/src/knobs.rs
 @@ -409,6 +409,17 @@ pub static MAX_REPEATABLE_TIMESTAMP_IDLE_FREQUENCY: LazyLock<Duration> = LazyLoc
@@ -89,7 +89,7 @@ index 8f0960f9a..ecefddc23 100644
  /// The maximum delay between runs of retention, this is now only used for error
  /// backoff and the initial delay when backend is started.
  pub static MAX_RETENTION_DELAY_SECONDS: LazyLock<Duration> =
-@@ -1059,6 +1070,16 @@ pub static FUNRUN_MODULE_QUEUE_SIZE: LazyLock<usize> =
+@@ -1059,28 +1070,32 @@ pub static FUNRUN_MODULE_QUEUE_SIZE: LazyLock<usize> =
  pub static FUNRUN_CODE_CACHE_SIZE: LazyLock<u64> =
      LazyLock::new(|| env_config("FUNRUN_CODE_CACHE_SIZE", 500_000_000));
  
@@ -106,18 +106,39 @@ index 8f0960f9a..ecefddc23 100644
  /// The maximum number of fetch clients Funrun would create.
  pub static FUNRUN_FETCH_CLIENT_CACHE_SIZE: LazyLock<usize> =
      LazyLock::new(|| env_config("FUNRUN_FETCH_CLIENT_CACHE_SIZE", 100));
-@@ -1082,6 +1103,11 @@ pub static FUNRUN_CLIENT_MAX_REQUESTS_PER_UPSTREAM: LazyLock<usize> =
- pub static FUNRUN_CLIENT_MAX_RETRIES: LazyLock<usize> =
-     LazyLock::new(|| env_config("FUNRUN_CLIENT_MAX_RETRIES", 4));
  
+-/// The maximum number of concurrent requests a single client can make to a
+-/// single Funrun server.
+-/// NOTE: When changing this value, ensure that the following parameters
+-/// for pro satisfy this inequality. This makes sure that if one funrun instance
+-/// is down, we still have enough capacity to satisfy requests if a backend is
+-/// maxing out its concurrent function call limits.
+-///
+-/// max_concurrent_queries +
+-/// max_concurrent_mutations + max_concurrent_v8_actions +
+-/// max_concurrent_http_actions < (number of funrun nodes - 1) *
+-/// FUNRUN_CLIENT_MAX_REQUESTS_PER_UPSTREAM
+-pub static FUNRUN_CLIENT_MAX_REQUESTS_PER_UPSTREAM: LazyLock<usize> =
+-    LazyLock::new(|| env_config("FUNRUN_CLIENT_MAX_REQUESTS_PER_UPSTREAM", 15));
+-
+-/// The maximum number of retries a Funrun client will perform. The client only
+-/// retries overloaded errors.
++/// Maximum number of initial-connect retries the funrun client performs on a
++/// retryable RPC error (Unavailable for any udf type; DeadlineExceeded for
++/// idempotent query/mutation) before giving up. Only the initial unary->stream
++/// call is retried (before any work begins server-side). Total attempts =
++/// retries + 1.
+ pub static FUNRUN_CLIENT_MAX_RETRIES: LazyLock<usize> =
+-    LazyLock::new(|| env_config("FUNRUN_CLIENT_MAX_RETRIES", 4));
++    LazyLock::new(|| env_config("FUNRUN_CLIENT_MAX_RETRIES", 2));
++
 +/// How often the funrun client re-resolves the funrun service DNS to pick up
 +/// added/removed pods and rebalance connections across them.
 +pub static FUNRUN_LB_REFRESH_INTERVAL: LazyLock<Duration> =
 +    LazyLock::new(|| Duration::from_secs(env_config("FUNRUN_LB_REFRESH_INTERVAL_SECONDS", 10)));
-+
+ 
  /// Value between 1 and 100 representing the percent of a the shared scheduler's
  /// worker pool that a single client can use.
- pub static FUNRUN_SCHEDULER_MAX_PERCENT_PER_CLIENT: LazyLock<usize> =
 diff --git a/crates/function_runner/Cargo.toml b/crates/function_runner/Cargo.toml
 index e02daa22b..d1d9b6348 100644
 --- a/crates/function_runner/Cargo.toml
@@ -384,10 +405,10 @@ index 000000000..17e83f819
 +}
 diff --git a/crates/function_runner/src/remote.rs b/crates/function_runner/src/remote.rs
 new file mode 100644
-index 000000000..f6ab1cf72
+index 000000000..871dbd9c5
 --- /dev/null
 +++ b/crates/function_runner/src/remote.rs
-@@ -0,0 +1,765 @@
+@@ -0,0 +1,764 @@
 +use std::{
 +    collections::{
 +        BTreeMap,
@@ -528,17 +549,12 @@ index 000000000..f6ab1cf72
 +    Ok(Some(config))
 +}
 +
-+fn parse_funrun_target(addr: &str) -> anyhow::Result<(bool, String, u16)> {
-+    let (is_https, rest) = match addr.strip_prefix("https://") {
-+        Some(rest) => (true, rest),
-+        None => (
-+            false,
-+            addr.strip_prefix("http://").with_context(|| {
-+                format!("CONVEX_FUNRUN_ADDR must start with http:// or https://: {addr}")
-+            })?,
-+        ),
-+    };
-+    let rest = rest.trim_end_matches('/');
++fn parse_funrun_target(addr: &str) -> anyhow::Result<(String, u16)> {
++    let rest = addr
++        .strip_prefix("https://")
++        .or_else(|| addr.strip_prefix("http://"))
++        .unwrap_or(addr)
++        .trim_end_matches('/');
 +    let (host, port) = rest
 +        .rsplit_once(':')
 +        .with_context(|| format!("CONVEX_FUNRUN_ADDR must include a port: {addr}"))?;
@@ -546,7 +562,7 @@ index 000000000..f6ab1cf72
 +        .parse()
 +        .with_context(|| format!("invalid funrun port in {addr}"))?;
 +    anyhow::ensure!(!host.is_empty(), "empty funrun host in {addr}");
-+    Ok((is_https, host.to_string(), port))
++    Ok((host.to_string(), port))
 +}
 +
 +const FUNRUN_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -598,8 +614,8 @@ index 000000000..f6ab1cf72
 +                 use only for local/dev"
 +            );
 +        }
-+        let (is_https, host, port) = parse_funrun_target(&funrun_addr)?;
-+        let scheme = if is_https { "https" } else { "http" };
++        let (host, port) = parse_funrun_target(&funrun_addr)?;
++        let scheme = if tls_config.is_some() { "https" } else { "http" };
 +        let channel = {
 +            let (channel, tx) = Channel::balance_channel::<SocketAddr>(64);
 +            let initial: BTreeSet<SocketAddr> = (host.as_str(), port)
@@ -675,10 +691,6 @@ index 000000000..f6ab1cf72
 +        })
 +    }
 +
-+    fn pick_channel(&self) -> Channel {
-+        self.channel.clone()
-+    }
-+
 +    fn funrun_auth_header(&self) -> String {
 +        let unix_seconds = self.rt.unix_timestamp().as_secs();
 +        funrun_auth_header(&self.instance_secret, &self.deployment.name, unix_seconds)
@@ -695,11 +707,14 @@ index 000000000..f6ab1cf72
 +        Ok(request)
 +    }
 +
-+    fn is_retryable_initial_rpc(status: &tonic::Status) -> bool {
-+        matches!(
-+            status.code(),
-+            tonic::Code::Unavailable | tonic::Code::DeadlineExceeded
-+        )
++    fn is_retryable_initial_rpc(udf_type: UdfType, status: &tonic::Status) -> bool {
++        match status.code() {
++            tonic::Code::Unavailable => true,
++            tonic::Code::DeadlineExceeded => {
++                matches!(udf_type, UdfType::Query | UdfType::Mutation)
++            },
++            _ => false,
++        }
 +    }
 +
 +    async fn run_function_remote(
@@ -768,23 +783,28 @@ index 000000000..f6ab1cf72
 +            callback_token: Some(callback_token),
 +            auth_header,
 +        };
-+        let mut initial_attempt = 0;
++        let max_attempts = (*common::knobs::FUNRUN_CLIENT_MAX_RETRIES as u32).saturating_add(1);
++        let mut attempt: u32 = 0;
++        let mut request = Some(request);
 +        let mut stream = loop {
-+            let mut client = pb::funrun::funrun_client::FunrunClient::new(self.pick_channel())
++            let mut client = pb::funrun::funrun_client::FunrunClient::new(self.channel.clone())
 +                .max_decoding_message_size(MAX_GRPC_MESSAGE_BYTES)
 +                .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES);
-+            match client
-+                .run_function(self.authenticated_request(request.clone())?)
-+                .await
-+            {
++            let last_attempt = attempt + 1 >= max_attempts;
++            let req = if last_attempt {
++                request.take().expect("funrun request already consumed")
++            } else {
++                request.clone().expect("funrun request missing")
++            };
++            match client.run_function(self.authenticated_request(req)?).await {
 +                Ok(response) => break response.into_inner(),
 +                Err(status)
-+                    if udf_type == UdfType::Query
-+                        && initial_attempt == 0
-+                        && Self::is_retryable_initial_rpc(&status) =>
++                    if !last_attempt && Self::is_retryable_initial_rpc(udf_type, &status) =>
 +                {
-+                    initial_attempt += 1;
-+                    self.rt.wait(Duration::from_millis(100)).await;
++                    attempt += 1;
++                    self.rt
++                        .wait(Duration::from_millis(50 * u64::from(attempt)))
++                        .await;
 +                },
 +                Err(status) => {
 +                    return Err(status.into_anyhow()).context("funrun RunFunction failed");
@@ -912,7 +932,7 @@ index 000000000..f6ab1cf72
 +            http_request_head: Some(request_head.clone().into()),
 +            http_request_body,
 +        };
-+        let mut client = pb::funrun::funrun_client::FunrunClient::new(self.pick_channel())
++        let mut client = pb::funrun::funrun_client::FunrunClient::new(self.channel.clone())
 +            .max_decoding_message_size(MAX_GRPC_MESSAGE_BYTES)
 +            .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES);
 +        let mut stream = client
@@ -1154,10 +1174,10 @@ index 000000000..f6ab1cf72
 +    fn set_action_callbacks(&self, _action_callbacks: Arc<dyn ActionCallbacks>) {}
 +}
 diff --git a/crates/function_runner/src/server.rs b/crates/function_runner/src/server.rs
-index 3ed5f6694..d32e0ceb1 100644
+index 3ed5f6694..b690486c8 100644
 --- a/crates/function_runner/src/server.rs
 +++ b/crates/function_runner/src/server.rs
-@@ -188,6 +188,43 @@ pub struct FunctionRunnerCore<RT: Runtime, S: StorageForDeployment<RT>> {
+@@ -188,6 +188,47 @@ pub struct FunctionRunnerCore<RT: Runtime, S: StorageForDeployment<RT>> {
      isolate_client: IsolateClient<RT>,
  }
  
@@ -1196,12 +1216,16 @@ index 3ed5f6694..d32e0ceb1 100644
 +    pub fn max_isolate_workers(&self) -> usize {
 +        self.isolate_client.max_workers()
 +    }
++
++    pub fn active_isolate_workers(&self) -> usize {
++        self.isolate_client.active_workers()
++    }
 +}
 +
  impl<RT: Runtime, S: StorageForDeployment<RT>> Clone for FunctionRunnerCore<RT, S> {
      fn clone(&self) -> Self {
          Self {
-@@ -232,24 +269,29 @@ impl<RT: Runtime, S: StorageForDeployment<RT>> FunctionRunnerCore<RT, S> {
+@@ -232,24 +273,29 @@ impl<RT: Runtime, S: StorageForDeployment<RT>> FunctionRunnerCore<RT, S> {
          max_percent_per_client: usize,
          max_isolate_workers: usize,
      ) -> anyhow::Result<Self> {
@@ -1252,10 +1276,10 @@ index 05ebfbbf5..32a0d4b1a 100644
  pub struct UdfRequest<RT: Runtime> {
 diff --git a/crates/keybroker/src/funrun_auth.rs b/crates/keybroker/src/funrun_auth.rs
 new file mode 100644
-index 000000000..a36670eed
+index 000000000..d00415a92
 --- /dev/null
 +++ b/crates/keybroker/src/funrun_auth.rs
-@@ -0,0 +1,153 @@
+@@ -0,0 +1,159 @@
 +use aws_lc_rs::hmac;
 +
 +use crate::DeploymentSecret;
@@ -1324,6 +1348,12 @@ index 000000000..a36670eed
 +
 +pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 +    aws_lc_rs::constant_time::verify_slices_are_equal(a, b).is_ok()
++}
++
++pub fn constant_time_eq_sha256(a: &[u8], b: &[u8]) -> bool {
++    let da = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, a);
++    let db = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, b);
++    constant_time_eq(da.as_ref(), db.as_ref())
 +}
 +
 +#[cfg(test)]
@@ -1410,7 +1440,7 @@ index 000000000..a36670eed
 +    }
 +}
 diff --git a/crates/keybroker/src/lib.rs b/crates/keybroker/src/lib.rs
-index eeeab09e9..b8e90f4eb 100644
+index eeeab09e9..30f29bb10 100644
 --- a/crates/keybroker/src/lib.rs
 +++ b/crates/keybroker/src/lib.rs
 @@ -4,6 +4,7 @@
@@ -1421,12 +1451,13 @@ index eeeab09e9..b8e90f4eb 100644
  mod legacy_encryptor;
  mod metrics;
  mod operations;
-@@ -27,6 +28,12 @@ pub use self::{
+@@ -27,6 +28,13 @@ pub use self::{
          UserIdentity,
      },
      encryptor::Encryptor,
 +    funrun_auth::{
 +        constant_time_eq,
++        constant_time_eq_sha256,
 +        funrun_auth_header,
 +        verify_funrun_auth_header,
 +        FUNRUN_AUTH_METADATA_KEY,
