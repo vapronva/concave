@@ -57,10 +57,10 @@ index 000000000..8375eb65c
 +workspace = true
 diff --git a/crates/funrun_server/src/callbacks.rs b/crates/funrun_server/src/callbacks.rs
 new file mode 100644
-index 000000000..21cc060b0
+index 000000000..d41a71003
 --- /dev/null
 +++ b/crates/funrun_server/src/callbacks.rs
-@@ -0,0 +1,539 @@
+@@ -0,0 +1,537 @@
 +use anyhow::Context;
 +use async_trait::async_trait;
 +use common::{
@@ -573,7 +573,6 @@ index 000000000..21cc060b0
 +            success,
 +            RunFunctionResponse::Success { value } if value == json!(42)
 +        ));
-+
 +        let error: RunFunctionResponse = serde_json::from_value(json!({
 +            "status": "error",
 +            "errorMessage": "nope",
@@ -594,7 +593,6 @@ index 000000000..21cc060b0
 +        let custom = build_js_error("custom".to_string(), Some(json!({"code": "E_CUSTOM"})));
 +        assert_eq!(custom.message, "custom");
 +        assert!(custom.custom_data.is_some());
-+
 +        let plain = build_js_error("plain".to_string(), Some(json!({"$invalid": 1})));
 +        assert_eq!(plain.message, "plain");
 +        assert!(plain.custom_data.is_none());
@@ -890,10 +888,10 @@ index 000000000..7713e0faa
 +}
 diff --git a/crates/funrun_server/src/main.rs b/crates/funrun_server/src/main.rs
 new file mode 100644
-index 000000000..f595f373c
+index 000000000..c73fc346c
 --- /dev/null
 +++ b/crates/funrun_server/src/main.rs
-@@ -0,0 +1,265 @@
+@@ -0,0 +1,271 @@
 +use std::sync::{
 +    atomic::{
 +        AtomicBool,
@@ -1080,7 +1078,9 @@ index 000000000..f595f373c
 +        }) {
 +        Ok(client) => client,
 +        Err(e) => {
-+            tracing::warn!("[convex-funrun] pod-deletion-cost: no in-cluster API client ({e}); disabled");
++            tracing::warn!(
++                "[convex-funrun] pod-deletion-cost: no in-cluster API client ({e}); disabled"
++            );
 +            return;
 +        },
 +    };
@@ -1109,7 +1109,8 @@ index 000000000..f595f373c
 +                },
 +            };
 +            let body = format!(
-+                "{{\"metadata\":{{\"annotations\":{{\"controller.kubernetes.io/pod-deletion-cost\":\"{cost}\"}}}}}}"
++                "{{\"metadata\":{{\"annotations\":{{\"controller.kubernetes.io/pod-deletion-cost\"\
++                 :\"{cost}\"}}}}}}"
 +            );
 +            match client
 +                .patch(&url)
@@ -1129,7 +1130,10 @@ index 000000000..f595f373c
 +                    );
 +                },
 +                Ok(resp) => {
-+                    tracing::debug!("[convex-funrun] pod-deletion-cost patch: HTTP {}", resp.status())
++                    tracing::debug!(
++                        "[convex-funrun] pod-deletion-cost patch: HTTP {}",
++                        resp.status()
++                    )
 +                },
 +                Err(e) => tracing::debug!("[convex-funrun] pod-deletion-cost patch failed: {e}"),
 +            }
@@ -1820,7 +1824,7 @@ index 000000000..fbc80637c
 +}
 diff --git a/crates/funrun_server/src/snapshot.rs b/crates/funrun_server/src/snapshot.rs
 new file mode 100644
-index 000000000..02e29ee82
+index 000000000..0da3afa15
 --- /dev/null
 +++ b/crates/funrun_server/src/snapshot.rs
 @@ -0,0 +1,659 @@
@@ -1894,19 +1898,19 @@ index 000000000..02e29ee82
 +};
 +
 +register_convex_counter!(
-+    FUNRUN_SNAPSHOT_WARM_HIT_TOTAL,
++    SNAPSHOT_WARM_HIT_TOTAL,
 +    "Funrun requests served from the warm follower snapshot"
 +);
 +register_convex_counter!(
-+    FUNRUN_SNAPSHOT_COLD_TOTAL,
++    SNAPSHOT_COLD_TOTAL,
 +    "Funrun requests that missed the warm snapshot and entered the cold-load path"
 +);
 +register_convex_counter!(
-+    FUNRUN_SNAPSHOT_COLD_LOAD_TOTAL,
++    SNAPSHOT_COLD_LOAD_TOTAL,
 +    "Funrun cold snapshot loads executed against Postgres (snapshot cache misses)"
 +);
 +register_convex_counter!(
-+    FUNRUN_SNAPSHOT_REQUESTS_TOTAL,
++    SNAPSHOT_REQUESTS_TOTAL,
 +    "Funrun snapshot_inputs calls; cache hit rate = 1 - (warm_hit + cold) / requests"
 +);
 +register_convex_gauge!(
@@ -2290,14 +2294,14 @@ index 000000000..02e29ee82
 +    }
 +
 +    pub async fn snapshot_inputs(&self, ts: RepeatableTimestamp) -> anyhow::Result<SnapshotInputs> {
-+        log_counter(&FUNRUN_SNAPSHOT_REQUESTS_TOTAL, 1);
++        log_counter(&SNAPSHOT_REQUESTS_TOTAL, 1);
 +        let repeatable_persistence =
 +            RepeatablePersistence::new(self.reader.clone(), ts, self.retention_validator.clone());
 +        let index_reader: Arc<dyn IndexReader> =
 +            Arc::new(repeatable_persistence.read_snapshot(ts)?);
 +        match self.database.snapshot(ts) {
 +            Ok(snapshot) => {
-+                log_counter(&FUNRUN_SNAPSHOT_WARM_HIT_TOTAL, 1);
++                log_counter(&SNAPSHOT_WARM_HIT_TOTAL, 1);
 +                let bootstrap_metadata = self.database.bootstrap_metadata.clone();
 +                let table_count_snapshot: Arc<dyn TableCountSnapshot> =
 +                    match snapshot.table_summaries.clone() {
@@ -2321,7 +2325,7 @@ index 000000000..02e29ee82
 +                })
 +            },
 +            Err(warm_err) => {
-+                log_counter(&FUNRUN_SNAPSHOT_COLD_TOTAL, 1);
++                log_counter(&SNAPSHOT_COLD_TOTAL, 1);
 +                tracing::debug!(
 +                    "[convex-funrun] warm snapshot miss at ts {} ({warm_err:#}); cold-loading",
 +                    *ts
@@ -2363,7 +2367,7 @@ index 000000000..02e29ee82
 +        ts: RepeatableTimestamp,
 +        index_reader: Arc<dyn IndexReader>,
 +    ) -> anyhow::Result<SnapshotInputs> {
-+        log_counter(&FUNRUN_SNAPSHOT_COLD_LOAD_TOTAL, 1);
++        log_counter(&SNAPSHOT_COLD_LOAD_TOTAL, 1);
 +        let mut snapshot = DatabaseSnapshot::load(
 +            self.rt.clone(),
 +            self.reader.clone(),

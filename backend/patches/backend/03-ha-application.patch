@@ -11,7 +11,7 @@ index add0ec6e6..462b775c5 100644
                          outcome.result.is_ok(),
                          usage_stats,
 diff --git a/crates/application/src/lib.rs b/crates/application/src/lib.rs
-index f81b976ac..17c49408a 100644
+index f81b976ac..8bdea2393 100644
 --- a/crates/application/src/lib.rs
 +++ b/crates/application/src/lib.rs
 @@ -132,6 +132,7 @@ use common::{
@@ -132,7 +132,7 @@ index f81b976ac..17c49408a 100644
          node_actions: Actions<RT>,
          log_visibility: Arc<dyn LogVisibility<RT>>,
          app_auth: Arc<ApplicationAuth<RT>>,
-@@ -704,6 +738,145 @@ impl<RT: Runtime> Application<RT> {
+@@ -704,6 +738,149 @@ impl<RT: Runtime> Application<RT> {
              CONVEX_SITE.clone() => convex_site.parse()?
          };
  
@@ -266,6 +266,10 @@ index f81b976ac..17c49408a 100644
 +        lease_lost_shutdown: ShutdownSignal,
 +        deleted_tablet_receiver: tokio::sync::mpsc::Receiver<TabletId>,
 +    ) -> anyhow::Result<()> {
++        anyhow::ensure!(
++            self.workers.lock().is_none(),
++            "leader workers are already running"
++        );
 +        let runtime = &self.runtime;
 +        let database = &self.database;
 +        let application_storage = &self.application_storage;
@@ -278,7 +282,7 @@ index f81b976ac..17c49408a 100644
          let mut index_worker = Arc::new(Mutex::new(None));
          if *ENABLE_INDEX_BACKFILL {
              let index_worker_fut = IndexWorker::new(
-@@ -728,12 +901,12 @@ impl<RT: Runtime> Application<RT> {
+@@ -728,12 +905,12 @@ impl<RT: Runtime> Application<RT> {
              database.clone(),
              persistence.reader(),
              application_storage.search_storage.clone(),
@@ -294,7 +298,7 @@ index f81b976ac..17c49408a 100644
          let table_summary_worker = TableSummaryWorker::start(
              runtime.clone(),
              database.clone(),
-@@ -755,74 +928,6 @@ impl<RT: Runtime> Application<RT> {
+@@ -755,74 +932,6 @@ impl<RT: Runtime> Application<RT> {
              runtime.spawn("system_table_cleanup_worker", system_table_cleanup_worker),
          ));
  
@@ -369,7 +373,7 @@ index f81b976ac..17c49408a 100644
          let scheduled_job_runner = ScheduledJobRunner::start(
              runtime.clone(),
              deployment_name.clone(),
-@@ -847,7 +952,7 @@ impl<RT: Runtime> Application<RT> {
+@@ -847,7 +956,7 @@ impl<RT: Runtime> Application<RT> {
              database.clone(),
              application_storage.exports_storage.clone(),
              application_storage.files_storage.clone(),
@@ -378,7 +382,7 @@ index f81b976ac..17c49408a 100644
              usage_counter.clone(),
              deployment_name.clone(),
          );
-@@ -884,7 +989,7 @@ impl<RT: Runtime> Application<RT> {
+@@ -884,7 +993,7 @@ impl<RT: Runtime> Application<RT> {
              deployment_name.clone(),
          );
  
@@ -387,7 +391,7 @@ index f81b976ac..17c49408a 100644
              usage_gauges_tracking_worker,
              scheduled_job_runner,
              cron_job_executor,
-@@ -899,33 +1004,80 @@ impl<RT: Runtime> Application<RT> {
+@@ -899,33 +1008,80 @@ impl<RT: Runtime> Application<RT> {
              system_table_cleanup_worker,
              migration_worker,
          };
@@ -488,7 +492,7 @@ index f81b976ac..17c49408a 100644
      pub fn modules_storage(&self) -> &Arc<dyn Storage> {
          &self.application_storage.modules_storage
      }
-@@ -3700,7 +3852,10 @@ impl<RT: Runtime> Application<RT> {
+@@ -3700,7 +3856,10 @@ impl<RT: Runtime> Application<RT> {
      }
  
      pub async fn shutdown(&self) -> anyhow::Result<()> {

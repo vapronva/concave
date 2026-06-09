@@ -68,7 +68,7 @@ index 48a574cf1..c7f888e86 100644
  /// convenience) from allowing browsers to make these requests.
  pub fn platform_api_cors() -> CorsLayer {
 diff --git a/crates/common/src/knobs.rs b/crates/common/src/knobs.rs
-index 8f0960f9a..d36b1ead5 100644
+index 8f0960f9a..5ef2f77be 100644
 --- a/crates/common/src/knobs.rs
 +++ b/crates/common/src/knobs.rs
 @@ -409,6 +409,17 @@ pub static MAX_REPEATABLE_TIMESTAMP_IDLE_FREQUENCY: LazyLock<Duration> = LazyLoc
@@ -89,7 +89,19 @@ index 8f0960f9a..d36b1ead5 100644
  /// The maximum delay between runs of retention, this is now only used for error
  /// backoff and the initial delay when backend is started.
  pub static MAX_RETENTION_DELAY_SECONDS: LazyLock<Duration> =
-@@ -1059,28 +1070,32 @@ pub static FUNRUN_MODULE_QUEUE_SIZE: LazyLock<usize> =
+@@ -725,6 +736,11 @@ pub static ISOLATE_QUEUE_SIZE: LazyLock<usize> =
+ pub static MAX_ISOLATE_WORKERS: LazyLock<usize> =
+     LazyLock::new(|| env_config("MAX_ISOLATE_WORKERS", 300));
+ 
++/// Number of isolate worker threads (with their V8 isolates) to spawn eagerly
++/// at startup, clamped to MAX_ISOLATE_WORKERS. 0 = create lazily on demand.
++pub static ISOLATE_PRELOAD_WORKERS: LazyLock<usize> =
++    LazyLock::new(|| env_config("ISOLATE_PRELOAD_WORKERS", 0));
++
+ /// The size of the pending commits in the committer queue. This is a FIFO
+ /// queue, so if the queue is too large, we run into a risk of all requests
+ /// waiting too long and no requests going through during overload. The size of
+@@ -1059,28 +1075,32 @@ pub static FUNRUN_MODULE_QUEUE_SIZE: LazyLock<usize> =
  pub static FUNRUN_CODE_CACHE_SIZE: LazyLock<u64> =
      LazyLock::new(|| env_config("FUNRUN_CODE_CACHE_SIZE", 500_000_000));
  
@@ -405,10 +417,10 @@ index 000000000..17e83f819
 +}
 diff --git a/crates/function_runner/src/remote.rs b/crates/function_runner/src/remote.rs
 new file mode 100644
-index 000000000..871dbd9c5
+index 000000000..3cc911403
 --- /dev/null
 +++ b/crates/function_runner/src/remote.rs
-@@ -0,0 +1,764 @@
+@@ -0,0 +1,769 @@
 +use std::{
 +    collections::{
 +        BTreeMap,
@@ -615,7 +627,11 @@ index 000000000..871dbd9c5
 +            );
 +        }
 +        let (host, port) = parse_funrun_target(&funrun_addr)?;
-+        let scheme = if tls_config.is_some() { "https" } else { "http" };
++        let scheme = if tls_config.is_some() {
++            "https"
++        } else {
++            "http"
++        };
 +        let channel = {
 +            let (channel, tx) = Channel::balance_channel::<SocketAddr>(64);
 +            let initial: BTreeSet<SocketAddr> = (host.as_str(), port)
@@ -708,10 +724,11 @@ index 000000000..871dbd9c5
 +    }
 +
 +    fn is_retryable_initial_rpc(udf_type: UdfType, status: &tonic::Status) -> bool {
++        let side_effect_free = matches!(udf_type, UdfType::Query | UdfType::Mutation);
 +        match status.code() {
-+            tonic::Code::Unavailable => true,
-+            tonic::Code::DeadlineExceeded => {
-+                matches!(udf_type, UdfType::Query | UdfType::Mutation)
++            tonic::Code::Unavailable | tonic::Code::DeadlineExceeded => side_effect_free,
++            tonic::Code::ResourceExhausted => {
++                side_effect_free && status.message().contains("WorkerOverloaded")
 +            },
 +            _ => false,
 +        }
@@ -1263,10 +1280,18 @@ index 3ed5f6694..b690486c8 100644
  
      pub fn concurrency_limiter(&self) -> &isolate::ConcurrencyLimiter {
 diff --git a/crates/isolate/src/client.rs b/crates/isolate/src/client.rs
-index 05ebfbbf5..32a0d4b1a 100644
+index 05ebfbbf5..596bf2790 100644
 --- a/crates/isolate/src/client.rs
 +++ b/crates/isolate/src/client.rs
-@@ -195,7 +195,6 @@ impl IsolateConfig {
+@@ -58,6 +58,7 @@ use common::{
+         ISOLATE_IDLE_TIMEOUT,
+         ISOLATE_MAX_LIFETIME,
+         ISOLATE_MAX_USER_HEAP_SIZE,
++        ISOLATE_PRELOAD_WORKERS,
+         ISOLATE_QUEUE_SIZE,
+         REUSE_ISOLATES,
+         V8_THREADS,
+@@ -195,7 +196,6 @@ impl IsolateConfig {
              limiter,
          }
      }
@@ -1274,6 +1299,95 @@ index 05ebfbbf5..32a0d4b1a 100644
  }
  
  pub struct UdfRequest<RT: Runtime> {
+@@ -1169,6 +1169,9 @@ pub struct SharedIsolateScheduler<RT: Runtime, W: IsolateWorker<RT>> {
+     /// recreated and there will be no penalty for reassigning this worker to a
+     /// new client.
+     available_workers: HashMap<String, VecDeque<IdleWorkerState>>,
++    /// Workers spawned at startup (`ISOLATE_PRELOAD_WORKERS`) that have not
++    /// yet been assigned to any client. Handed out before growing the pool.
++    preloaded_workers: VecDeque<usize>,
+     /// Set of futures awaiting a response from an active worker.
+     in_progress_workers: FuturesUnordered<oneshot::Receiver<ActiveWorkerState>>,
+     /// Counts the number of active workers per client. Should only contain a
+@@ -1208,6 +1211,7 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
+             in_progress_count: HashMap::new(),
+             active_workers,
+             available_workers: HashMap::new(),
++            preloaded_workers: VecDeque::new(),
+             max_workers,
+             handles,
+             max_percent_per_client,
+@@ -1251,6 +1255,10 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
+ 
+     pub async fn run(mut self, receiver: CoDelQueueReceiver<RT, Request<RT>>) {
+         log_pool_max(self.worker.config().name, self.max_workers);
++        for _ in 0..(*ISOLATE_PRELOAD_WORKERS).min(self.max_workers) {
++            let worker_id = self.spawn_worker();
++            self.preloaded_workers.push_back(worker_id);
++        }
+         let mut receiver = receiver.fuse();
+         let mut report_stats = self.rt.wait(*HEAP_WORKER_REPORT_INTERVAL_SECONDS);
+         loop {
+@@ -1351,26 +1359,15 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
+             }
+             return Some(worker.worker_id);
+         }
++        // Prefer a preloaded, never-assigned worker: its isolate is already
++        // built and using it costs no client-change recreate.
++        if let Some(worker_id) = self.preloaded_workers.pop_front() {
++            return Some(worker_id);
++        }
+         // If we've recently started up and haven't yet created `max_workers` threads,
+         // create a new worker instead of "stealing" some other client's worker.
+         if self.worker_senders.len() < self.max_workers {
+-            let new_worker = self.worker.clone();
+-            let heap_stats = SharedIsolateHeapStats::new();
+-            let heap_stats_ = heap_stats.clone();
+-            let (work_sender, work_receiver) = mpsc::channel(1);
+-            let handle = self.rt.spawn_thread("isolate", move || {
+-                new_worker.service_requests(work_receiver, heap_stats_)
+-            });
+-            self.worker_senders.push(work_sender);
+-            self.handles
+-                .lock()
+-                .push(IsolateWorkerHandle { handle, heap_stats });
+-            tracing::info!(
+-                "Created {} isolate worker {}",
+-                self.worker.config().name,
+-                self.worker_senders.len() - 1
+-            );
+-            return Some(self.worker_senders.len() - 1);
++            return Some(self.spawn_worker());
+         }
+         // No existing worker for this client and we've already started the max number
+         // of workers -- just grab the least recently used worker. This worker is least
+@@ -1413,6 +1410,26 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
+         Some(worker_id.worker_id)
+     }
+ 
++    fn spawn_worker(&mut self) -> usize {
++        let new_worker = self.worker.clone();
++        let heap_stats = SharedIsolateHeapStats::new();
++        let heap_stats_ = heap_stats.clone();
++        let (work_sender, work_receiver) = mpsc::channel(1);
++        let handle = self.rt.spawn_thread("isolate", move || {
++            new_worker.service_requests(work_receiver, heap_stats_)
++        });
++        self.worker_senders.push(work_sender);
++        self.handles
++            .lock()
++            .push(IsolateWorkerHandle { handle, heap_stats });
++        tracing::info!(
++            "Created {} isolate worker {}",
++            self.worker.config().name,
++            self.worker_senders.len() - 1
++        );
++        self.worker_senders.len() - 1
++    }
++
+     fn aggregate_heap_stats(&self) -> IsolateHeapStats {
+         let mut total = IsolateHeapStats::default();
+         for handle in self.handles.lock().iter() {
 diff --git a/crates/keybroker/src/funrun_auth.rs b/crates/keybroker/src/funrun_auth.rs
 new file mode 100644
 index 000000000..d00415a92

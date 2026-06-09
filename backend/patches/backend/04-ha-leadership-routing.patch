@@ -28,7 +28,7 @@ index 986cfe59a..e7da231d6 100644
  }
 diff --git a/crates/local_backend/src/leadership.rs b/crates/local_backend/src/leadership.rs
 new file mode 100644
-index 000000000..c8c7c7355
+index 000000000..e4ee2ad54
 --- /dev/null
 +++ b/crates/local_backend/src/leadership.rs
 @@ -0,0 +1,792 @@
@@ -220,7 +220,7 @@ index 000000000..c8c7c7355
 +
 +#[derive(Clone)]
 +pub struct LeaderHandle {
-+    pub rw_persistence: Arc<parking_lot::Mutex<Option<Arc<dyn Persistence>>>>,
++    rw_persistence: Arc<parking_lot::Mutex<Option<Arc<dyn Persistence>>>>,
 +    pub preempt_signal: ShutdownSignal,
 +}
 +
@@ -378,6 +378,7 @@ index 000000000..c8c7c7355
 +        },
 +    };
 +    tracing::info!("[concave] promotion lease acquired; promoting in-process");
++    install_lease_lost_handler(&st, rw_persistence.clone());
 +    match st
 +        .application
 +        .become_leader(
@@ -388,8 +389,7 @@ index 000000000..c8c7c7355
 +        .await
 +    {
 +        Ok(()) => {
-+            st.leader_handle.set_rw_persistence(rw_persistence.clone());
-+            install_lease_lost_handler(&st, rw_persistence);
++            st.leader_handle.set_rw_persistence(rw_persistence);
 +            if st.role.finish_promotion_success() {
 +                tracing::info!("[concave] promotion succeeded; now serving as leader");
 +            } else {
@@ -825,7 +825,7 @@ index 000000000..c8c7c7355
 +    }
 +}
 diff --git a/crates/local_backend/src/router.rs b/crates/local_backend/src/router.rs
-index 5e8fdcc1d..a53b7c0ca 100644
+index 5e8fdcc1d..c42222cfc 100644
 --- a/crates/local_backend/src/router.rs
 +++ b/crates/local_backend/src/router.rs
 @@ -1,6 +1,9 @@
@@ -919,7 +919,7 @@ index 5e8fdcc1d..a53b7c0ca 100644
          .route(
              "/",
              get(|| async { "This Convex deployment is running. See https://docs.convex.dev/." }),
-@@ -590,18 +603,66 @@ where
+@@ -590,18 +603,68 @@ where
          .route("/get_table_column_names", get(get_table_column_names))
  }
  
@@ -958,10 +958,12 @@ index 5e8fdcc1d..a53b7c0ca 100644
 +                        if matches!(url.scheme(), "http" | "https")
 +                            && url.path() == "/"
 +                            && url.query().is_none()
-+                            && url.fragment().is_none()
-+                            && s != "*" =>
++                            && url.fragment().is_none() =>
 +                    {
-+                        s.parse::<http::HeaderValue>().ok()
++                        url.origin()
++                            .ascii_serialization()
++                            .parse::<http::HeaderValue>()
++                            .ok()
 +                    },
 +                    Ok(_) => {
 +                        tracing::warn!(

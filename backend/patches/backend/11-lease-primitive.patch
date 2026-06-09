@@ -196,18 +196,14 @@ index cce12606d..941d5fde1 100644
      /// still held, otherwise return `LeaseLostError`.
      ///
 diff --git a/crates/postgres/src/sql.rs b/crates/postgres/src/sql.rs
-index 5fc5d0a2e..b7cedda60 100644
+index 5fc5d0a2e..45fbd62da 100644
 --- a/crates/postgres/src/sql.rs
 +++ b/crates/postgres/src/sql.rs
-@@ -759,12 +759,26 @@ pub const fn advisory_lease_check(multitenant: bool) -> &'static str {
+@@ -759,12 +759,22 @@ pub const fn advisory_lease_check(multitenant: bool) -> &'static str {
      )
  }
  
 -// Acquire the lease unless acquire by someone with a higher timestamp.
-+// Acquire the lease, bumping ts to GREATEST(now, current+1) so it stays
-+// strictly monotonic and a future-dated predecessor (clock skew) can't stall
-+// promotion; safety is the commit-time fence (lease_release/transact pin ts),
-+// not this.
  pub const fn lease_acquire(multitenant: bool) -> &'static str {
      tableify!(
          multitenant,
@@ -228,7 +224,7 @@ index 5fc5d0a2e..b7cedda60 100644
              column = if multitenant { "instance_name" } else { "id" },
              value = if multitenant { "$2" } else { "1" }
          )
-@@ -1100,3 +1114,42 @@ pub const fn import_indexes_batch(multitenant: bool) -> &'static str {
+@@ -1100,3 +1110,42 @@ pub const fn import_indexes_batch(multitenant: bool) -> &'static str {
          )
      )
  }

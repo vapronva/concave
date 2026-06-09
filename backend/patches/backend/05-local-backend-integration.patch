@@ -432,7 +432,7 @@ index 4633f83f5..726d2ddab 100644
  }
  
 diff --git a/crates/local_backend/src/main.rs b/crates/local_backend/src/main.rs
-index 4217d331d..e8109ec0a 100644
+index 4217d331d..aab0d1759 100644
 --- a/crates/local_backend/src/main.rs
 +++ b/crates/local_backend/src/main.rs
 @@ -12,11 +12,15 @@ use common::{
@@ -466,7 +466,29 @@ index 4217d331d..e8109ec0a 100644
  };
  use runtime::prod::ProdRuntime;
  use tokio::{
-@@ -137,24 +141,52 @@ async fn run_server(runtime: ProdRuntime, config: LocalConfig) -> anyhow::Result
+@@ -51,6 +55,21 @@ use tokio::{
+     sync::oneshot,
+ };
+ 
++async fn shutdown_signal() -> std::io::Result<()> {
++    #[cfg(unix)]
++    {
++        let mut term = signal::unix::signal(signal::unix::SignalKind::terminate())?;
++        tokio::select! {
++            r = signal::ctrl_c() => r,
++            _ = term.recv() => Ok(()),
++        }
++    }
++    #[cfg(not(unix))]
++    {
++        signal::ctrl_c().await
++    }
++}
++
+ fn main() -> Result<(), MainError> {
+     let config = LocalConfig::parse();
+     if let Some(subcommand) = &config.subcommand {
+@@ -137,24 +156,52 @@ async fn run_server(runtime: ProdRuntime, config: LocalConfig) -> anyhow::Result
  }
  
  async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::Result<()> {
@@ -532,7 +554,7 @@ index 4217d331d..e8109ec0a 100644
      let st = make_app(
          runtime.clone(),
          config.clone(),
-@@ -163,13 +195,13 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
+@@ -163,13 +210,13 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
          preempt_signal.clone(),
      )
      .await?;
@@ -548,6 +570,28 @@ index 4217d331d..e8109ec0a 100644
          *HTTP_SERVER_TIMEOUT_DURATION,
          HttpActionRouteMapper,
      );
+@@ -199,8 +246,8 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
+             force_exit_duration = Some(Duration::from_secs(0));
+             let _: Result<_, _> = shutdown_tx.broadcast(()).await;
+         }
+-        r = signal::ctrl_c().fuse() => {
+-            tracing::info!("Received Ctrl-C signal!");
++        r = shutdown_signal().fuse() => {
++            tracing::info!("Received shutdown signal!");
+             r?;
+             let _: Result<_, _> = shutdown_tx.broadcast(()).await;
+         },
+@@ -242,8 +289,8 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
+                 tracing::info!("Cool down expired. Shutting down");
+                 break;
+             }
+-            // Forcibly shutdown with second ctrl-c.
+-            r = signal::ctrl_c().fuse() => {
++            // Forcibly shutdown with a second signal.
++            r = shutdown_signal().fuse() => {
+                 r?;
+                 tracing::warn!("Forcibly shutting down!");
+                 break;
 diff --git a/crates/local_backend/src/node_action_callbacks.rs b/crates/local_backend/src/node_action_callbacks.rs
 index 22d9c58bb..d80483fce 100644
 --- a/crates/local_backend/src/node_action_callbacks.rs
