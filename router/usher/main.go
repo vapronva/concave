@@ -107,8 +107,7 @@ func newReverseProxy(u *url.URL, nudge func(), tr *http.Transport) *httputil.Rev
 		FlushInterval: -1,
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			log.Printf("usher: upstream error: %v", err)
-			var maxBytesError *http.MaxBytesError
-			if errors.As(err, &maxBytesError) {
+			if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 				http.Error(w, "request entity too large", http.StatusRequestEntityTooLarge)
 				return
 			}
@@ -275,6 +274,10 @@ func (t *tracker) consumeStream(ctx context.Context, u string) bool {
 			continue
 		}
 		t.setLeader(ev.LeaderURL)
+	}
+	if scanErr := sc.Err(); scanErr != nil {
+		log.Printf("usher: %s leader-stream read error: %v", t.host, scanErr)
+		return false
 	}
 	return time.Since(started) >= streamHealthyAfter
 }
