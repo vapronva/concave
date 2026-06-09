@@ -12,6 +12,11 @@ spec:
   {{- if not .Values.funrun.hpa.enabled }}
   replicas: {{ .Values.funrun.replicas }}
   {{- end }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   selector:
     matchLabels:
       {{- include "convex.componentSelectorLabels" (dict "ctx" . "component" "funrun") | nindent 6 }}
@@ -21,6 +26,9 @@ spec:
         {{- include "convex.componentLabels" (dict "ctx" . "component" "funrun") | nindent 8 }}
         {{- include "convex.componentDiscoveryLabel" (dict "ctx" . "component" "funrun") | nindent 8 }}
     spec:
+      {{- if .Values.funrun.podDeletionCost.enabled }}
+      serviceAccountName: {{ include "convex.funrunName" . }}
+      {{- end }}
       affinity:
         nodeAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
@@ -65,6 +73,10 @@ spec:
               value: "0.0.0.0:{{ trimPrefix ":" .Values.funrun.healthListen }}"
             - name: FUNRUN_MAX_SNAPSHOT_LAG_SECS
               value: {{ .Values.funrun.maxSnapshotLagSeconds | quote }}
+            {{- with .Values.funrun.drainDelaySeconds }}
+            - name: CONVEX_FUNRUN_DRAIN_DELAY_SECS
+              value: {{ . | quote }}
+            {{- end }}
             - name: FUNRUN_INSTANCE_NAME
               value: {{ required "instance.name is required" .Values.instance.name | quote }}
             - name: FUNRUN_INSTANCE_SECRET
@@ -81,6 +93,18 @@ spec:
             {{- end }}
             - name: STORAGE_DIR
               value: {{ include "convex.storageDir" . | quote }}
+            {{- if .Values.funrun.podDeletionCost.enabled }}
+            - name: CONVEX_FUNRUN_POD_DELETION_COST
+              value: "true"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            {{- end }}
             {{- with .Values.funrun.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -99,7 +123,7 @@ spec:
           lifecycle:
             preStop:
               exec:
-                command: ["sh", "-c", "sleep 3"]
+                command: ["sh", "-c", "sleep 15"]
           {{- with .Values.resources.funrun }}
           resources:
             {{- toYaml . | nindent 12 }}
@@ -112,7 +136,7 @@ spec:
               drop: ["ALL"]
             seccompProfile:
               type: RuntimeDefault
-      terminationGracePeriodSeconds: 30
+      terminationGracePeriodSeconds: {{ .Values.funrun.terminationGracePeriodSeconds }}
       volumes:
         {{- include "convex.dataVolume" . | nindent 8 }}
 
@@ -149,12 +173,40 @@ spec:
     name: {{ include "convex.funrunName" . }}
   minReplicas: {{ .Values.funrun.hpa.minReplicas }}
   maxReplicas: {{ .Values.funrun.hpa.maxReplicas }}
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 30
+      policies:
+        - { type: Pods, value: 2, periodSeconds: 30 }
+        - { type: Percent, value: 100, periodSeconds: 30 }
+      selectPolicy: Max
+    scaleDown:
+      stabilizationWindowSeconds: {{ .Values.funrun.hpa.scaleDownStabilizationSeconds }}
+      policies:
+        - { type: Percent, value: 25, periodSeconds: 60 }
   metrics:
+    {{- if .Values.funrun.hpa.isolateUtilization.enabled }}
+    - type: Pods
+      pods:
+        metric:
+          name: funrun_isolate_utilization
+        target:
+          type: AverageValue
+          averageValue: {{ .Values.funrun.hpa.isolateUtilization.targetPercent | quote }}
+    {{- end }}
     - type: Resource
       resource:
         name: cpu
         target:
           type: Utilization
           averageUtilization: {{ .Values.funrun.hpa.cpuAverageUtilization }}
+    {{- with .Values.funrun.hpa.memoryAverageUtilization }}
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ . }}
+    {{- end }}
 {{- end }}
 {{- end }}

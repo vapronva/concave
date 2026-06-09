@@ -129,4 +129,22 @@ spec:
     {{- include "convex.componentSelectorLabels" (dict "ctx" . "component" "usher") | nindent 4 }}
   ports:
     - { name: http, port: 8080, targetPort: http }
+
+{{- if and $u.pdb.enabled (gt (int $u.replicas) 1) }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+
+metadata:
+  name: {{ include "convex.usherName" . }}
+  namespace: {{ .Values.namespace.system }}
+  labels:
+    {{- include "convex.componentLabels" (dict "ctx" . "component" "usher") | nindent 4 }}
+
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      {{- include "convex.componentSelectorLabels" (dict "ctx" . "component" "usher") | nindent 6 }}
+{{- end }}
 {{- end }}

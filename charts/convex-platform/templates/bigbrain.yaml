@@ -155,8 +155,17 @@ spec:
             {{- end }}
             - name: INSIGHTS_RING_CAP
               value: {{ $b.insightsRingCap | quote }}
+            {{- if $b.metricsApiserver.enabled }}
+            - name: BIGBRAIN_METRICS_APISERVER_ENABLED
+              value: "true"
+            - name: BIGBRAIN_METRICS_APISERVER_PORT
+              value: {{ $b.metricsApiserver.port | quote }}
+            {{- end }}
           ports:
             - { name: http, containerPort: {{ trimPrefix ":" $b.listen }} }
+            {{- if $b.metricsApiserver.enabled }}
+            - { name: metrics-api, containerPort: {{ $b.metricsApiserver.port }} }
+            {{- end }}
           readinessProbe:
             httpGet: { path: /healthz, port: http }
             initialDelaySeconds: 2
@@ -169,6 +178,10 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+          {{- if $b.metricsApiserver.enabled }}
+          volumeMounts:
+            - { name: apiserver-certs, mountPath: /var/run/bigbrain-apiserver }
+          {{- end }}
           securityContext:
             runAsNonRoot: true
             runAsUser: 65532
@@ -179,6 +192,10 @@ spec:
               drop: ["ALL"]
             seccompProfile:
               type: RuntimeDefault
+      {{- if $b.metricsApiserver.enabled }}
+      volumes:
+        - { name: apiserver-certs, emptyDir: {} }
+      {{- end }}
 
 ---
 apiVersion: v1
@@ -195,4 +212,124 @@ spec:
     {{- include "convex.componentSelectorLabels" (dict "ctx" . "component" "bigbrain") | nindent 4 }}
   ports:
     - { name: http, port: {{ trimPrefix ":" $b.listen }}, targetPort: http }
+    {{- if $b.metricsApiserver.enabled }}
+    - { name: https, port: {{ $b.metricsApiserver.port }}, targetPort: metrics-api }
+    {{- end }}
+
+{{- if $b.metricsApiserver.enabled }}
+---
+apiVersion: apiregistration.k8s.io/v1
+kind: APIService
+
+metadata:
+  name: v1beta1.custom.metrics.k8s.io
+  labels:
+    {{- include "convex.componentLabels" (dict "ctx" . "component" "bigbrain") | nindent 4 }}
+
+spec:
+  service:
+    name: {{ include "convex.bigbrainName" . }}
+    namespace: {{ .Values.namespace.system }}
+    port: {{ $b.metricsApiserver.port }}
+  group: custom.metrics.k8s.io
+  version: v1beta1
+  insecureSkipTLSVerify: true
+  groupPriorityMinimum: 100
+  versionPriority: 100
+
+---
+apiVersion: apiregistration.k8s.io/v1
+kind: APIService
+
+metadata:
+  name: v1beta2.custom.metrics.k8s.io
+  labels:
+    {{- include "convex.componentLabels" (dict "ctx" . "component" "bigbrain") | nindent 4 }}
+
+spec:
+  service:
+    name: {{ include "convex.bigbrainName" . }}
+    namespace: {{ .Values.namespace.system }}
+    port: {{ $b.metricsApiserver.port }}
+  group: custom.metrics.k8s.io
+  version: v1beta2
+  insecureSkipTLSVerify: true
+  groupPriorityMinimum: 100
+  versionPriority: 100
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+
+metadata:
+  name: {{ include "convex.bigbrainName" . }}:system:auth-delegator
+  labels:
+    {{- include "convex.componentLabels" (dict "ctx" . "component" "bigbrain") | nindent 4 }}
+
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "convex.bigbrainName" . }}
+    namespace: {{ .Values.namespace.system }}
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+
+metadata:
+  name: {{ include "convex.bigbrainName" . }}-auth-reader
+  namespace: kube-system
+  labels:
+    {{- include "convex.componentLabels" (dict "ctx" . "component" "bigbrain") | nindent 4 }}
+
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: extension-apiserver-authentication-reader
+
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "convex.bigbrainName" . }}
+    namespace: {{ .Values.namespace.system }}
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+
+metadata:
+  name: {{ include "convex.bigbrainName" . }}-custom-metrics-reader
+  labels:
+    {{- include "convex.componentLabels" (dict "ctx" . "component" "bigbrain") | nindent 4 }}
+
+rules:
+  - apiGroups: ["custom.metrics.k8s.io"]
+    resources: ["*"]
+    verbs: ["get", "list"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+
+metadata:
+  name: {{ include "convex.bigbrainName" . }}-hpa-custom-metrics
+  labels:
+    {{- include "convex.componentLabels" (dict "ctx" . "component" "bigbrain") | nindent 4 }}
+
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "convex.bigbrainName" . }}-custom-metrics-reader
+
+subjects:
+  - kind: ServiceAccount
+    name: horizontal-pod-autoscaler
+    namespace: kube-system
+  - apiGroup: rbac.authorization.k8s.io
+    kind: User
+    name: system:kube-controller-manager
+{{- end }}
 {{- end }}

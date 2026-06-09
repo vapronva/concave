@@ -25,6 +25,26 @@ spec:
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      affinity:
+        podAntiAffinity:
+          {{- $prefix := include "convex.labelPrefix" . }}
+          {{- if .Values.ha.requireNodeSpread }}
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  {{ $prefix }}/component: backend
+                  {{ $prefix }}/instance: {{ required "instance.name is required" .Values.instance.name | quote }}
+          {{- else }}
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{ $prefix }}/component: backend
+                    {{ $prefix }}/instance: {{ required "instance.name is required" .Values.instance.name | quote }}
+          {{- end }}
       terminationGracePeriodSeconds: 20
       containers:
         - name: backend
@@ -52,10 +72,14 @@ spec:
           volumeMounts:
             {{- include "convex.dataVolumeMount" . | nindent 12 }}
           readinessProbe:
-            httpGet: { path: /, port: cloud }
+            httpGet: { path: /readyz, port: cloud }
             initialDelaySeconds: 8
             periodSeconds: 5
             failureThreshold: 30
+          livenessProbe:
+            tcpSocket: { port: cloud }
+            initialDelaySeconds: 120
+            periodSeconds: 20
           lifecycle:
             preStop:
               exec:

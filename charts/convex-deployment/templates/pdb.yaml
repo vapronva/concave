@@ -1,0 +1,34 @@
+{{- if .Values.ha.pdb.enabled }}
+{{- if gt (int .Values.ha.standbyReplicas) 0 }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+
+metadata:
+  name: {{ include "convex.followerName" . }}
+  labels:
+    {{- include "convex.componentLabels" (dict "ctx" . "component" "follower") | nindent 4 }}
+
+spec:
+  minAvailable: {{ sub (int .Values.ha.standbyReplicas) 1 }}
+  selector:
+    matchLabels:
+      {{- include "convex.componentSelectorLabels" (dict "ctx" . "component" "follower") | nindent 6 }}
+{{- end }}
+{{- if .Values.funrun.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+
+metadata:
+  name: {{ include "convex.funrunName" . }}
+  labels:
+    {{- include "convex.componentLabels" (dict "ctx" . "component" "funrun") | nindent 4 }}
+
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      {{- include "convex.componentSelectorLabels" (dict "ctx" . "component" "funrun") | nindent 6 }}
+{{- end }}
+{{- end }}

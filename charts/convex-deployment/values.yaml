@@ -42,6 +42,10 @@ ha:
   preferredNode: ""
   leaderPriority: 100
   followerPriority: 0
+  requireNodeSpread: false
+  demotionDrainTimeoutSeconds: ""
+  pdb:
+    enabled: false
   leader:
     nodeSelector: {}
   follower:
@@ -66,16 +70,25 @@ backend:
 funrun:
   enabled: true
   replicas: 2
-  listen: ":8090"
-  healthListen: ":8091"
+  listen: :8090
+  healthListen: :8091
   maxSnapshotLagSeconds: 30
+  drainDelaySeconds: ""
+  terminationGracePeriodSeconds: 45
   nodes: []
   extraEnv: []
+  podDeletionCost:
+    enabled: true
   hpa:
     enabled: true
     minReplicas: 2
     maxReplicas: 10
+    isolateUtilization:
+      enabled: true
+      targetPercent: 70
     cpuAverageUtilization: 70
+    memoryAverageUtilization: ""
+    scaleDownStabilizationSeconds: 300
 
 dashboard:
   enabled: true

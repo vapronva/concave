@@ -146,20 +146,19 @@ imagePullSecrets:
   value: "https://{{ . }}"
 {{- end }}
 {{ include "convex.controlPlaneEnv" . }}
-{{- end -}}
-
-{{- define "convex.controlPlaneEnabled" -}}
-{{- if .Values.controlPlane.tokenSecretRef.name -}}true{{- end -}}
+{{- with .Values.ha.demotionDrainTimeoutSeconds }}
+- name: DEMOTION_DRAIN_TIMEOUT_SECS
+  value: {{ . | quote }}
+{{- end }}
 {{- end -}}
 
 {{- define "convex.controlPlaneEnv" -}}
-{{- if gt (int .Values.ha.standbyReplicas) 0 }}
-{{- $name := required "controlPlane.tokenSecretRef.name is required when ha.standbyReplicas > 0" .Values.controlPlane.tokenSecretRef.name }}
+{{- with .Values.controlPlane.tokenSecretRef.name }}
 - name: CONVEX_CONTROL_PLANE_TOKEN
   valueFrom:
     secretKeyRef:
-      name: {{ $name }}
-      key: {{ default "control-plane-token" .Values.controlPlane.tokenSecretRef.key }}
+      name: {{ . }}
+      key: {{ default "control-plane-token" $.Values.controlPlane.tokenSecretRef.key }}
 {{- end }}
 {{- end -}}
 

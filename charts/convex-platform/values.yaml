@@ -13,7 +13,7 @@ image:
 usher:
   enabled: true
   replicas: 2
-  listen: ":8080"
+  listen: :8080
   image:
     repository: vapronva/concave/usher
     tag: ""
@@ -21,6 +21,8 @@ usher:
   preferredNode: ""
   nodes: []
   resources: {}
+  pdb:
+    enabled: true
 
 bigbrain:
   enabled: true
@@ -29,7 +31,7 @@ bigbrain:
   image:
     repository: vapronva/concave/bigbrain
     tag: ""
-  insightsRingCap: 50000
+  insightsRingCap: 1000000
   reconcileInterval: 2s
   promoteDebounce: 3
   failback:
@@ -40,4 +42,7 @@ bigbrain:
   nodes: []
   rbac:
     create: true
+  metricsApiserver:
+    enabled: true
+    port: 6443
   resources: {}
