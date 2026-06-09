@@ -1820,7 +1820,7 @@ index 000000000..fbc80637c
 +}
 diff --git a/crates/funrun_server/src/snapshot.rs b/crates/funrun_server/src/snapshot.rs
 new file mode 100644
-index 000000000..07c6ab5ea
+index 000000000..02e29ee82
 --- /dev/null
 +++ b/crates/funrun_server/src/snapshot.rs
 @@ -0,0 +1,659 @@
@@ -1910,11 +1910,11 @@ index 000000000..07c6ab5ea
 +    "Funrun snapshot_inputs calls; cache hit rate = 1 - (warm_hit + cold) / requests"
 +);
 +register_convex_gauge!(
-+    FUNRUN_ISOLATE_BUSY_THREADS,
++    ISOLATE_BUSY_THREADS,
 +    "Busy funrun V8 isolate worker threads (servicing a request) across the shared pool"
 +);
 +register_convex_gauge!(
-+    FUNRUN_ISOLATE_TOTAL_THREADS,
++    ISOLATE_TOTAL_THREADS,
 +    "Total funrun V8 isolate worker threads in the shared pool (MAX_ISOLATE_WORKERS)"
 +);
 +
@@ -2080,11 +2080,11 @@ index 000000000..07c6ab5ea
 +        rt.spawn_background("funrun_isolate_pool_sampler", async move {
 +            loop {
 +                log_gauge(
-+                    &FUNRUN_ISOLATE_TOTAL_THREADS,
++                    &ISOLATE_TOTAL_THREADS,
 +                    shared_isolate.max_isolate_workers() as f64,
 +                );
 +                log_gauge(
-+                    &FUNRUN_ISOLATE_BUSY_THREADS,
++                    &ISOLATE_BUSY_THREADS,
 +                    shared_isolate.active_isolate_workers() as f64,
 +                );
 +                worker_rt.wait(Duration::from_secs(2)).await;
