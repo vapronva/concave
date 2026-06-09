@@ -70,6 +70,10 @@ func NewFromInterface(cs kubernetes.Interface, labelPrefix string) *Client {
 	return &Client{cs: cs, labels: newLabelKeys(labelPrefix)}
 }
 
+func (c *Client) Clientset() kubernetes.Interface {
+	return c.cs
+}
+
 func loadConfig(kubeconfigPath string) (*rest.Config, error) {
 	rules := clientcmd.NewDefaultClientConfigLoadingRules()
 	if kubeconfigPath != "" {

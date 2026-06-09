@@ -8,13 +8,14 @@ type action struct {
 }
 
 type decision struct {
-	leaderPod       string
-	leaderURL       string
-	liveLeaderCount int
-	promoteTarget   *observation
-	demotes         []action
-	failbackTarget  *observation
-	failbackState   failbackState
+	leaderPod            string
+	leaderURL            string
+	liveLeaderCount      int
+	incumbentUnreachable bool
+	promoteTarget        *observation
+	demotes              []action
+	failbackTarget       *observation
+	failbackState        failbackState
 }
 
 type failbackState struct {
@@ -30,6 +31,18 @@ func claimedLeaders(obs []observation) []observation {
 		}
 	}
 	return out
+}
+
+func incumbentDiscoveredUnreachable(obs []observation, incumbent string) bool {
+	if incumbent == "" {
+		return false
+	}
+	for _, o := range obs {
+		if o.be.Pod == incumbent {
+			return !o.reach
+		}
+	}
+	return false
 }
 
 func pickLeader(claims []observation, incumbent string) (observation, bool) {
@@ -118,6 +131,7 @@ func decide(obs []observation, p decideParams) decision {
 	claims := claimedLeaders(obs)
 	d := decision{liveLeaderCount: len(claims)}
 	if len(claims) == 0 {
+		d.incumbentUnreachable = incumbentDiscoveredUnreachable(obs, p.incumbent)
 		if cand, ok := bestCandidate(obs); ok {
 			d.promoteTarget = &cand
 		}

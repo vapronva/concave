@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"git.horse/vapronva/concave/router/bigbrain/apiserver"
 	"git.horse/vapronva/concave/router/bigbrain/backend"
 	"git.horse/vapronva/concave/router/bigbrain/election"
 	"git.horse/vapronva/concave/router/bigbrain/insights"
@@ -32,6 +33,10 @@ const (
 	maxHeaderBytes         = 64 * 1024
 	shutdownTimeout        = 10 * time.Second
 	actuationDrainTimeout  = 15 * time.Second
+
+	defaultMetricsAPIServerPort    = 6443
+	defaultMetricsAPIServerCertDir = "/var/run/bigbrain-apiserver"
+	defaultMetricsScrapeInterval   = 5 * time.Second
 )
 
 func main() {
@@ -112,18 +117,14 @@ func run() int {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	var ctrlDone chan struct{}
+	ctrlDone := runController(ctx, ctrl)
 	if ctrl != nil {
-		ctrlDone = make(chan struct{})
-		go func() {
-			defer close(ctrlDone)
-			ctrl.Run(ctx)
-		}()
 		log.Info("bigbrain: election controller started",
 			"deployments", len(reg.Names()), "interval", interval.String(), "promoteDebounce", *debounce,
 			"failbackEnabled", *failbackEnabled, "failbackStability", failbackStability.String(),
 			"failbackWarmthLag", *failbackWarmthLag)
 	}
+	startMetricsAPIServer(ctx, stop, k8s, reg, *labelPrefix, log)
 	var listenFailed atomic.Bool
 	go func() {
 		log.Info("bigbrain: listening", "addr", *addr)
@@ -159,6 +160,52 @@ func shutdown(httpSrv *http.Server, srv *server.Server, ctrlDone <-chan struct{}
 	case <-drainCtx.Done():
 		log.Error("bigbrain: election shutdown timed out", "err", drainCtx.Err())
 	}
+}
+
+func runController(ctx context.Context, ctrl *election.Controller) <-chan struct{} {
+	if ctrl == nil {
+		return nil
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ctrl.Run(ctx)
+	}()
+	return done
+}
+
+func startMetricsAPIServer(
+	ctx context.Context,
+	stop context.CancelFunc,
+	k8s *k8sclient.Client,
+	reg *registry.Registry,
+	labelPrefix string,
+	log *slog.Logger,
+) {
+	if k8s == nil || !envBool("BIGBRAIN_METRICS_APISERVER_ENABLED", false) {
+		return
+	}
+	prov := apiserver.NewProvider()
+	deps := make([]apiserver.Deployment, 0, len(reg.Names()))
+	for _, name := range reg.Names() {
+		if ns, ok := reg.Namespace(name); ok {
+			deps = append(deps, apiserver.Deployment{Name: name, Namespace: ns})
+		}
+	}
+	scrapeInterval := envDuration("BIGBRAIN_METRICS_SCRAPE_INTERVAL", defaultMetricsScrapeInterval)
+	go apiserver.NewScraper(k8s.Clientset(), labelPrefix, deps, prov, scrapeInterval, log).Run(ctx)
+	cfg := apiserver.Config{
+		SecurePort: envInt("BIGBRAIN_METRICS_APISERVER_PORT", defaultMetricsAPIServerPort),
+		CertDir:    env("BIGBRAIN_METRICS_APISERVER_CERT_DIR", defaultMetricsAPIServerCertDir),
+	}
+	go func() {
+		if aerr := apiserver.Run(ctx, cfg, prov, log); aerr != nil {
+			log.ErrorContext(ctx, "bigbrain: custom-metrics apiserver exited", "err", aerr)
+			stop()
+		}
+	}()
+	log.InfoContext(ctx, "bigbrain: custom-metrics apiserver enabled",
+		"port", cfg.SecurePort, "scrapeInterval", scrapeInterval.String())
 }
 
 func loadDeploymentTokens(

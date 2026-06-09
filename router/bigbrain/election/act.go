@@ -14,9 +14,10 @@ func (c *Controller) act(
 	st *deploymentState,
 	d decision,
 	streak int,
+	retain bool,
 ) {
 	if d.liveLeaderCount == 0 {
-		c.actLeaderless(ctx, name, st, d, streak)
+		c.actLeaderless(ctx, name, st, d, streak, retain)
 		return
 	}
 	if len(d.demotes) > 0 {
@@ -56,10 +57,16 @@ func (c *Controller) actLeaderless(
 	st *deploymentState,
 	d decision,
 	streak int,
+	retain bool,
 ) {
 	if streak < c.cfg.PromoteDebounce {
 		c.log.InfoContext(ctx, "election: leaderless, retaining last-known leader during hysteresis",
 			"deployment", name, "streak", streak, "need", c.cfg.PromoteDebounce)
+		return
+	}
+	if retain {
+		c.log.WarnContext(ctx, "election: incumbent unreachable but still discovered; retaining leader within grace",
+			"deployment", name, "streak", streak, "grace", c.cfg.UnreachableLeaderGrace)
 		return
 	}
 	if d.promoteTarget == nil {
