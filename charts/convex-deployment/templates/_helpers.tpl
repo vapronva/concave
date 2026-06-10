@@ -53,10 +53,6 @@ app.kubernetes.io/component: {{ .component }}
 {{- default (printf "%s-db" (include "convex.fullname" .)) .Values.db.passwordRef.name -}}
 {{- end -}}
 
-{{- define "convex.dashboardSecretName" -}}
-{{- default (printf "%s-dashboard" (include "convex.fullname" .)) .Values.dashboard.adminKeyRef.name -}}
-{{- end -}}
-
 {{- define "convex.image" -}}
 {{- $ctx := .ctx -}}
 {{- $top := $ctx.Values.image -}}
@@ -139,7 +135,7 @@ imagePullSecrets:
   valueFrom:
     secretKeyRef:
       name: {{ include "convex.instanceSecretName" . }}
-      key: {{ .Values.instance.secretRef.key }}
+      key: {{ default "instance-secret" .Values.instance.secretRef.key }}
 {{ include "convex.pgEnv" . }}
 - name: CONVEX_CLOUD_ORIGIN
   value: "https://{{ required "hosts.api is required" .Values.hosts.api }}"
@@ -149,7 +145,7 @@ imagePullSecrets:
 - name: CONVEX_DASHBOARD_ORIGIN
   value: "https://{{ . }}"
 {{- end }}
-{{ include "convex.controlPlaneEnv" . }}
+{{- include "convex.controlPlaneEnv" . }}
 {{- with .Values.ha.demotionDrainTimeoutSeconds }}
 - name: DEMOTION_DRAIN_TIMEOUT_SECS
   value: {{ . | quote }}
@@ -200,6 +196,10 @@ seccompProfile:
   env:
     - name: CONVEX_BACKEND_ROLE
       value: {{ .role }}
+    {{- if and (eq .role "leader") $ctx.Values.controlPlane.tokenSecretRef.name }}
+    - name: CONVEX_BOOT_FOLLOWER_WHEN_INITIALIZED
+      value: "true"
+    {{- end }}
     {{- include "convex.commonBackendEnv" $ctx | nindent 4 }}
     {{- if $ctx.Values.funrun.enabled }}
     - name: CONVEX_FUNRUN_ADDR
@@ -220,7 +220,7 @@ seccompProfile:
   volumeMounts:
     {{- include "convex.dataVolumeMount" $ctx | nindent 4 }}
   startupProbe:
-    httpGet: { path: /readyz, port: cloud }
+    tcpSocket: { port: cloud }
     initialDelaySeconds: {{ .probeInitialDelaySeconds }}
     periodSeconds: 5
     failureThreshold: 32
@@ -248,7 +248,7 @@ seccompProfile:
   valueFrom:
     secretKeyRef:
       name: {{ include "convex.insightsTokenSecretName" . }}
-      key: {{ .Values.insights.tokenRef.key }}
+      key: {{ default "usage-token" .Values.insights.tokenRef.key }}
 - name: CONVEX_INSIGHTS_QUERY_URL
   value: {{ required "insights.queryUrl is required when insights.enabled" .Values.insights.queryUrl | quote }}
 {{- end -}}

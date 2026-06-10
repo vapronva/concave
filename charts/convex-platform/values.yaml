@@ -1,6 +1,9 @@
 ---
 labelPrefix: convex
 
+nameOverride: ""
+fullnameOverride: ""
+
 namespace:
   system: convex-system
 
@@ -9,6 +12,7 @@ deployments: []
 image:
   registry: docker.horse
   pullPolicy: IfNotPresent
+  pullSecrets: []
 
 usher:
   enabled: true
@@ -42,8 +46,6 @@ bigbrain:
     warmthLag: 5000000000
   preferredNode: ""
   nodes: []
-  rbac:
-    create: true
   metricsApiserver:
     enabled: true
     port: 6443

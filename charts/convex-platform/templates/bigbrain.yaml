@@ -7,7 +7,6 @@
 {{- if ne (int $b.replicas) 1 -}}
 {{- fail "bigbrain.replicas must equal 1 because controller leader election is not implemented" -}}
 {{- end -}}
-{{- if $b.rbac.create }}
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -58,8 +57,6 @@ subjects:
     name: {{ include "convex.bigbrainName" $ }}
     namespace: {{ $.Values.namespace.system }}
 {{- end }}
-
-{{- end }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -83,19 +80,18 @@ spec:
         {{- include "convex.componentLabels" (dict "ctx" . "component" "bigbrain") | nindent 8 }}
     spec:
       {{- with include "convex.imagePullSecrets" . }}{{- . | nindent 6 }}{{- end }}
-      terminationGracePeriodSeconds: 40
-      {{- if $b.rbac.create }}
+      terminationGracePeriodSeconds: 50
       serviceAccountName: {{ include "convex.bigbrainName" . }}
-      {{- end }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
         seccompProfile:
           type: RuntimeDefault
+      {{- if or $b.preferredNode $b.nodes }}
       affinity:
         nodeAffinity:
+          {{- with $b.preferredNode }}
           preferredDuringSchedulingIgnoredDuringExecution:
-            {{- with $b.preferredNode }}
             - weight: 1
               preference:
                 matchExpressions:
@@ -103,7 +99,7 @@ spec:
                     operator: In
                     values:
                       - {{ . }}
-            {{- end }}
+          {{- end }}
           {{- if $b.nodes }}
           requiredDuringSchedulingIgnoredDuringExecution:
             nodeSelectorTerms:
@@ -115,6 +111,7 @@ spec:
                       - {{ . }}
                       {{- end }}
           {{- end }}
+      {{- end }}
       containers:
         - name: bigbrain
           image: {{ include "convex-platform.image" (dict "ctx" . "spec" $b.image) }}
@@ -153,7 +150,7 @@ spec:
             {{- end }}
             {{- end }}
             - name: INSIGHTS_RING_CAP
-              value: {{ $b.insightsRingCap | quote }}
+              value: {{ int64 $b.insightsRingCap | quote }}
             {{- if $b.metricsApiserver.enabled }}
             - name: BIGBRAIN_METRICS_APISERVER_ENABLED
               value: "true"

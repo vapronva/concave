@@ -1,4 +1,9 @@
 {{- if .Values.funrun.enabled }}
+{{- $funrunDrainDelay := int (.Values.funrun.drainDelaySeconds | default 8) }}
+{{- $funrunShutdownNeed := add 15 $funrunDrainDelay 600 }}
+{{- if gt $funrunShutdownNeed (int .Values.funrun.terminationGracePeriodSeconds) }}
+{{- fail (printf "funrun.terminationGracePeriodSeconds=%d is below the %d seconds a clean shutdown needs: 15 (preStop sleep) + %d (drain delay) + 600 (default action budget, ACTIONS_USER_TIMEOUT_SECS); raise funrun.terminationGracePeriodSeconds" (int .Values.funrun.terminationGracePeriodSeconds) $funrunShutdownNeed $funrunDrainDelay) }}
+{{- end }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -161,8 +166,15 @@ spec:
     - { name: grpc, port: {{ include "convex.listenPort" .Values.funrun.listen }}, targetPort: grpc }
 
 {{- if .Values.funrun.hpa.enabled }}
-{{- if and .Values.funrun.hpa.cpuAverageUtilization (not (dig "funrun" "requests" "cpu" "" (.Values.resources | default dict))) }}
-{{- fail "funrun.hpa.cpuAverageUtilization is set but resources.funrun.requests.cpu is not: an HPA CPU Utilization metric without a CPU request can never be computed and permanently blocks scale-down; set resources.funrun.requests.cpu or unset funrun.hpa.cpuAverageUtilization" }}
+{{- $funrunResources := .Values.resources | default dict }}
+{{- if and (not .Values.funrun.hpa.isolateUtilization.enabled) (not .Values.funrun.hpa.cpuAverageUtilization) (not .Values.funrun.hpa.memoryAverageUtilization) }}
+{{- fail "funrun.hpa.enabled needs at least one metric source: enable funrun.hpa.isolateUtilization or set funrun.hpa.cpuAverageUtilization or funrun.hpa.memoryAverageUtilization; an autoscaling/v2 HPA with no metrics defaults to 80% CPU utilization and wedges without CPU requests" }}
+{{- end }}
+{{- if and .Values.funrun.hpa.cpuAverageUtilization (not (dig "funrun" "requests" "cpu" "" $funrunResources)) (not (dig "funrun" "limits" "cpu" "" $funrunResources)) }}
+{{- fail "funrun.hpa.cpuAverageUtilization is set but resources.funrun sets neither requests.cpu nor limits.cpu: an HPA CPU Utilization metric without a CPU request can never be computed and permanently blocks scale-down; set resources.funrun.requests.cpu (or limits.cpu, which defaults the request) or unset funrun.hpa.cpuAverageUtilization" }}
+{{- end }}
+{{- if and .Values.funrun.hpa.memoryAverageUtilization (not (dig "funrun" "requests" "memory" "" $funrunResources)) (not (dig "funrun" "limits" "memory" "" $funrunResources)) }}
+{{- fail "funrun.hpa.memoryAverageUtilization is set but resources.funrun sets neither requests.memory nor limits.memory: an HPA memory Utilization metric without a memory request can never be computed and permanently blocks scale-down; set resources.funrun.requests.memory (or limits.memory, which defaults the request) or unset funrun.hpa.memoryAverageUtilization" }}
 {{- end }}
 ---
 apiVersion: autoscaling/v2

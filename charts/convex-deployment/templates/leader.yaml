@@ -26,6 +26,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       terminationGracePeriodSeconds: 40
+      automountServiceAccountToken: false
       containers:
         {{- include "convex.backendContainer" (dict "ctx" . "role" "leader" "extraPorts" (list (dict "name" "site" "containerPort" 3211)) "probeInitialDelaySeconds" 10 "resourcesKey" "leader") | nindent 8 }}
       volumes:

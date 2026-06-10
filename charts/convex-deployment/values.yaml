@@ -1,6 +1,9 @@
 ---
 labelPrefix: convex
 
+nameOverride: ""
+fullnameOverride: ""
+
 instance:
   name: ""
   secretRef:
@@ -12,6 +15,7 @@ image:
   repository: vapronva/concave/backend
   tag: ""
   pullPolicy: IfNotPresent
+  pullSecrets: []
   dashboard:
     repository: vapronva/concave/dashboard
     tag: ""
@@ -93,9 +97,6 @@ dashboard:
   enabled: true
   port: 6791
   nodes: []
-  adminKeyRef:
-    name: ""
-    key: admin-key
 
 ingress:
   usherService:

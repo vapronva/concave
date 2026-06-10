@@ -4,6 +4,14 @@
 {{- if eq (len $deployments) 0 -}}
 {{- fail "deployments must contain at least one entry when usher.enabled" -}}
 {{- end -}}
+{{- if and (not $u.bigbrainUrl) (not .Values.bigbrain.enabled) -}}
+{{- fail "usher.bigbrainUrl is required when bigbrain.enabled=false: usher refuses to start without an absolute bigbrain URL and crash-loops" -}}
+{{- end -}}
+{{- $usherDeployments := list -}}
+{{- range $deployments -}}
+{{- $usherDeployments = append $usherDeployments (dict "name" .name "host" .host "siteHost" .siteHost) -}}
+{{- end -}}
+{{- $usherConfig := dict "deployments" $usherDeployments -}}
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -16,7 +24,7 @@ metadata:
 
 data:
   config.json: |
-    {{ toJson (dict "deployments" $deployments) | nindent 4 }}
+    {{- toJson $usherConfig | nindent 4 }}
 
 ---
 apiVersion: apps/v1
@@ -38,13 +46,14 @@ spec:
       labels:
         {{- include "convex.componentLabels" (dict "ctx" . "component" "usher") | nindent 8 }}
       annotations:
-        checksum/config: {{ toJson (dict "deployments" $deployments) | sha256sum }}
+        checksum/config: {{ toJson $usherConfig | sha256sum }}
     spec:
       {{- with include "convex.imagePullSecrets" . }}{{- . | nindent 6 }}{{- end }}
       affinity:
+        {{- if or $u.preferredNode $u.nodes }}
         nodeAffinity:
+          {{- with $u.preferredNode }}
           preferredDuringSchedulingIgnoredDuringExecution:
-            {{- with $u.preferredNode }}
             - weight: 1
               preference:
                 matchExpressions:
@@ -52,7 +61,7 @@ spec:
                     operator: In
                     values:
                       - {{ . }}
-            {{- end }}
+          {{- end }}
           {{- if $u.nodes }}
           requiredDuringSchedulingIgnoredDuringExecution:
             nodeSelectorTerms:
@@ -64,6 +73,7 @@ spec:
                       - {{ . }}
                       {{- end }}
           {{- end }}
+        {{- end }}
         podAntiAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
             - weight: 1
@@ -72,6 +82,7 @@ spec:
                 labelSelector:
                   matchLabels:
                     {{- include "convex.componentSelectorLabels" (dict "ctx" . "component" "usher") | nindent 20 }}
+      automountServiceAccountToken: false
       containers:
         - name: usher
           image: {{ include "convex-platform.image" (dict "ctx" . "spec" $u.image) }}

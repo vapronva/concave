@@ -12,6 +12,9 @@ spec:
   replicas: {{ .Values.ha.standbyReplicas }}
   strategy:
     type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 0
   selector:
     matchLabels:
       {{- include "convex.componentSelectorLabels" (dict "ctx" . "component" "follower") | nindent 6 }}
@@ -47,6 +50,7 @@ spec:
                     {{ $prefix }}/instance: {{ required "instance.name is required" .Values.instance.name | quote }}
           {{- end }}
       terminationGracePeriodSeconds: 20
+      automountServiceAccountToken: false
       containers:
         {{- include "convex.backendContainer" (dict "ctx" . "role" "follower" "extraPorts" (list) "probeInitialDelaySeconds" 8 "resourcesKey" "follower") | nindent 8 }}
       volumes:
