@@ -68,7 +68,7 @@ index 48a574cf1..c7f888e86 100644
  /// convenience) from allowing browsers to make these requests.
  pub fn platform_api_cors() -> CorsLayer {
 diff --git a/crates/common/src/knobs.rs b/crates/common/src/knobs.rs
-index 6c3244ffb..59b5e0bea 100644
+index 6c3244ffb..056e2d2ea 100644
 --- a/crates/common/src/knobs.rs
 +++ b/crates/common/src/knobs.rs
 @@ -417,6 +417,17 @@ pub static MAX_REPEATABLE_TIMESTAMP_IDLE_FREQUENCY: LazyLock<Duration> = LazyLoc
@@ -101,7 +101,7 @@ index 6c3244ffb..59b5e0bea 100644
  /// The size of the pending commits in the committer queue. This is a FIFO
  /// queue, so if the queue is too large, we run into a risk of all requests
  /// waiting too long and no requests going through during overload. The size of
-@@ -1067,28 +1083,32 @@ pub static FUNRUN_MODULE_QUEUE_SIZE: LazyLock<usize> =
+@@ -1067,28 +1083,35 @@ pub static FUNRUN_MODULE_QUEUE_SIZE: LazyLock<usize> =
  pub static FUNRUN_CODE_CACHE_SIZE: LazyLock<u64> =
      LazyLock::new(|| env_config("FUNRUN_CODE_CACHE_SIZE", 500_000_000));
  
@@ -135,11 +135,14 @@ index 6c3244ffb..59b5e0bea 100644
 -
 -/// The maximum number of retries a Funrun client will perform. The client only
 -/// retries overloaded errors.
-+/// Maximum number of initial-connect retries the funrun client performs on a
-+/// retryable RPC error (Unavailable for any udf type; DeadlineExceeded for
-+/// idempotent query/mutation) before giving up. Only the initial unary->stream
-+/// call is retried (before any work begins server-side). Total attempts =
-+/// retries + 1.
++/// Maximum number of retries the funrun client performs for queries and
++/// mutations when an attempt fails with Unavailable, a response timeout, or an
++/// error whose decoded metadata is rejected-before-execution (WorkerOverloaded,
++/// IsolateNotClean, InitialPermitTimeoutError). A whole attempt (call plus
++/// response-stream consumption) is retried, but never after a log line has been
++/// forwarded (exactly-once log delivery); retries are commit-safe because
++/// funrun queries/mutations never commit server-side. Actions are never
++/// retried. Total attempts = retries + 1.
  pub static FUNRUN_CLIENT_MAX_RETRIES: LazyLock<usize> =
 -    LazyLock::new(|| env_config("FUNRUN_CLIENT_MAX_RETRIES", 4));
 +    LazyLock::new(|| env_config("FUNRUN_CLIENT_MAX_RETRIES", 2));
@@ -417,10 +420,10 @@ index 000000000..17e83f819
 +}
 diff --git a/crates/function_runner/src/remote.rs b/crates/function_runner/src/remote.rs
 new file mode 100644
-index 000000000..2bf5f9fc1
+index 000000000..b1093d239
 --- /dev/null
 +++ b/crates/function_runner/src/remote.rs
-@@ -0,0 +1,790 @@
+@@ -0,0 +1,897 @@
 +use std::{
 +    collections::{
 +        BTreeMap,
@@ -428,10 +431,17 @@ index 000000000..2bf5f9fc1
 +    },
 +    net::SocketAddr,
 +    sync::{
++        atomic::{
++            AtomicU64,
++            Ordering,
++        },
 +        Arc,
 +        LazyLock,
 +    },
-+    time::Duration,
++    time::{
++        Duration,
++        Instant,
++    },
 +};
 +
 +use anyhow::Context as _;
@@ -496,6 +506,7 @@ index 000000000..2bf5f9fc1
 +use tokio::{
 +    net::lookup_host,
 +    sync::mpsc,
++    time::timeout,
 +};
 +use tonic::transport::{
 +    channel::Change,
@@ -526,7 +537,9 @@ index 000000000..2bf5f9fc1
 +};
 +
 +pub static MAX_GRPC_MESSAGE_BYTES: LazyLock<usize> = LazyLock::new(|| {
-+    let writes = 2 * *common::knobs::TRANSACTION_MAX_USER_WRITE_SIZE_BYTES;
++    let writes = 2
++        * (*common::knobs::TRANSACTION_MAX_USER_WRITE_SIZE_BYTES
++            + *common::knobs::TRANSACTION_MAX_SYSTEM_WRITE_SIZE_BYTES);
 +    let result = (*common::knobs::SYSTEM_FUNCTION_MAX_RESULT_SIZE)
 +        .max(*common::knobs::FUNCTION_MAX_RESULT_SIZE);
 +    (writes + result + udf::HTTP_ACTION_BODY_LIMIT) + (4 << 20)
@@ -594,6 +607,8 @@ index 000000000..2bf5f9fc1
 +const FUNRUN_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 +const FUNRUN_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
 +const FUNRUN_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(5);
++const FUNRUN_RESPONSE_TIMEOUT: Duration = Duration::from_secs(600);
++const FUNRUN_EMPTY_ENDPOINTS_FAIL_FAST: Duration = Duration::from_secs(30);
 +
 +fn funrun_endpoint(uri: &str, tls_config: &Option<ClientTlsConfig>) -> anyhow::Result<Endpoint> {
 +    let mut endpoint = Endpoint::from_shared(uri.to_string())
@@ -620,6 +635,15 @@ index 000000000..2bf5f9fc1
 +    callback_transport_url: Option<String>,
 +    rt: RT,
 +    instance_secret: DeploymentSecret,
++    endpoints_epoch: Instant,
++    endpoints_empty_since: Arc<AtomicU64>,
++}
++
++enum RunFunctionAttemptError {
++    NoEndpoints(anyhow::Error),
++    Rpc(tonic::Status),
++    TimedOut,
++    Internal(anyhow::Error),
 +}
 +
 +impl<RT: Runtime> RemoteFunctionRunner<RT> {
@@ -647,10 +671,13 @@ index 000000000..2bf5f9fc1
 +        } else {
 +            "http"
 +        };
++        let endpoints_epoch = Instant::now();
++        let endpoints_empty_since = Arc::new(AtomicU64::new(1));
 +        let channel = {
 +            let (channel, tx) = Channel::balance_channel::<SocketAddr>(64);
 +            let refresh_rt = rt.clone();
 +            let refresh_tls = tls_config.clone();
++            let empty_since = endpoints_empty_since.clone();
 +            rt.spawn_background("funrun_lb_refresh", async move {
 +                let mut current = BTreeSet::new();
 +                loop {
@@ -691,6 +718,16 @@ index 000000000..2bf5f9fc1
 +                            )
 +                        },
 +                    }
++                    if current.is_empty() {
++                        let _ = empty_since.compare_exchange(
++                            0,
++                            endpoints_epoch.elapsed().as_nanos().max(1) as u64,
++                            Ordering::Relaxed,
++                            Ordering::Relaxed,
++                        );
++                    } else {
++                        empty_since.store(0, Ordering::Relaxed);
++                    }
 +                    refresh_rt
 +                        .wait(*common::knobs::FUNRUN_LB_REFRESH_INTERVAL)
 +                        .await;
@@ -714,6 +751,8 @@ index 000000000..2bf5f9fc1
 +            callback_transport_url,
 +            rt,
 +            instance_secret,
++            endpoints_epoch,
++            endpoints_empty_since,
 +        })
 +    }
 +
@@ -733,15 +772,86 @@ index 000000000..2bf5f9fc1
 +        Ok(request)
 +    }
 +
-+    fn is_retryable_initial_rpc(udf_type: UdfType, status: &tonic::Status) -> bool {
-+        let side_effect_free = matches!(udf_type, UdfType::Query | UdfType::Mutation);
-+        match status.code() {
-+            tonic::Code::Unavailable | tonic::Code::DeadlineExceeded => side_effect_free,
-+            tonic::Code::ResourceExhausted => {
-+                side_effect_free && status.message().contains("WorkerOverloaded")
-+            },
-+            _ => false,
++    fn is_retryable_rpc(udf_type: UdfType, status: &tonic::Status) -> bool {
++        if !matches!(udf_type, UdfType::Query | UdfType::Mutation) {
++            return false;
 +        }
++        if status.code() == tonic::Code::Unavailable {
++            return true;
++        }
++        status
++            .error_metadata()
++            .is_some_and(|metadata| metadata.is_rejected_before_execution())
++    }
++
++    fn ensure_endpoints_available(&self) -> anyhow::Result<()> {
++        let empty_since = self.endpoints_empty_since.load(Ordering::Relaxed);
++        if empty_since == 0 {
++            return Ok(());
++        }
++        let elapsed_nanos = self.endpoints_epoch.elapsed().as_nanos() as u64;
++        if elapsed_nanos.saturating_sub(empty_since)
++            < FUNRUN_EMPTY_ENDPOINTS_FAIL_FAST.as_nanos() as u64
++        {
++            return Ok(());
++        }
++        anyhow::bail!(ErrorMetadata::rejected_before_execution(
++            "FunrunUnavailable",
++            "funrun DNS has resolved no endpoints for over 30s; check the funrun Service",
++        ))
++    }
++
++    async fn run_function_attempt(
++        &self,
++        req: tonic::Request<pb::funrun::RunFunctionRequest>,
++        log_line_sender: &Option<mpsc::UnboundedSender<LogLine>>,
++        parts_forwarded: &mut bool,
++    ) -> Result<pb::funrun::RunFunctionResult, RunFunctionAttemptError> {
++        let mut client = pb::funrun::funrun_client::FunrunClient::new(self.channel.clone())
++            .max_decoding_message_size(*MAX_GRPC_MESSAGE_BYTES)
++            .max_encoding_message_size(*MAX_GRPC_MESSAGE_BYTES);
++        let mut stream = match client.run_function(req).await {
++            Ok(response) => response.into_inner(),
++            Err(status) => return Err(RunFunctionAttemptError::Rpc(status)),
++        };
++        let mut result = None;
++        loop {
++            let part = match stream.message().await {
++                Ok(part) => part,
++                Err(status) => return Err(RunFunctionAttemptError::Rpc(status)),
++            };
++            let Some(part) = part else {
++                break;
++            };
++            match part.part {
++                Some(pb::funrun::run_function_response_part::Part::LogLine(log_line)) => {
++                    let log_line =
++                        LogLine::try_from(log_line).map_err(RunFunctionAttemptError::Internal)?;
++                    if let Some(sender) = log_line_sender {
++                        *parts_forwarded = true;
++                        let _ = sender.send(log_line);
++                    }
++                },
++                Some(pb::funrun::run_function_response_part::Part::Result(r)) => {
++                    if result.is_some() {
++                        return Err(RunFunctionAttemptError::Internal(anyhow::anyhow!(
++                            "funrun sent more than one terminal result"
++                        )));
++                    }
++                    result = Some(r);
++                },
++                None => {
++                    return Err(RunFunctionAttemptError::Internal(anyhow::anyhow!(
++                        "funrun sent an empty RunFunctionResponsePart"
++                    )));
++                },
++            }
++        }
++        result.ok_or_else(|| {
++            RunFunctionAttemptError::Internal(anyhow::anyhow!(
++                "funrun stream ended without a terminal result"
++            ))
++        })
 +    }
 +
 +    async fn run_function_remote(
@@ -812,71 +922,70 @@ index 000000000..2bf5f9fc1
 +            auth_header,
 +        };
 +        let max_attempts = (*common::knobs::FUNRUN_CLIENT_MAX_RETRIES as u32).saturating_add(1);
++        let retryable = matches!(udf_type, UdfType::Query | UdfType::Mutation);
 +        let mut attempt: u32 = 0;
 +        let mut request = Some(request);
-+        let (mut stream, first_part) = 'attempts: loop {
-+            let mut client = pb::funrun::funrun_client::FunrunClient::new(self.channel.clone())
-+                .max_decoding_message_size(*MAX_GRPC_MESSAGE_BYTES)
-+                .max_encoding_message_size(*MAX_GRPC_MESSAGE_BYTES);
-+            let last_attempt = attempt + 1 >= max_attempts;
-+            let req = if last_attempt {
-+                request.take().expect("funrun request already consumed")
-+            } else {
-+                request.clone().expect("funrun request missing")
-+            };
-+            let mut req = self.authenticated_request(req)?;
-+            if matches!(udf_type, UdfType::Query | UdfType::Mutation) {
-+                req.set_timeout(Duration::from_secs(600));
-+            }
-+            let status = match client.run_function(req).await {
-+                Ok(response) => {
-+                    let mut stream = response.into_inner();
-+                    match stream.message().await {
-+                        Ok(first) => break 'attempts (stream, first),
-+                        Err(status) => status,
++        let result =
++            'attempts: loop {
++                let last_attempt = !retryable || attempt + 1 >= max_attempts;
++                let mut parts_forwarded = false;
++                let failure = 'attempt: {
++                    if let Err(e) = self.ensure_endpoints_available() {
++                        break 'attempt RunFunctionAttemptError::NoEndpoints(e);
 +                    }
-+                },
-+                Err(status) => status,
-+            };
-+            if !last_attempt && Self::is_retryable_initial_rpc(udf_type, &status) {
-+                attempt += 1;
-+                self.rt
-+                    .wait(Duration::from_millis(50 * u64::from(attempt)))
-+                    .await;
-+                continue;
-+            }
-+            return Err(status.into_anyhow()).context("funrun RunFunction failed");
-+        };
-+        let mut result: Option<pb::funrun::RunFunctionResult> = None;
-+        let mut next_part = first_part;
-+        while let Some(part) = next_part {
-+            match part.part {
-+                Some(pb::funrun::run_function_response_part::Part::LogLine(log_line)) => {
-+                    let log_line = LogLine::try_from(log_line)?;
-+                    if let Some(sender) = &log_line_sender {
-+                        let _ = sender.send(log_line);
++                    let req = if last_attempt {
++                        request.take().expect("funrun request already consumed")
++                    } else {
++                        request.clone().expect("funrun request missing")
++                    };
++                    let req = self.authenticated_request(req)?;
++                    let attempt_fut =
++                        self.run_function_attempt(req, &log_line_sender, &mut parts_forwarded);
++                    let outcome = if retryable {
++                        timeout(FUNRUN_RESPONSE_TIMEOUT, attempt_fut).await
++                    } else {
++                        Ok(attempt_fut.await)
++                    };
++                    match outcome {
++                        Ok(Ok(result)) => break 'attempts result,
++                        Ok(Err(failure)) => failure,
++                        Err(_) => RunFunctionAttemptError::TimedOut,
 +                    }
-+                },
-+                Some(pb::funrun::run_function_response_part::Part::Result(r)) => {
-+                    anyhow::ensure!(
-+                        result.is_none(),
-+                        "funrun sent more than one terminal result"
-+                    );
-+                    result = Some(r);
-+                },
-+                None => anyhow::bail!("funrun sent an empty RunFunctionResponsePart"),
-+            }
-+            next_part = stream
-+                .message()
-+                .await
-+                .map_err(|status| status.into_anyhow())
-+                .context("funrun RunFunction stream error")?;
-+        }
++                };
++                let retry = !last_attempt
++                    && !parts_forwarded
++                    && match &failure {
++                        RunFunctionAttemptError::NoEndpoints(_)
++                        | RunFunctionAttemptError::TimedOut => true,
++                        RunFunctionAttemptError::Rpc(status) => {
++                            Self::is_retryable_rpc(udf_type, status)
++                        },
++                        RunFunctionAttemptError::Internal(_) => false,
++                    };
++                if retry {
++                    attempt += 1;
++                    self.rt
++                        .wait(Duration::from_millis(50 * u64::from(attempt)))
++                        .await;
++                    continue;
++                }
++                return match failure {
++                    RunFunctionAttemptError::NoEndpoints(e)
++                    | RunFunctionAttemptError::Internal(e) => Err(e),
++                    RunFunctionAttemptError::Rpc(status) => {
++                        Err(status.into_anyhow()).context("funrun RunFunction failed")
++                    },
++                    RunFunctionAttemptError::TimedOut => {
++                        Err(anyhow::anyhow!("funrun response timed out"))
++                            .context("funrun RunFunction failed")
++                    },
++                };
++            };
 +        let pb::funrun::RunFunctionResult {
 +            outcome,
 +            final_transaction,
 +            usage_stats,
-+        } = result.context("funrun stream ended without a terminal result")?;
++        } = result;
 +        let outcome = FunctionOutcome::from_proto(
 +            outcome.ok_or_else(|| anyhow::anyhow!("funrun response missing outcome"))?,
 +            path_and_args,
@@ -970,6 +1079,7 @@ index 000000000..2bf5f9fc1
 +            http_request_head: Some(request_head.clone().into()),
 +            http_request_body,
 +        };
++        self.ensure_endpoints_available()?;
 +        let mut client = pb::funrun::funrun_client::FunrunClient::new(self.channel.clone())
 +            .max_decoding_message_size(*MAX_GRPC_MESSAGE_BYTES)
 +            .max_encoding_message_size(*MAX_GRPC_MESSAGE_BYTES);
@@ -1305,7 +1415,7 @@ index 3ed5f6694..8cbd37aae 100644
  
      pub fn concurrency_limiter(&self) -> &isolate::ConcurrencyLimiter {
 diff --git a/crates/isolate/src/client.rs b/crates/isolate/src/client.rs
-index 05ebfbbf5..1a5b68079 100644
+index 05ebfbbf5..cf82545dd 100644
 --- a/crates/isolate/src/client.rs
 +++ b/crates/isolate/src/client.rs
 @@ -9,6 +9,7 @@ use std::{
@@ -1340,17 +1450,15 @@ index 05ebfbbf5..1a5b68079 100644
              max_workers: self.max_workers,
          }
      }
-@@ -543,6 +545,9 @@ pub struct IsolateClient<RT: Runtime> {
+@@ -543,6 +545,7 @@ pub struct IsolateClient<RT: Runtime> {
      /// Shared with the scheduler. Tracks the total number of in-progress
      /// workers across all clients.
      active_workers: Arc<AtomicUsize>,
-+    /// Set when the scheduler task has exited (worker death or shutdown):
-+    /// the pool can no longer execute anything and health checks must fail.
 +    scheduler_exited: Arc<AtomicBool>,
      max_workers: usize,
  }
  
-@@ -576,6 +581,9 @@ impl<RT: Runtime> IsolateClient<RT> {
+@@ -576,6 +579,9 @@ impl<RT: Runtime> IsolateClient<RT> {
          let active_workers = Arc::new(AtomicUsize::new(0));
          let _active_workers = active_workers.clone();
          let rt_clone = rt.clone();
@@ -1360,7 +1468,7 @@ index 05ebfbbf5..1a5b68079 100644
          let scheduler = rt.spawn("shared_isolate_scheduler", async move {
              // The scheduler thread pops a worker from available_workers and
              // pops a request from the CoDelQueueReceiver. Then it sends the request
-@@ -589,7 +597,9 @@ impl<RT: Runtime> IsolateClient<RT> {
+@@ -589,7 +595,9 @@ impl<RT: Runtime> IsolateClient<RT> {
                  max_percent_per_client,
                  _active_workers,
              );
@@ -1371,7 +1479,7 @@ index 05ebfbbf5..1a5b68079 100644
          });
          Ok(Self {
              rt,
-@@ -599,6 +609,7 @@ impl<RT: Runtime> IsolateClient<RT> {
+@@ -599,6 +607,7 @@ impl<RT: Runtime> IsolateClient<RT> {
              handles,
              concurrency_limiter,
              active_workers,
@@ -1379,13 +1487,10 @@ index 05ebfbbf5..1a5b68079 100644
              max_workers: max_isolate_workers,
          })
      }
-@@ -619,6 +630,13 @@ impl<RT: Runtime> IsolateClient<RT> {
+@@ -619,6 +628,10 @@ impl<RT: Runtime> IsolateClient<RT> {
          self.max_workers
      }
  
-+    /// False once the scheduler task has exited (worker death or shutdown);
-+    /// the pool is permanently unable to execute and the process should be
-+    /// reported unhealthy.
 +    pub fn scheduler_alive(&self) -> bool {
 +        !self.scheduler_exited.load(Ordering::SeqCst)
 +    }
@@ -1393,17 +1498,15 @@ index 05ebfbbf5..1a5b68079 100644
      pub fn aggregate_heap_stats(&self) -> IsolateHeapStats {
          let mut total = IsolateHeapStats::default();
          for handle in self.handles.lock().iter() {
-@@ -1169,6 +1187,9 @@ pub struct SharedIsolateScheduler<RT: Runtime, W: IsolateWorker<RT>> {
+@@ -1169,6 +1182,7 @@ pub struct SharedIsolateScheduler<RT: Runtime, W: IsolateWorker<RT>> {
      /// recreated and there will be no penalty for reassigning this worker to a
      /// new client.
      available_workers: HashMap<String, VecDeque<IdleWorkerState>>,
-+    /// Workers spawned at startup (`ISOLATE_PRELOAD_WORKERS`) that have not
-+    /// yet been assigned to any client. Handed out before growing the pool.
 +    preloaded_workers: VecDeque<usize>,
      /// Set of futures awaiting a response from an active worker.
      in_progress_workers: FuturesUnordered<oneshot::Receiver<ActiveWorkerState>>,
      /// Counts the number of active workers per client. Should only contain a
-@@ -1208,6 +1229,7 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
+@@ -1208,6 +1222,7 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
              in_progress_count: HashMap::new(),
              active_workers,
              available_workers: HashMap::new(),
@@ -1411,7 +1514,7 @@ index 05ebfbbf5..1a5b68079 100644
              max_workers,
              handles,
              max_percent_per_client,
-@@ -1251,6 +1273,10 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
+@@ -1251,6 +1266,10 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
  
      pub async fn run(mut self, receiver: CoDelQueueReceiver<RT, Request<RT>>) {
          log_pool_max(self.worker.config().name, self.max_workers);
@@ -1422,12 +1525,10 @@ index 05ebfbbf5..1a5b68079 100644
          let mut receiver = receiver.fuse();
          let mut report_stats = self.rt.wait(*HEAP_WORKER_REPORT_INTERVAL_SECONDS);
          loop {
-@@ -1351,26 +1377,15 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
+@@ -1351,26 +1370,13 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
              }
              return Some(worker.worker_id);
          }
-+        // Prefer a preloaded, never-assigned worker: its isolate is already
-+        // built and using it costs no client-change recreate.
 +        if let Some(worker_id) = self.preloaded_workers.pop_front() {
 +            return Some(worker_id);
 +        }
@@ -1455,7 +1556,7 @@ index 05ebfbbf5..1a5b68079 100644
          }
          // No existing worker for this client and we've already started the max number
          // of workers -- just grab the least recently used worker. This worker is least
-@@ -1413,6 +1428,26 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
+@@ -1413,6 +1419,26 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
          Some(worker_id.worker_id)
      }
  
@@ -1484,7 +1585,7 @@ index 05ebfbbf5..1a5b68079 100644
          for handle in self.handles.lock().iter() {
 diff --git a/crates/keybroker/src/funrun_auth.rs b/crates/keybroker/src/funrun_auth.rs
 new file mode 100644
-index 000000000..d00415a92
+index 000000000..d76e4928d
 --- /dev/null
 +++ b/crates/keybroker/src/funrun_auth.rs
 @@ -0,0 +1,159 @@
@@ -1554,7 +1655,7 @@ index 000000000..d00415a92
 +    m_current | m_prev | m_next
 +}
 +
-+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
++fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 +    aws_lc_rs::constant_time::verify_slices_are_equal(a, b).is_ok()
 +}
 +
@@ -1648,7 +1749,7 @@ index 000000000..d00415a92
 +    }
 +}
 diff --git a/crates/keybroker/src/lib.rs b/crates/keybroker/src/lib.rs
-index eeeab09e9..30f29bb10 100644
+index eeeab09e9..3ba65085d 100644
 --- a/crates/keybroker/src/lib.rs
 +++ b/crates/keybroker/src/lib.rs
 @@ -4,6 +4,7 @@
@@ -1659,12 +1760,11 @@ index eeeab09e9..30f29bb10 100644
  mod legacy_encryptor;
  mod metrics;
  mod operations;
-@@ -27,6 +28,13 @@ pub use self::{
+@@ -27,6 +28,12 @@ pub use self::{
          UserIdentity,
      },
      encryptor::Encryptor,
 +    funrun_auth::{
-+        constant_time_eq,
 +        constant_time_eq_sha256,
 +        funrun_auth_header,
 +        verify_funrun_auth_header,

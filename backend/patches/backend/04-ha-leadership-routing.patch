@@ -1,5 +1,5 @@
 diff --git a/crates/local_backend/src/config.rs b/crates/local_backend/src/config.rs
-index 986cfe59a..e7da231d6 100644
+index 986cfe59a..82f7a31a8 100644
 --- a/crates/local_backend/src/config.rs
 +++ b/crates/local_backend/src/config.rs
 @@ -10,6 +10,7 @@ use clap::{
@@ -10,17 +10,20 @@ index 986cfe59a..e7da231d6 100644
      ConvexOrigin,
      ConvexSite,
  };
-@@ -34,6 +35,9 @@ pub struct LocalConfig {
+@@ -34,6 +35,12 @@ pub struct LocalConfig {
      #[clap(short, long, value_enum, default_value_t = DbDriverTag::Sqlite)]
      pub db: DbDriverTag,
  
 +    #[clap(long, value_enum, default_value_t = BackendRole::Leader, env = "CONVEX_BACKEND_ROLE")]
 +    pub role: BackendRole,
 +
++    #[clap(long, env = "CONVEX_BOOT_FOLLOWER_WHEN_INITIALIZED", value_parser = clap::builder::BoolishValueParser::new())]
++    pub boot_follower_when_initialized: bool,
++
      /// Host interface to bind to
      #[clap(short, long, default_value = "0.0.0.0")]
      pub interface: ::std::net::Ipv4Addr,
-@@ -248,5 +252,4 @@ impl LocalConfig {
+@@ -248,5 +255,4 @@ impl LocalConfig {
              }
          }
      }
@@ -28,10 +31,10 @@ index 986cfe59a..e7da231d6 100644
  }
 diff --git a/crates/local_backend/src/leadership.rs b/crates/local_backend/src/leadership.rs
 new file mode 100644
-index 000000000..ddddaa8ff
+index 000000000..dc8b81e60
 --- /dev/null
 +++ b/crates/local_backend/src/leadership.rs
-@@ -0,0 +1,798 @@
+@@ -0,0 +1,795 @@
 +use std::sync::{
 +    atomic::{
 +        AtomicU8,
@@ -529,10 +532,7 @@ index 000000000..ddddaa8ff
 +                DemotionAttempt::Started => {},
 +                DemotionAttempt::AlreadyFollower => return true,
 +                DemotionAttempt::AlreadyInProgress => return true,
-+                DemotionAttempt::PromotionInProgress => {
-+                    role.abort_promotion();
-+                    return false;
-+                },
++                DemotionAttempt::PromotionInProgress => return false,
 +            }
 +            match application.become_follower(rw_persistence).await {
 +                Ok(()) => {
@@ -831,7 +831,7 @@ index 000000000..ddddaa8ff
 +    }
 +}
 diff --git a/crates/local_backend/src/router.rs b/crates/local_backend/src/router.rs
-index 5e8fdcc1d..c42222cfc 100644
+index 5e8fdcc1d..c90c4d708 100644
 --- a/crates/local_backend/src/router.rs
 +++ b/crates/local_backend/src/router.rs
 @@ -1,6 +1,9 @@
@@ -925,7 +925,7 @@ index 5e8fdcc1d..c42222cfc 100644
          .route(
              "/",
              get(|| async { "This Convex deployment is running. See https://docs.convex.dev/." }),
-@@ -590,18 +603,68 @@ where
+@@ -590,10 +603,15 @@ where
          .route("/get_table_column_names", get(get_table_column_names))
  }
  
@@ -943,11 +943,9 @@ index 5e8fdcc1d..c42222cfc 100644
          .allow_methods(vec![
              Method::GET,
              Method::POST,
-             Method::OPTIONS,
--            Method::PATCH,
+@@ -602,6 +620,51 @@ pub fn cors() -> CorsLayer {
              Method::DELETE,
              Method::PUT,
-+            Method::PATCH,
          ])
 -        .allow_origin(AllowOrigin::mirror_request())
 -        .max_age(Duration::from_secs(86400))

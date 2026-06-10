@@ -156,6 +156,73 @@ index 000000000..bbb76e89f
 +  string tablet_id = 1;
 +  uint64 rows_read = 2;
 +}
+diff --git a/crates/pb/src/error_metadata.rs b/crates/pb/src/error_metadata.rs
+index 3c2f00973..eaa4e382a 100644
+--- a/crates/pb/src/error_metadata.rs
++++ b/crates/pb/src/error_metadata.rs
+@@ -131,11 +131,23 @@ impl TryFrom<ErrorMetadataProto> for ErrorMetadata {
+ pub trait ErrorMetadataStatusExt {
+     fn from_anyhow(error: anyhow::Error) -> Self;
+     fn into_anyhow(self) -> anyhow::Error;
++    fn error_metadata(&self) -> Option<ErrorMetadata>;
+     fn context<C>(self, context: C) -> anyhow::Error
+     where
+         C: Display + Send + Sync + 'static;
+ }
+ 
++fn decode_status_details(details: &[u8]) -> anyhow::Result<Option<ErrorMetadata>> {
++    let details = StatusDetailsProto::decode(details)
++        .map_err(|err| anyhow::anyhow!("Failed to decode StatusDetails proto: {}", err))?;
++    details
++        .error_metadata
++        .map(|metadata| {
++            ErrorMetadata::try_from(metadata).context("Failed to parse ErrorMetadata proto")
++        })
++        .transpose()
++}
++
+ impl ErrorMetadataStatusExt for tonic::Status {
+     fn from_anyhow(error: anyhow::Error) -> Self {
+         let message = format!("{error:#}");
+@@ -152,11 +164,9 @@ impl ErrorMetadataStatusExt for tonic::Status {
+ 
+     fn into_anyhow(self) -> anyhow::Error {
+         let code = self.code();
+-        let details = match StatusDetailsProto::decode(self.details()) {
+-            Ok(details) => details,
+-            Err(err) => {
+-                return anyhow::anyhow!("Failed to decode StatusDetails proto: {}", err);
+-            },
++        let metadata = match decode_status_details(self.details()) {
++            Ok(metadata) => metadata,
++            Err(err) => return err,
+         };
+         let message = self.message().to_string();
+         let mut source_chain = String::new();
+@@ -167,11 +177,7 @@ impl ErrorMetadataStatusExt for tonic::Status {
+         }
+         let mut error: anyhow::Error =
+             anyhow::anyhow!("status: {code:?}, message: {message:?}{source_chain}");
+-        if let Some(error_metadata) = details.error_metadata {
+-            let error_metadata = match ErrorMetadata::try_from(error_metadata) {
+-                Ok(error_metadata) => error_metadata,
+-                Err(err) => return err.context("Failed to parse ErrorMetadata proto"),
+-            };
++        if let Some(error_metadata) = metadata {
+             error = error.context(error_metadata)
+         } else if code == tonic::Code::ResourceExhausted {
+             error = error.context(ErrorMetadata::overloaded(
+@@ -182,6 +188,10 @@ impl ErrorMetadataStatusExt for tonic::Status {
+         error
+     }
+ 
++    fn error_metadata(&self) -> Option<ErrorMetadata> {
++        decode_status_details(self.details()).ok().flatten()
++    }
++
+     fn context<C>(self, context: C) -> anyhow::Error
+     where
+         C: Display + Send + Sync + 'static,
 diff --git a/crates/pb/src/lib.rs b/crates/pb/src/lib.rs
 index 0a2d279b4..30da5ac90 100644
 --- a/crates/pb/src/lib.rs

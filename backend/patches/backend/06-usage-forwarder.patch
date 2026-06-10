@@ -1,28 +1,26 @@
 diff --git a/crates/events/src/usage.rs b/crates/events/src/usage.rs
-index d8ef7d6f1..a65ed43af 100644
+index d8ef7d6f1..81bb043dd 100644
 --- a/crates/events/src/usage.rs
 +++ b/crates/events/src/usage.rs
-@@ -13,6 +13,9 @@ pub enum UdfType {
+@@ -13,6 +13,8 @@ pub enum UdfType {
  
  #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
  pub struct FunctionCallUsageFields {
-+    /// Event creation time in Unix milliseconds.
 +    #[serde(default)]
 +    pub timestamp: i64,
      /// The ExecutionId of a particular UDF
      pub id: String,
      /// The RequestId of a particular UDF
-@@ -60,6 +63,9 @@ pub struct FunctionCallUsageFields {
+@@ -60,6 +62,8 @@ pub struct FunctionCallUsageFields {
      pub occ_write_source: Option<String>,
      /// The retry number of the OCC. Only set if is_occ is true.
      pub occ_retry_count: Option<u64>,
-+    /// Whether this OCC exhausted retries and ended the mutation.
 +    #[serde(default)]
 +    pub occ_failed_permanently: bool,
  }
  
  #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-@@ -141,6 +147,8 @@ pub enum UsageEvent {
+@@ -141,6 +145,8 @@ pub enum UsageEvent {
          egress: u64,
      },
      InsightReadLimit {
@@ -31,7 +29,7 @@ index d8ef7d6f1..a65ed43af 100644
          id: String,
          request_id: String,
          udf_id: String,
-@@ -270,4 +278,4 @@ impl UsageEventLogger for NoOpUsageEventLogger {
+@@ -270,4 +276,4 @@ impl UsageEventLogger for NoOpUsageEventLogger {
      async fn shutdown(&self) -> anyhow::Result<()> {
          Ok(())
      }
@@ -40,10 +38,10 @@ index d8ef7d6f1..a65ed43af 100644
 +}
 diff --git a/crates/local_backend/src/usage_forwarder.rs b/crates/local_backend/src/usage_forwarder.rs
 new file mode 100644
-index 000000000..373d81ada
+index 000000000..5711183a9
 --- /dev/null
 +++ b/crates/local_backend/src/usage_forwarder.rs
-@@ -0,0 +1,311 @@
+@@ -0,0 +1,342 @@
 +use async_trait::async_trait;
 +use axum::{
 +    extract::RawQuery,
@@ -81,6 +79,7 @@ index 000000000..373d81ada
 +};
 +
 +const USAGE_FORWARDER_CHANNEL_CAPACITY: usize = 2048;
++const USAGE_FORWARDER_MAX_BATCHES_PER_POST: usize = 32;
 +const SELF_HOSTED_USAGE_QUERY_PATH: &str = "/api/dashboard/teams/0/usage/query";
 +
 +register_convex_counter!(
@@ -101,12 +100,30 @@ index 000000000..373d81ada
 +    worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
 +}
 +
++fn coalesce_batches(
++    rx: &mut mpsc::Receiver<Vec<UsageEvent>>,
++    mut events: Vec<UsageEvent>,
++) -> (Vec<UsageEvent>, u64) {
++    let mut batches: u64 = 1;
++    while batches < USAGE_FORWARDER_MAX_BATCHES_PER_POST as u64 {
++        match rx.try_recv() {
++            Ok(more) => {
++                events.extend(more);
++                batches += 1;
++            },
++            Err(_) => break,
++        }
++    }
++    (events, batches)
++}
++
 +async fn post_events(
 +    client: &Client,
 +    sink_url: &str,
 +    token: Option<&str>,
 +    deployment: &str,
 +    events: Vec<UsageEvent>,
++    batches: u64,
 +) {
 +    if events.is_empty() {
 +        return;
@@ -122,7 +139,7 @@ index 000000000..373d81ada
 +    for attempt in 1..=3 {
 +        let Some(attempt_req) = req.try_clone() else {
 +            tracing::error!("usage sink request is not clonable; dropping batch");
-+            log_counter(&USAGE_FORWARDER_DROPPED_BATCHES_TOTAL, 1);
++            log_counter(&USAGE_FORWARDER_DROPPED_BATCHES_TOTAL, batches);
 +            return;
 +        };
 +        match attempt_req.send().await {
@@ -139,7 +156,7 @@ index 000000000..373d81ada
 +        }
 +    }
 +    tracing::error!("usage sink batch permanently failed after 3 attempts");
-+    log_counter(&USAGE_FORWARDER_DROPPED_BATCHES_TOTAL, 1);
++    log_counter(&USAGE_FORWARDER_DROPPED_BATCHES_TOTAL, batches);
 +}
 +
 +impl HttpUsageForwarder {
@@ -155,16 +172,28 @@ index 000000000..373d81ada
 +            loop {
 +                tokio::select! {
 +                    Some(events) = rx.recv() => {
-+                        post_events(&client, &sink_url, token.as_deref(), &deployment, events).await
++                        let (events, batches) = coalesce_batches(&mut rx, events);
++                        post_events(
++                            &client,
++                            &sink_url,
++                            token.as_deref(),
++                            &deployment,
++                            events,
++                            batches,
++                        )
++                        .await
 +                    },
 +                    _ = &mut shutdown_rx => {
++                        rx.close();
 +                        while let Ok(events) = rx.try_recv() {
++                            let (events, batches) = coalesce_batches(&mut rx, events);
 +                            post_events(
 +                                &client,
 +                                &sink_url,
 +                                token.as_deref(),
 +                                &deployment,
 +                                events,
++                                batches,
 +                            )
 +                            .await;
 +                        }

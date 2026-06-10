@@ -28,6 +28,41 @@ index 6c018be51..0b891fcc1 100644
        {...props}
      >
        {children}
+diff --git a/npm-packages/common/config/rush/pnpm-lock.yaml b/npm-packages/common/config/rush/pnpm-lock.yaml
+index 86a913b39..fdf1630ce 100644
+--- a/npm-packages/common/config/rush/pnpm-lock.yaml
++++ b/npm-packages/common/config/rush/pnpm-lock.yaml
+@@ -1194,6 +1194,9 @@ importers:
+       react-resizable-panels:
+         specifier: ~2.1.1
+         version: 2.1.9(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
++      react-sparklines:
++        specifier: ~1.7.0
++        version: 1.7.0(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
+       react-table:
+         specifier: 7.8.0
+         version: 7.8.0(react@18.3.1)
+@@ -1291,6 +1294,9 @@ importers:
+       '@types/react-dom':
+         specifier: ^18.0.0
+         version: 18.3.7(@types/react@18.3.26)
++      '@types/react-sparklines':
++        specifier: ~1.7.5
++        version: 1.7.5
+       '@types/react-table':
+         specifier: ^7.7.2
+         version: 7.7.20
+diff --git a/npm-packages/common/config/rush/repo-state.json b/npm-packages/common/config/rush/repo-state.json
+index 4f1fdb24f..5b55b22cd 100644
+--- a/npm-packages/common/config/rush/repo-state.json
++++ b/npm-packages/common/config/rush/repo-state.json
+@@ -1,5 +1,5 @@
+ // DO NOT MODIFY THIS FILE MANUALLY BUT DO COMMIT IT. It is generated and used by Rush.
+ {
+   "preferredVersionsHash": "ddfe6c8b90159b81dbcfa41446efd1a25968dcc6",
+-  "packageJsonInjectedDependenciesHash": "61dedc14596b97059436b83e463487ebc498a5c1"
++  "packageJsonInjectedDependenciesHash": "3e7571a46f43deae03b4b4510392150aebe34849"
+ }
 diff --git a/npm-packages/dashboard-common/package.json b/npm-packages/dashboard-common/package.json
 index 715c4eed5..c3701fe9c 100644
 --- a/npm-packages/dashboard-common/package.json
@@ -1045,10 +1080,10 @@ index 000000000..71eb950fa
 +}
 diff --git a/npm-packages/dashboard-common/src/features/health/components/HealthWithInsights.tsx b/npm-packages/dashboard-common/src/features/health/components/HealthWithInsights.tsx
 new file mode 100644
-index 000000000..a0b09525c
+index 000000000..e12efdc0b
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/health/components/HealthWithInsights.tsx
-@@ -0,0 +1,348 @@
+@@ -0,0 +1,292 @@
 +import React, {
 +  useState,
 +  useCallback,
@@ -1071,6 +1106,7 @@ index 000000000..a0b09525c
 +  useInsightsPeriod,
 +  useIsInsightsNotConfigured,
 +  getInsightPageIdentifier,
++  insightsViewUrl,
 +} from "@common/features/health/lib/insights";
 +import { DeploymentInfoContext } from "@common/lib/deploymentContext";
 +import { useRouter } from "next/router";
@@ -1151,21 +1187,7 @@ index 000000000..a0b09525c
 +            icon={<ChevronLeftIcon className="size-5" />}
 +            tip="Back to Health"
 +            onClick={() =>
-+              void push(
-+                {
-+                  pathname: "/",
-+                  query: {
-+                    team: query.team,
-+                    project: query.project,
-+                    deploymentName: query.deploymentName,
-+                    ...(query.lowInsightsThreshold
-+                      ? { lowInsightsThreshold: query.lowInsightsThreshold }
-+                      : {}),
-+                  },
-+                },
-+                undefined,
-+                { shallow: true },
-+              )
++              void push(insightsViewUrl(query), undefined, { shallow: true })
 +            }
 +            size="xs"
 +            variant="neutral"
@@ -1174,23 +1196,7 @@ index 000000000..a0b09525c
 +          />
 +        )}
 +        <h3 className="flex items-center gap-2 py-2">
-+          <MaybeLink
-+            href={
-+              page === "home"
-+                ? null
-+                : {
-+                    pathname: "/",
-+                    query: {
-+                      team: query.team,
-+                      project: query.project,
-+                      deploymentName: query.deploymentName,
-+                      ...(query.lowInsightsThreshold
-+                        ? { lowInsightsThreshold: query.lowInsightsThreshold }
-+                        : {}),
-+                    },
-+                  }
-+            }
-+          >
++          <MaybeLink href={page === "home" ? null : insightsViewUrl(query)}>
 +            Health
 +          </MaybeLink>{" "}
 +          {page.startsWith("insight") && (
@@ -1201,21 +1207,7 @@ index 000000000..a0b09525c
 +                  href={
 +                    page === "insights"
 +                      ? null
-+                      : {
-+                          pathname: "/",
-+                          query: {
-+                            team: query.team,
-+                            project: query.project,
-+                            deploymentName: query.deploymentName,
-+                            view: "insights",
-+                            ...(query.lowInsightsThreshold
-+                              ? {
-+                                  lowInsightsThreshold:
-+                                    query.lowInsightsThreshold,
-+                                }
-+                              : {}),
-+                          },
-+                        }
++                      : insightsViewUrl(query, "insights")
 +                  }
 +                >
 +                  Insights
@@ -1335,7 +1327,7 @@ index 000000000..a0b09525c
 +      </div>
 +      <div
 +        // @ts-expect-error https://github.com/facebook/react/issues/17157
-+        inert={!page.startsWith("insight:") ? "inert" : undefined}
++        inert={!page?.startsWith("insight:") ? "inert" : undefined}
 +        className="scrollbar flex w-full shrink-0 overflow-y-auto px-6"
 +      >
 +        <InsightSummaryBreakdown
@@ -1355,22 +1347,9 @@ index 000000000..a0b09525c
 +function PageWrapper({ children }: { children: React.ReactNode }) {
 +  const { query, push } = useRouter();
 +  const onViewAll = useCallback(() => {
-+    void push(
-+      {
-+        pathname: "/",
-+        query: {
-+          team: query.team,
-+          project: query.project,
-+          deploymentName: query.deploymentName,
-+          view: "insights",
-+          ...(query.lowInsightsThreshold
-+            ? { lowInsightsThreshold: query.lowInsightsThreshold }
-+            : {}),
-+        },
-+      },
-+      undefined,
-+      { shallow: true },
-+    );
++    void push(insightsViewUrl(query, "insights"), undefined, {
++      shallow: true,
++    });
 +  }, [query, push]);
 +  const { page } = useContext(InsightsContext) || {};
 +  return (
@@ -1380,7 +1359,7 @@ index 000000000..a0b09525c
 +      inert={page !== "home" ? "inert" : undefined}
 +    >
 +      {children}
-+      <SmallInsightsSummary onViewAll={onViewAll || (() => {})} />
++      <SmallInsightsSummary onViewAll={onViewAll} />
 +    </div>
 +  );
 +}
@@ -1582,13 +1561,14 @@ index 000000000..fbb76b742
 +}
 diff --git a/npm-packages/dashboard-common/src/features/health/components/InsightsSummaryListItem.tsx b/npm-packages/dashboard-common/src/features/health/components/InsightsSummaryListItem.tsx
 new file mode 100644
-index 000000000..4fe7c9bdc
+index 000000000..98e118c25
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/health/components/InsightsSummaryListItem.tsx
-@@ -0,0 +1,92 @@
+@@ -0,0 +1,82 @@
 +import {
 +  Insight,
 +  getInsightPageIdentifier,
++  insightsViewUrl,
 +} from "@common/features/health/lib/insights";
 +import {
 +  CrossCircledIcon,
@@ -1612,18 +1592,7 @@ index 000000000..4fe7c9bdc
 +      variant="unstyled"
 +      onClick={() => {
 +        void push(
-+          {
-+            pathname: "/",
-+            query: {
-+              team: query.team,
-+              project: query.project,
-+              deploymentName: query.deploymentName,
-+              view: getInsightPageIdentifier(insight),
-+              ...(query.lowInsightsThreshold
-+                ? { lowInsightsThreshold: query.lowInsightsThreshold }
-+                : {}),
-+            },
-+          },
++          insightsViewUrl(query, getInsightPageIdentifier(insight)),
 +          undefined,
 +          { shallow: true },
 +        );
@@ -2105,10 +2074,12 @@ index 000000000..fef3752c9
 +}
 diff --git a/npm-packages/dashboard-common/src/features/health/lib/insights.ts b/npm-packages/dashboard-common/src/features/health/lib/insights.ts
 new file mode 100644
-index 000000000..b87d07a20
+index 000000000..1b53347e2
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/health/lib/insights.ts
-@@ -0,0 +1,230 @@
+@@ -0,0 +1,218 @@
++import { ParsedUrlQuery } from "querystring";
++import { UrlObject } from "url";
 +import {
 +  rootComponentPath,
 +  useUsageQuery,
@@ -2188,31 +2159,12 @@ index 000000000..b87d07a20
 +  periodStart: string,
 +): HourlyCount[] {
 +  const currentTime = new Date();
-+  if (hourlyCounts.length === 0) {
-+    const startDate = new Date(periodStart);
-+    const result: HourlyCount[] = [];
-+    const currentDate = new Date(startDate);
-+    while (currentDate < currentTime) {
-+      const year = currentDate.getUTCFullYear();
-+      const month = String(currentDate.getUTCMonth() + 1).padStart(2, "0");
-+      const day = String(currentDate.getUTCDate()).padStart(2, "0");
-+      const hour = String(currentDate.getUTCHours()).padStart(2, "0");
-+      const formattedHour = `${year}-${month}-${day} ${hour}:00:00`;
-+      result.push({
-+        hour: formattedHour,
-+        count: 0,
-+      });
-+      currentDate.setHours(currentDate.getHours() + 1);
-+    }
-+    return result;
-+  }
 +  const hourToCountMap = new Map<string, number>();
 +  hourlyCounts.forEach((item) => {
 +    hourToCountMap.set(item.hour, item.count);
 +  });
-+  const startDate = new Date(periodStart);
 +  const result: HourlyCount[] = [];
-+  const currentDate = new Date(startDate);
++  const currentDate = new Date(periodStart);
 +  while (currentDate < currentTime) {
 +    const year = currentDate.getUTCFullYear();
 +    const month = String(currentDate.getUTCMonth() + 1).padStart(2, "0");
@@ -2226,20 +2178,33 @@ index 000000000..b87d07a20
 +      hour: formattedHour,
 +      count,
 +    });
-+    currentDate.setHours(currentDate.getHours() + 1);
++    currentDate.setUTCHours(currentDate.getUTCHours() + 1);
 +  }
 +  return result;
 +}
 +
-+export function useInsights(): Insight[] | undefined {
-+  const moduleFunctions = useModuleFunctions();
++function useInsightsUsage() {
 +  const period = useInsightsPeriod();
-+  const { data: insightsData, error } = useUsageQuery({
++  const result = useUsageQuery({
 +    period: {
 +      from: period.from.split("T")[0],
 +      to: period.to.split("T")[0],
 +    },
 +  });
++  return { period, ...result };
++}
++
++function isInsightsNotConfiguredError(error: any): boolean {
++  return (
++    error?.status === 404 ||
++    (error instanceof Error &&
++      error.message.startsWith("Server responded with 404"))
++  );
++}
++
++export function useInsights(): Insight[] | undefined {
++  const moduleFunctions = useModuleFunctions();
++  const { period, data: insightsData, error } = useInsightsUsage();
 +  if (error) {
 +    return [];
 +  }
@@ -2296,36 +2261,13 @@ index 000000000..b87d07a20
 +}
 +
 +export function useIsInsightsNotConfigured(): boolean {
-+  const period = useInsightsPeriod();
-+  const { error } = useUsageQuery({
-+    period: {
-+      from: period.from.split("T")[0],
-+      to: period.to.split("T")[0],
-+    },
-+  });
-+  return (
-+    error?.status === 404 ||
-+    (error instanceof Error &&
-+      error.message.startsWith("Server responded with 404"))
-+  );
++  const { error } = useInsightsUsage();
++  return isInsightsNotConfiguredError(error);
 +}
 +
 +export function useInsightsErrored(): boolean {
-+  const period = useInsightsPeriod();
-+  const { error } = useUsageQuery({
-+    period: {
-+      from: period.from.split("T")[0],
-+      to: period.to.split("T")[0],
-+    },
-+  });
-+  if (!error) {
-+    return false;
-+  }
-+  return !(
-+    error?.status === 404 ||
-+    (error instanceof Error &&
-+      error.message.startsWith("Server responded with 404"))
-+  );
++  const { error } = useInsightsUsage();
++  return !!error && !isInsightsNotConfiguredError(error);
 +}
 +
 +export function getInsightPageIdentifier(insight: Insight): string {
@@ -2338,6 +2280,21 @@ index 000000000..b87d07a20
 +    return `insight:${insight.kind}:${insight.componentPath}:${insight.functionId}:${insight.details.occTableName}`;
 +  }
 +  return `insight:${insight.kind}:${insight.componentPath}:${insight.functionId}`;
++}
++
++export function insightsViewUrl(
++  query: ParsedUrlQuery,
++  view?: string,
++): UrlObject {
++  return {
++    pathname: "/",
++    query: {
++      ...(view ? { view } : {}),
++      ...(query.lowInsightsThreshold
++        ? { lowInsightsThreshold: query.lowInsightsThreshold }
++        : {}),
++    },
++  };
 +}
 diff --git a/npm-packages/dashboard-common/src/features/health/lib/usage.ts b/npm-packages/dashboard-common/src/features/health/lib/usage.ts
 new file mode 100644
@@ -2986,31 +2943,19 @@ index 000000000..1476c354a
 +  );
 +}
 diff --git a/npm-packages/dashboard-common/src/layouts/SettingsSidebar.tsx b/npm-packages/dashboard-common/src/layouts/SettingsSidebar.tsx
-index e268b7bd5..796600de9 100644
+index e268b7bd5..fa13effce 100644
 --- a/npm-packages/dashboard-common/src/layouts/SettingsSidebar.tsx
 +++ b/npm-packages/dashboard-common/src/layouts/SettingsSidebar.tsx
-@@ -14,7 +14,6 @@ export const DEPLOYMENT_SETTINGS_PAGES_AND_NAMES = {
-   "custom-domains": "Custom Domains",
-   snapshots: "Snapshot Import & Export",
-   components: "Components",
--  backups: "Backup & Restore",
-   integrations: "Integrations",
- };
- 
-@@ -60,22 +59,14 @@ export function SettingsSidebar({
+@@ -60,8 +60,6 @@ export function SettingsSidebar({
        >
          {/* On larger screens, this is a sidebar and not a popover menu. */}
          {allowedPages.map((page) => {
 -          const showInCloudDashboard =
 -            page === "backups" && isCloudDeploymentInSelfHostedDashboard;
            const isUnavailableForSelfHosted =
--            (page === "backups" || page === "custom-domains") &&
--            isSelfHostedDeployment;
-+            page === "custom-domains" && isSelfHostedDeployment;
-           const isUnavailableForLocal =
--            (page === "backups" || page === "custom-domains") &&
--            deployment?.kind === "local";
-+            page === "custom-domains" && deployment?.kind === "local";
+             (page === "backups" || page === "custom-domains") &&
+             isSelfHostedDeployment;
+@@ -71,11 +69,7 @@ export function SettingsSidebar({
  
            return (
              <SidebarLink
@@ -3023,7 +2968,7 @@ index e268b7bd5..796600de9 100644
                isActive={page === selectedPage}
                key={page}
                disabled={isUnavailableForSelfHosted || isUnavailableForLocal}
-@@ -86,12 +77,8 @@ export function SettingsSidebar({
+@@ -86,12 +80,8 @@ export function SettingsSidebar({
                      ? `The ${DEPLOYMENT_SETTINGS_PAGES_AND_NAMES[page]} feature is not currently available in self-hosted deployments.`
                      : undefined
                }
@@ -3037,16 +2982,27 @@ index e268b7bd5..796600de9 100644
              </SidebarLink>
            );
          })}
-@@ -162,7 +149,5 @@ function useAllowedPages() {
+@@ -155,6 +145,7 @@ export function SettingsSidebar({
+ 
+ function useAllowedPages() {
+   const { nents } = useNents();
++  const { isSelfHosted } = useContext(DeploymentInfoContext);
+ 
+   let pages = DEPLOYMENT_SETTINGS_PAGES;
+ 
+@@ -162,7 +153,9 @@ function useAllowedPages() {
      pages = pages.filter((d) => d !== "components");
    }
  
 -  pages = pages.filter((d) => d !== "snapshots");
--
++  pages = pages.filter((d) =>
++    isSelfHosted ? d !== "backups" : d !== "snapshots",
++  );
+ 
    return pages;
  }
 diff --git a/npm-packages/dashboard-common/src/lib/deploymentApi.ts b/npm-packages/dashboard-common/src/lib/deploymentApi.ts
-index a3b43aab0..0ec675246 100644
+index a3b43aab0..a6240cac7 100644
 --- a/npm-packages/dashboard-common/src/lib/deploymentApi.ts
 +++ b/npm-packages/dashboard-common/src/lib/deploymentApi.ts
 @@ -1,14 +1,15 @@
@@ -3084,28 +3040,54 @@ index a3b43aab0..0ec675246 100644
  export function useFunctionUrl(udfPath: string, componentId?: string | null) {
    const { deploymentsURI } = useContext(DeploymentInfoContext);
  
-@@ -103,3 +101,192 @@ export const deploymentAuthMiddleware: Middleware =
+@@ -103,3 +101,174 @@ export const deploymentAuthMiddleware: Middleware =
  
      return useSWRNext(swrKey, fetcher, config);
    };
++
++async function deploymentResponseError(res: Response) {
++  const text = await res.text();
++  try {
++    return JSON.parse(text);
++  } catch {
++    return {
++      code: String(res.status),
++      message: text || `${res.status} ${res.statusText}`,
++    };
++  }
++}
++
++function useCheckedDeploymentFetch() {
++  const deploymentUrl = useDeploymentUrl();
++  const adminKey = useAdminKey();
++  const { reportHttpError } = useContext(DeploymentInfoContext);
++  return useCallback(
++    async (path: string, init: RequestInit = {}): Promise<Response | null> => {
++      const res = await fetch(`${deploymentUrl}${path}`, {
++        ...init,
++        headers: { Authorization: `Convex ${adminKey}`, ...init.headers },
++      });
++      if (res.ok) {
++        return res;
++      }
++      const err = await deploymentResponseError(res);
++      reportHttpError(init.method ?? "GET", res.url, err);
++      toast("error", err.message);
++      return null;
++    },
++    [deploymentUrl, adminKey, reportHttpError],
++  );
++}
 +
 +export function useGetZipExport(): (
 +  snapshotId: Id<"_exports">,
 +  filename: string,
 +) => Promise<void> {
-+  const deploymentUrl = useDeploymentUrl();
-+  const adminKey = useAdminKey();
-+  const { reportHttpError } = useContext(DeploymentInfoContext);
++  const checkedFetch = useCheckedDeploymentFetch();
 +  return useCallback(
 +    async (snapshotId: Id<"_exports">, filename: string) => {
-+      const url = `${deploymentUrl}/api/export/zip/${snapshotId}`;
-+      const res = await fetch(url, {
-+        headers: { Authorization: `Convex ${adminKey}` },
-+      });
-+      if (!res.ok) {
-+        const err = await deploymentResponseError(res);
-+        reportHttpError("GET", res.url, err);
-+        toast("error", err.message);
++      const res = await checkedFetch(`/api/export/zip/${snapshotId}`);
++      if (!res) {
 +        return;
 +      }
 +      const blob = await res.blob();
@@ -3118,64 +3100,35 @@ index a3b43aab0..0ec675246 100644
 +      document.body.removeChild(anchor);
 +      URL.revokeObjectURL(objectUrl);
 +    },
-+    [deploymentUrl, adminKey, reportHttpError],
++    [checkedFetch],
 +  );
 +}
 +
-+async function deploymentResponseError(res: Response) {
-+  const text = await res.text();
-+  try {
-+    return JSON.parse(text);
-+  } catch {
-+    return { message: text || `${res.status} ${res.statusText}` };
-+  }
-+}
-+
 +export function useRequestZipExport(): () => Promise<void> {
-+  const deploymentUrl = useDeploymentUrl();
-+  const adminKey = useAdminKey();
-+  const { reportHttpError } = useContext(DeploymentInfoContext);
++  const checkedFetch = useCheckedDeploymentFetch();
 +  return useCallback(async () => {
-+    const res = await fetch(
-+      `${deploymentUrl}/api/export/request/zip?includeStorage=true`,
-+      {
-+        method: "POST",
-+        headers: { Authorization: `Convex ${adminKey}` },
-+      },
++    const res = await checkedFetch(
++      "/api/export/request/zip?includeStorage=true",
++      { method: "POST" },
 +    );
-+    if (!res.ok) {
-+      const err = await deploymentResponseError(res);
-+      reportHttpError("POST", res.url, err);
-+      toast("error", err.message);
++    if (!res) {
 +      return;
 +    }
 +    toast("success", "Snapshot export requested.");
-+  }, [deploymentUrl, adminKey, reportHttpError]);
++  }, [checkedFetch]);
 +}
 +
 +export function useUploadSnapshotImport(): (file: File) => Promise<void> {
-+  const deploymentUrl = useDeploymentUrl();
-+  const adminKey = useAdminKey();
-+  const { reportHttpError } = useContext(DeploymentInfoContext);
++  const checkedFetch = useCheckedDeploymentFetch();
 +  return useCallback(
 +    async (file: File) => {
-+      const headers = { Authorization: `Convex ${adminKey}` };
-+      const checkedFetch = async (path: string, init: RequestInit) => {
-+        const res = await fetch(`${deploymentUrl}${path}`, {
-+          ...init,
-+          headers: { ...headers, ...init.headers },
-+        });
-+        if (!res.ok) {
-+          const err = await deploymentResponseError(res);
-+          reportHttpError(init.method ?? "GET", res.url, err);
-+          throw new Error(err.message);
-+        }
-+        return res;
-+      };
 +      try {
 +        const start = await checkedFetch("/api/import/start_upload", {
 +          method: "POST",
 +        });
++        if (!start) {
++          return;
++        }
 +        const { uploadToken } = await start.json();
 +        const chunkSize = Math.max(
 +          5 * 1024 * 1024,
@@ -3197,9 +3150,12 @@ index a3b43aab0..0ec675246 100644
 +              body: file.slice(offset, offset + chunkSize),
 +            },
 +          );
++          if (!part) {
++            return;
++          }
 +          partTokens.push(await part.json());
 +        }
-+        await checkedFetch("/api/import/finish_upload", {
++        const finish = await checkedFetch("/api/import/finish_upload", {
 +          method: "POST",
 +          headers: { "Content-Type": "application/json" },
 +          body: JSON.stringify({
@@ -3208,6 +3164,9 @@ index a3b43aab0..0ec675246 100644
 +            partTokens,
 +          }),
 +        });
++        if (!finish) {
++          return;
++        }
 +        toast("success", "Snapshot uploaded. Review and confirm the import.");
 +      } catch (error) {
 +        toast(
@@ -3216,60 +3175,39 @@ index a3b43aab0..0ec675246 100644
 +        );
 +      }
 +    },
-+    [deploymentUrl, adminKey, reportHttpError],
++    [checkedFetch],
 +  );
 +}
 +
 +export function useCancelImport(): (
 +  id: Id<"_snapshot_imports">,
 +) => Promise<void> {
-+  const deploymentUrl = useDeploymentUrl();
-+  const adminKey = useAdminKey();
-+  const { reportHttpError } = useContext(DeploymentInfoContext);
++  const checkedFetch = useCheckedDeploymentFetch();
 +  return useCallback(
 +    async (id: Id<"_snapshot_imports">) => {
-+      const res = await fetch(`${deploymentUrl}/api/cancel_import`, {
++      await checkedFetch("/api/cancel_import", {
 +        method: "POST",
-+        headers: {
-+          Authorization: `Convex ${adminKey}`,
-+          "Content-Type": "application/json",
-+        },
++        headers: { "Content-Type": "application/json" },
 +        body: JSON.stringify({ importId: id }),
 +      });
-+      if (res.status !== 200) {
-+        const err = await deploymentResponseError(res);
-+        reportHttpError("POST", res.url, err);
-+        toast("error", err.message);
-+      }
 +    },
-+    [deploymentUrl, adminKey, reportHttpError],
++    [checkedFetch],
 +  );
 +}
 +
 +export function useConfirmImport(): (
 +  id: Id<"_snapshot_imports">,
 +) => Promise<void> {
-+  const deploymentUrl = useDeploymentUrl();
-+  const adminKey = useAdminKey();
-+  const { reportHttpError } = useContext(DeploymentInfoContext);
++  const checkedFetch = useCheckedDeploymentFetch();
 +  return useCallback(
 +    async (importId: Id<"_snapshot_imports">) => {
-+      const url = `${deploymentUrl}/api/perform_import`;
-+      const res = await fetch(url, {
++      await checkedFetch("/api/perform_import", {
 +        method: "POST",
-+        headers: {
-+          Authorization: `Convex ${adminKey}`,
-+          "Content-Type": "application/json",
-+        },
++        headers: { "Content-Type": "application/json" },
 +        body: JSON.stringify({ importId }),
 +      });
-+      if (res.status !== 200) {
-+        const err = await deploymentResponseError(res);
-+        reportHttpError("POST", res.url, err);
-+        toast("error", err.message);
-+      }
 +    },
-+    [deploymentUrl, adminKey, reportHttpError],
++    [checkedFetch],
 +  );
 +}
 +

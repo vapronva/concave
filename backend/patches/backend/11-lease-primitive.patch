@@ -57,10 +57,45 @@ index 9da2989bb..9af453d36 100644
      persistence
          .write_persistence_global(PersistenceGlobalKey::MaxRepeatableTimestamp, now.into())
 diff --git a/crates/postgres/src/lib.rs b/crates/postgres/src/lib.rs
-index cce12606d..3da9a120c 100644
+index cce12606d..b43d95a42 100644
 --- a/crates/postgres/src/lib.rs
 +++ b/crates/postgres/src/lib.rs
-@@ -481,6 +481,22 @@ impl Persistence for PostgresPersistence {
+@@ -463,6 +463,34 @@ impl PostgresPersistence {
+             .await?
+             .is_none())
+     }
++
++    pub async fn schema_initialized(
++        pool: Arc<ConvexPgPool>,
++        options: PostgresReaderOptions,
++    ) -> anyhow::Result<bool> {
++        let schema = match &options.schema {
++            Some(s) => SchemaName::new(s)?,
++            None => SchemaName::new(&get_current_schema(&pool).await?)?,
++        };
++        let client = pool
++            .get_connection("schema_initialized", &schema, &options.instance_name)
++            .await?;
++        if client
++            .query_opt(sql::CHECK_LEASES_TABLE_SQL, &[])
++            .await?
++            .is_none()
++        {
++            return Ok(false);
++        }
++        let mut params = vec![];
++        if options.multitenant {
++            params.push(&options.instance_name.raw as &(dyn ToSql + Sync));
++        }
++        Ok(client
++            .query_opt(sql::check_lease_row_exists(options.multitenant), &params)
++            .await?
++            .is_some())
++    }
+ }
+ 
+ #[async_trait]
+@@ -481,6 +509,22 @@ impl Persistence for PostgresPersistence {
          })
      }
  
@@ -83,7 +118,7 @@ index cce12606d..3da9a120c 100644
      #[fastrace::trace]
      async fn write<'a>(
          &self,
-@@ -746,6 +762,10 @@ impl Persistence for PostgresPersistence {
+@@ -746,6 +790,10 @@ impl Persistence for PostgresPersistence {
          &self,
          mut documents: BoxStream<'_, Vec<DocumentLogEntry>>,
      ) -> anyhow::Result<()> {
@@ -94,7 +129,7 @@ index cce12606d..3da9a120c 100644
          let conn = self
              .lease
              .pool
-@@ -807,7 +827,10 @@ impl Persistence for PostgresPersistence {
+@@ -807,7 +855,10 @@ impl Persistence for PostgresPersistence {
              writer.finish().await?;
              break;
          }
@@ -106,7 +141,7 @@ index cce12606d..3da9a120c 100644
          Ok(())
      }
  
-@@ -815,6 +838,10 @@ impl Persistence for PostgresPersistence {
+@@ -815,6 +866,10 @@ impl Persistence for PostgresPersistence {
          &self,
          mut indexes: BoxStream<'_, Vec<PersistenceIndexEntry>>,
      ) -> anyhow::Result<()> {
@@ -117,7 +152,7 @@ index cce12606d..3da9a120c 100644
          let conn = self
              .lease
              .pool
-@@ -873,7 +900,10 @@ impl Persistence for PostgresPersistence {
+@@ -873,7 +928,10 @@ impl Persistence for PostgresPersistence {
              writer.finish().await?;
              break;
          }
@@ -129,7 +164,7 @@ index cce12606d..3da9a120c 100644
          Ok(())
      }
  
-@@ -1758,8 +1788,9 @@ struct Lease {
+@@ -1758,8 +1816,9 @@ struct Lease {
  }
  
  impl Lease {
@@ -141,7 +176,7 @@ index cce12606d..3da9a120c 100644
      async fn acquire(
          pool: Arc<ConvexPgPool>,
          schema: &SchemaName,
-@@ -1777,27 +1808,27 @@ impl Lease {
+@@ -1777,27 +1836,27 @@ impl Lease {
              .as_nanos() as i64;
  
          tracing::info!("attempting to acquire lease");
@@ -183,7 +218,7 @@ index cce12606d..3da9a120c 100644
              schema: schema.clone(),
              instance_name,
              multitenant,
-@@ -1805,6 +1836,61 @@ impl Lease {
+@@ -1805,6 +1864,61 @@ impl Lease {
          })
      }
  
@@ -246,10 +281,31 @@ index cce12606d..3da9a120c 100644
      /// still held, otherwise return `LeaseLostError`.
      ///
 diff --git a/crates/postgres/src/sql.rs b/crates/postgres/src/sql.rs
-index 5fc5d0a2e..45fbd62da 100644
+index 5fc5d0a2e..906cc0767 100644
 --- a/crates/postgres/src/sql.rs
 +++ b/crates/postgres/src/sql.rs
-@@ -759,12 +759,22 @@ pub const fn advisory_lease_check(multitenant: bool) -> &'static str {
+@@ -733,6 +733,20 @@ pub const fn unset_read_only(multitenant: bool) -> &'static str {
+     )
+ }
+ 
++pub(crate) const CHECK_LEASES_TABLE_SQL: &str =
++    r"SELECT 1 WHERE to_regclass('@db_name.leases') IS NOT NULL";
++
++pub const fn check_lease_row_exists(multitenant: bool) -> &'static str {
++    tableify!(
++        multitenant,
++        formatcp!(
++            "SELECT 1 FROM @db_name.leases WHERE {column}={value} LIMIT 1",
++            column = if multitenant { "instance_name" } else { "id" },
++            value = if multitenant { "$1" } else { "1" }
++        )
++    )
++}
++
+ // If this query returns a result, the lease is still valid and will remain so
+ // until the end of the transaction.
+ pub const fn lease_precond(multitenant: bool) -> &'static str {
+@@ -759,12 +773,22 @@ pub const fn advisory_lease_check(multitenant: bool) -> &'static str {
      )
  }
  
@@ -274,7 +330,7 @@ index 5fc5d0a2e..45fbd62da 100644
              column = if multitenant { "instance_name" } else { "id" },
              value = if multitenant { "$2" } else { "1" }
          )
-@@ -1100,3 +1110,42 @@ pub const fn import_indexes_batch(multitenant: bool) -> &'static str {
+@@ -1100,3 +1124,42 @@ pub const fn import_indexes_batch(multitenant: bool) -> &'static str {
          )
      )
  }

@@ -597,11 +597,11 @@ index aa6c9021e..bfe24e0be 100644
  runtime = { workspace = true }
  search = { workspace = true }
 diff --git a/rust-toolchain b/rust-toolchain
-index 2a8b1190d..5371af280 100644
+index 2a8b1190d..82af430f6 100644
 --- a/rust-toolchain
 +++ b/rust-toolchain
 @@ -1,2 +1,3 @@
  [toolchain]
 -channel = "nightly-2026-02-18"
 +channel = "nightly-2026-06-09"
-+components = ["rustfmt", "clippy"]
++components = ["rustfmt"]

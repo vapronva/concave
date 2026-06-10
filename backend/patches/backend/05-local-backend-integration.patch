@@ -1,3 +1,47 @@
+diff --git a/crates/db_connection/src/lib.rs b/crates/db_connection/src/lib.rs
+index 16d0aea04..6b49a4cb0 100644
+--- a/crates/db_connection/src/lib.rs
++++ b/crates/db_connection/src/lib.rs
+@@ -232,6 +232,39 @@ pub async fn connect_persistence_reader<RT: Runtime>(
+     }
+ }
+ 
++pub async fn postgres_database_initialized<RT: Runtime>(
++    db: DbDriverTag,
++    db_spec: &str,
++    require_ssl: bool,
++    deployment_name: &str,
++    runtime: RT,
++) -> anyhow::Result<bool> {
++    match persistence_seed(
++        db,
++        db_spec,
++        ConnectPersistenceFlags {
++            require_ssl,
++            allow_read_only: true,
++            skip_index_creation: false,
++        },
++        deployment_name,
++        runtime,
++    )? {
++        PersistenceSeed::Postgres { config, options } => {
++            let pool = PostgresPersistence::create_pool(config)
++                .context("failed to create postgres pool")?;
++            let reader_options = PostgresReaderOptions {
++                version: options.version,
++                schema: options.schema,
++                instance_name: options.instance_name,
++                multitenant: options.multitenant,
++            };
++            PostgresPersistence::schema_initialized(pool, reader_options).await
++        },
++        _ => anyhow::bail!("the boot-role probe requires a Postgres persistence backend"),
++    }
++}
++
+ pub async fn set_read_only<RT: Runtime>(
+     db: DbDriverTag,
+     db_spec: &str,
 diff --git a/crates/local_backend/src/authentication.rs b/crates/local_backend/src/authentication.rs
 index f280d1494..9208b0c0a 100644
 --- a/crates/local_backend/src/authentication.rs
@@ -80,7 +124,7 @@ index f280d1494..9208b0c0a 100644
 +    }
 +}
 diff --git a/crates/local_backend/src/lib.rs b/crates/local_backend/src/lib.rs
-index 4633f83f5..726d2ddab 100644
+index 4633f83f5..1c5dd565c 100644
 --- a/crates/local_backend/src/lib.rs
 +++ b/crates/local_backend/src/lib.rs
 @@ -33,7 +33,10 @@ use common::{
@@ -169,7 +213,7 @@ index 4633f83f5..726d2ddab 100644
      zombify_rx: async_broadcast::Receiver<()>,
      preempt_tx: ShutdownSignal,
  ) -> anyhow::Result<LocalAppState> {
-@@ -156,29 +191,66 @@ pub async fn make_app(
+@@ -156,29 +191,70 @@ pub async fn make_app(
      // TODO(CX-6572) Separate `SegmentMetadataFetcher` from `SearcherImpl`
      let segment_metadata_fetcher: Arc<dyn SegmentTermMetadataFetcher> = in_process_searcher;
      let (deleted_tablet_sender, deleted_tablet_receiver) = tokio::sync::mpsc::channel(100);
@@ -193,6 +237,10 @@ index 4633f83f5..726d2ddab 100644
 +            },
 +            _ => Arc::new(NoOpUsageEventLogger),
 +        };
++    let boot_role = match &persistence {
++        RolePersistence::Leader(_) => common::types::BackendRole::Leader,
++        RolePersistence::Follower(_) => common::types::BackendRole::Follower,
++    };
 +    let database = match &persistence {
 +        RolePersistence::Leader(persistence) => {
 +            Database::load(
@@ -228,10 +276,10 @@ index 4633f83f5..726d2ddab 100644
 +            "[concave] CONVEX_BACKEND_ROLE unset; an HA standby must set it to follower"
 +        );
 +    }
-+    if config.role.is_leader() {
++    if boot_role.is_leader() {
 +        initialize_application_system_tables(&database).await?;
 +    }
-+    let application_storage = if config.role.is_leader() {
++    let application_storage = if boot_role.is_leader() {
 +        Application::initialize_storage(
              runtime.clone(),
 -            Quota::per_second(*DOCUMENT_RETENTION_RATE_LIMIT),
@@ -258,7 +306,7 @@ index 4633f83f5..726d2ddab 100644
  
      let file_storage = FileStorage {
          transactional_file_storage: TransactionalFileStorage::new(
-@@ -221,21 +293,41 @@ pub async fn make_app(
+@@ -221,21 +297,41 @@ pub async fn make_app(
          reqwest::redirect::Policy::default(),
      );
      let function_runner: Arc<dyn FunctionRunner<ProdRuntime>> =
@@ -308,11 +356,11 @@ index 4633f83f5..726d2ddab 100644
 +        };
  
      let application = Application::new(
-+        config.role,
++        boot_role,
          runtime.clone(),
          database.clone(),
          file_storage.clone(),
-@@ -252,7 +344,7 @@ pub async fn make_app(
+@@ -252,7 +348,7 @@ pub async fn make_app(
          config.convex_site_url()?,
          searcher.clone(),
          segment_metadata_fetcher,
@@ -321,20 +369,20 @@ index 4633f83f5..726d2ddab 100644
          actions,
          Arc::new(RedactLogsToClient::new(config.redact_logs_to_client)),
          Arc::new(ApplicationAuth::new(
-@@ -273,7 +365,7 @@ pub async fn make_app(
+@@ -273,7 +369,7 @@ pub async fn make_app(
      let origin = config.convex_origin_url()?;
      let instance_name = config.name();
  
 -    if !config.disable_beacon {
-+    if !config.disable_beacon && config.role.is_leader() {
++    if !config.disable_beacon && boot_role.is_leader() {
          let beacon_future = beacon::start_beacon(
              runtime.clone(),
              database.clone(),
-@@ -283,14 +375,100 @@ pub async fn make_app(
+@@ -283,14 +379,100 @@ pub async fn make_app(
          runtime.spawn_background("beacon_worker", beacon_future);
      }
  
-+    let role = Arc::new(crate::leadership::RoleState::new(config.role));
++    let role = Arc::new(crate::leadership::RoleState::new(boot_role));
 +    let promote_ctx = {
 +        let factory_db = config.db;
 +        let factory_db_spec = config.db_spec.clone();
@@ -432,10 +480,10 @@ index 4633f83f5..726d2ddab 100644
  }
  
 diff --git a/crates/local_backend/src/main.rs b/crates/local_backend/src/main.rs
-index 4217d331d..aab0d1759 100644
+index 4217d331d..b508e24e8 100644
 --- a/crates/local_backend/src/main.rs
 +++ b/crates/local_backend/src/main.rs
-@@ -12,11 +12,15 @@ use common::{
+@@ -12,11 +12,16 @@ use common::{
      runtime::Runtime,
      sentry::set_sentry_tags,
      shutdown::ShutdownSignal,
@@ -449,10 +497,11 @@ index 4217d331d..aab0d1759 100644
  use db_connection::{
      connect_persistence,
 +    connect_persistence_reader,
++    postgres_database_initialized,
      ConnectPersistenceFlags,
  };
  use futures::{
-@@ -37,11 +41,11 @@ use local_backend::{
+@@ -37,11 +42,11 @@ use local_backend::{
          LocalConfig,
          Subcommand,
      },
@@ -466,7 +515,7 @@ index 4217d331d..aab0d1759 100644
  };
  use runtime::prod::ProdRuntime;
  use tokio::{
-@@ -51,6 +55,21 @@ use tokio::{
+@@ -51,6 +56,21 @@ use tokio::{
      sync::oneshot,
  };
  
@@ -488,7 +537,7 @@ index 4217d331d..aab0d1759 100644
  fn main() -> Result<(), MainError> {
      let config = LocalConfig::parse();
      if let Some(subcommand) = &config.subcommand {
-@@ -137,24 +156,52 @@ async fn run_server(runtime: ProdRuntime, config: LocalConfig) -> anyhow::Result
+@@ -137,24 +157,74 @@ async fn run_server(runtime: ProdRuntime, config: LocalConfig) -> anyhow::Result
  }
  
  async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::Result<()> {
@@ -502,6 +551,28 @@ index 4217d331d..aab0d1759 100644
 +            ),
 +            "dynamic backend roles require Postgres because MySQL/SQLite do not implement the HA \
 +             lease fencing contract"
++        );
++    }
++    if config.boot_follower_when_initialized && !dynamic_roles_enabled {
++        tracing::warn!(
++            "[concave] CONVEX_BOOT_FOLLOWER_WHEN_INITIALIZED is set but dynamic roles are \
++             disabled; booting with the static role"
++        );
++    }
++    let boot_as_follower = config.role.is_leader()
++        && config.boot_follower_when_initialized
++        && dynamic_roles_enabled
++        && postgres_database_initialized(
++            config.db,
++            &config.db_spec,
++            !config.do_not_require_ssl,
++            &config.name(),
++            runtime.clone(),
++        )
++        .await?;
++    if boot_as_follower {
++        tracing::info!(
++            "[concave] database already initialized; booting as follower and awaiting promotion"
 +        );
 +    }
      // Used to receive fatal errors from the database or /preempt endpoint.
@@ -522,7 +593,7 @@ index 4217d331d..aab0d1759 100644
 -        preempt_signal.clone(),
 -    )
 -    .await?;
-+    let persistence = if config.role.is_leader() {
++    let persistence = if config.role.is_leader() && !boot_as_follower {
 +        RolePersistence::Leader(
 +            connect_persistence(
 +                config.db,
@@ -554,7 +625,7 @@ index 4217d331d..aab0d1759 100644
      let st = make_app(
          runtime.clone(),
          config.clone(),
-@@ -163,13 +210,13 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
+@@ -163,13 +233,13 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
          preempt_signal.clone(),
      )
      .await?;
@@ -570,7 +641,7 @@ index 4217d331d..aab0d1759 100644
          *HTTP_SERVER_TIMEOUT_DURATION,
          HttpActionRouteMapper,
      );
-@@ -199,8 +246,8 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
+@@ -199,8 +269,8 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
              force_exit_duration = Some(Duration::from_secs(0));
              let _: Result<_, _> = shutdown_tx.broadcast(()).await;
          }
@@ -581,7 +652,7 @@ index 4217d331d..aab0d1759 100644
              r?;
              let _: Result<_, _> = shutdown_tx.broadcast(()).await;
          },
-@@ -242,8 +289,8 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
+@@ -242,8 +312,8 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
                  tracing::info!("Cool down expired. Shutting down");
                  break;
              }
@@ -593,23 +664,25 @@ index 4217d331d..aab0d1759 100644
                  tracing::warn!("Forcibly shutting down!");
                  break;
 diff --git a/crates/local_backend/src/node_action_callbacks.rs b/crates/local_backend/src/node_action_callbacks.rs
-index 22d9c58bb..d80483fce 100644
+index 22d9c58bb..a81c608ac 100644
 --- a/crates/local_backend/src/node_action_callbacks.rs
 +++ b/crates/local_backend/src/node_action_callbacks.rs
-@@ -10,10 +10,12 @@ use axum::{
+@@ -10,10 +10,14 @@ use axum::{
      RequestPartsExt,
  };
  use common::{
 +    bootstrap_model::components::handles::FunctionHandle,
      components::{
++        CanonicalizedComponentFunctionPath,
          ComponentFunctionPath,
          ComponentId,
++        ComponentPath,
          PublicFunctionPath,
 +        SerializedComponentFunctionPath,
      },
      execution_context::{
          ClientIp,
-@@ -34,6 +36,11 @@ use common::{
+@@ -34,6 +38,11 @@ use common::{
          },
          ExtractClientVersion,
          HttpResponseError,
@@ -621,7 +694,7 @@ index 22d9c58bb..d80483fce 100644
      },
      knobs::ACTION_USER_TIMEOUT,
      runtime::UnixTimestamp,
-@@ -49,6 +56,8 @@ use fastrace::future::FutureExt;
+@@ -49,6 +58,8 @@ use fastrace::future::FutureExt;
  use http::HeaderMap;
  use isolate::UdfArgsJson;
  use keybroker::Identity;
@@ -630,7 +703,213 @@ index 22d9c58bb..d80483fce 100644
  use serde::{
      Deserialize,
      Serialize,
-@@ -538,6 +547,95 @@ pub async fn storage_delete(
+@@ -85,6 +96,7 @@ use crate::{
+ #[serde(rename_all = "camelCase")]
+ pub struct NodeCallbackUdfPostRequest {
+     pub path: Option<String>,
++    pub component_path: Option<String>,
+     pub reference: Option<String>,
+     pub function_handle: Option<String>,
+     pub args: UdfArgsJson,
+@@ -92,6 +104,38 @@ pub struct NodeCallbackUdfPostRequest {
+     pub format: Option<String>,
+ }
+ 
++async fn callback_function_path(
++    st: &LocalAppState,
++    identity: Identity,
++    component_id: ComponentId,
++    component_path: Option<String>,
++    path: Option<String>,
++    reference: Option<String>,
++    function_handle: Option<String>,
++) -> anyhow::Result<CanonicalizedComponentFunctionPath> {
++    let Some(component_path) = component_path else {
++        return st
++            .application
++            .canonicalized_function_path(identity, component_id, path, reference, function_handle)
++            .await;
++    };
++    anyhow::ensure!(
++        reference.is_none() && function_handle.is_none(),
++        ErrorMetadata::bad_request(
++            "InvalidUdfPathOrFunctionReference",
++            "componentPath cannot be combined with a function reference or handle."
++        )
++    );
++    let udf_path = path.context(ErrorMetadata::bad_request(
++        "MissingUdfPath",
++        "componentPath requires a UDF path.",
++    ))?;
++    Ok(CanonicalizedComponentFunctionPath {
++        component: ComponentPath::deserialize(Some(&component_path))?,
++        udf_path: udf_path.parse()?,
++    })
++}
++
+ /// This is like `public_query_post`, except it allows calling internal
+ /// functions as well. This should not be used for any publicly accessible
+ /// endpoints, and should only be used to support Convex functions calling into
+@@ -107,16 +151,16 @@ pub async fn internal_query_post(
+     ExtractExecutionContext(context): ExtractExecutionContext,
+     Json(req): Json<NodeCallbackUdfPostRequest>,
+ ) -> Result<impl IntoResponse, HttpResponseError> {
+-    let path = st
+-        .application
+-        .canonicalized_function_path(
+-            identity.clone(),
+-            component_id,
+-            req.path,
+-            req.reference,
+-            req.function_handle,
+-        )
+-        .await?;
++    let path = callback_function_path(
++        &st,
++        identity.clone(),
++        component_id,
++        req.component_path,
++        req.path,
++        req.reference,
++        req.function_handle,
++    )
++    .await?;
+     let udf_return = st
+         .application
+         .read_only_udf(
+@@ -161,16 +205,16 @@ pub async fn internal_mutation_post(
+     ExtractExecutionContext(context): ExtractExecutionContext,
+     Json(req): Json<NodeCallbackUdfPostRequest>,
+ ) -> Result<impl IntoResponse, HttpResponseError> {
+-    let path = st
+-        .application
+-        .canonicalized_function_path(
+-            identity.clone(),
+-            component_id,
+-            req.path,
+-            req.reference,
+-            req.function_handle,
+-        )
+-        .await?;
++    let path = callback_function_path(
++        &st,
++        identity.clone(),
++        component_id,
++        req.component_path,
++        req.path,
++        req.reference,
++        req.function_handle,
++    )
++    .await?;
+     let udf_result = st
+         .application
+         .mutation_udf(
+@@ -220,16 +264,16 @@ pub async fn internal_action_post(
+     ExtractExecutionContext(context): ExtractExecutionContext,
+     Json(req): Json<NodeCallbackUdfPostRequest>,
+ ) -> Result<impl IntoResponse, HttpResponseError> {
+-    let path = st
+-        .application
+-        .canonicalized_function_path(
+-            identity.clone(),
+-            component_id,
+-            req.path,
+-            req.reference,
+-            req.function_handle,
+-        )
+-        .await?;
++    let path = callback_function_path(
++        &st,
++        identity.clone(),
++        component_id,
++        req.component_path,
++        req.path,
++        req.reference,
++        req.function_handle,
++    )
++    .await?;
+     let udf_result = st
+         .application
+         .action_udf(
+@@ -268,6 +312,7 @@ pub struct ScheduleJobRequest {
+     reference: Option<String>,
+     function_handle: Option<String>,
+     udf_path: Option<String>,
++    component_path: Option<String>,
+     udf_args: UdfArgsJson,
+     scheduled_ts: f64,
+ }
+@@ -291,19 +336,17 @@ pub async fn schedule_job(
+         ErrorMetadata::bad_request("InvalidTimestamp", "Requested scheduled_ts is invalid")
+     })?;
+     // User might have entered an invalid path, so this is a developer error.
+-    let path = st
+-        .application
+-        .canonicalized_function_path(
+-            identity.clone(),
+-            component_id,
+-            req.udf_path,
+-            req.reference,
+-            req.function_handle,
+-        )
+-        .await
+-        .map_err(|e| {
+-            anyhow::anyhow!(ErrorMetadata::bad_request("InvalidUdfPath", e.to_string()))
+-        })?;
++    let path = callback_function_path(
++        &st,
++        identity.clone(),
++        component_id,
++        req.component_path,
++        req.udf_path,
++        req.reference,
++        req.function_handle,
++    )
++    .await
++    .map_err(|e| anyhow::anyhow!(ErrorMetadata::bad_request("InvalidUdfPath", e.to_string())))?;
+     let udf_args = req.udf_args.into_serialized_args()?;
+     let job_id = st
+         .application
+@@ -351,6 +394,7 @@ pub async fn cancel_developer_job(
+ #[serde(rename_all = "camelCase")]
+ pub struct CreateFunctionHandleRequest {
+     udf_path: Option<String>,
++    component_path: Option<String>,
+     reference: Option<String>,
+ }
+ 
+@@ -368,19 +412,17 @@ pub async fn create_function_handle(
+     }: ExtractActionIdentity,
+     Json(req): Json<CreateFunctionHandleRequest>,
+ ) -> Result<impl IntoResponse, HttpResponseError> {
+-    let path = st
+-        .application
+-        .canonicalized_function_path(
+-            identity.clone(),
+-            component_id,
+-            req.udf_path,
+-            req.reference,
+-            None,
+-        )
+-        .await
+-        .map_err(|e| {
+-            anyhow::anyhow!(ErrorMetadata::bad_request("InvalidUdfPath", e.to_string()))
+-        })?;
++    let path = callback_function_path(
++        &st,
++        identity.clone(),
++        component_id,
++        req.component_path,
++        req.udf_path,
++        req.reference,
++        None,
++    )
++    .await
++    .map_err(|e| anyhow::anyhow!(ErrorMetadata::bad_request("InvalidUdfPath", e.to_string())))?;
+     let handle = st
+         .application
+         .runner()
+@@ -538,6 +580,95 @@ pub async fn storage_delete(
      Ok(Json(json!(null)))
  }
  
@@ -726,7 +1005,7 @@ index 22d9c58bb..d80483fce 100644
  #[derive(Deserialize)]
  pub struct AuditLogParams {
      #[allow(dead_code)]
-@@ -555,14 +653,12 @@ pub async fn audit_log(
+@@ -555,14 +686,12 @@ pub async fn audit_log(
      .into())
  }
  
@@ -742,7 +1021,7 @@ index 22d9c58bb..d80483fce 100644
          .context("Missing callback token - is the call from actions?")?;
  
      let token = value
-@@ -654,7 +750,7 @@ impl<S: Sync> FromRequestParts<S> for ExtractActionName {
+@@ -654,7 +783,7 @@ impl<S: Sync> FromRequestParts<S> for ExtractActionName {
      ) -> Result<Self, Self::Rejection> {
          let action_name = parts
              .headers
@@ -751,7 +1030,7 @@ index 22d9c58bb..d80483fce 100644
              .map(|value| value.to_str())
              .transpose()
              .context("Convex-Action-Function-Name must be a string")?
-@@ -675,7 +771,7 @@ impl<T: Sync> FromRequestParts<T> for ExtractExecutionContext {
+@@ -675,7 +804,7 @@ impl<T: Sync> FromRequestParts<T> for ExtractExecutionContext {
      ) -> Result<Self, Self::Rejection> {
          let request_id: RequestId = parts
              .headers
@@ -760,7 +1039,7 @@ index 22d9c58bb..d80483fce 100644
              .map(|v| v.to_str())
              .transpose()
              .context("Request id must be a string")?
-@@ -685,7 +781,7 @@ impl<T: Sync> FromRequestParts<T> for ExtractExecutionContext {
+@@ -685,7 +814,7 @@ impl<T: Sync> FromRequestParts<T> for ExtractExecutionContext {
              .unwrap_or(RequestId::new());
          let execution_id: ExecutionId = parts
              .headers
@@ -769,7 +1048,7 @@ index 22d9c58bb..d80483fce 100644
              .map(|v| v.to_str())
              .transpose()
              .context("Execution id must be a string")?
-@@ -694,7 +790,7 @@ impl<T: Sync> FromRequestParts<T> for ExtractExecutionContext {
+@@ -694,7 +823,7 @@ impl<T: Sync> FromRequestParts<T> for ExtractExecutionContext {
              // For backwards compatibility
              .unwrap_or(ExecutionId::new());
  

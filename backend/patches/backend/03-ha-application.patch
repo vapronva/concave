@@ -11,7 +11,7 @@ index add0ec6e6..462b775c5 100644
                          outcome.result.is_ok(),
                          usage_stats,
 diff --git a/crates/application/src/lib.rs b/crates/application/src/lib.rs
-index f81b976ac..8bdea2393 100644
+index f81b976ac..e4491a26b 100644
 --- a/crates/application/src/lib.rs
 +++ b/crates/application/src/lib.rs
 @@ -132,6 +132,7 @@ use common::{
@@ -391,7 +391,7 @@ index f81b976ac..8bdea2393 100644
              usage_gauges_tracking_worker,
              scheduled_job_runner,
              cron_job_executor,
-@@ -899,33 +1008,80 @@ impl<RT: Runtime> Application<RT> {
+@@ -899,33 +1008,82 @@ impl<RT: Runtime> Application<RT> {
              system_table_cleanup_worker,
              migration_worker,
          };
@@ -472,7 +472,9 @@ index f81b976ac..8bdea2393 100644
 +        if let Some(workers) = workers {
 +            workers.shutdown().await?;
 +        }
-+        let _ = self.log_manager_client.shutdown().await;
++        if let Err(e) = self.log_manager_client.shutdown().await {
++            tracing::warn!("log manager shutdown failed during demotion: {e:#}");
++        }
 +        self.log_manager_client
 +            .replace_with(&LogManagerClient::noop());
 +        tracing::info!("[demote] Application::become_follower: demoting Database");
@@ -492,7 +494,7 @@ index f81b976ac..8bdea2393 100644
      pub fn modules_storage(&self) -> &Arc<dyn Storage> {
          &self.application_storage.modules_storage
      }
-@@ -3700,7 +3856,10 @@ impl<RT: Runtime> Application<RT> {
+@@ -3700,7 +3858,10 @@ impl<RT: Runtime> Application<RT> {
      }
  
      pub async fn shutdown(&self) -> anyhow::Result<()> {
@@ -505,7 +507,7 @@ index f81b976ac..8bdea2393 100644
          self.runner.shutdown().await?;
          self.database.shutdown().await?;
 diff --git a/crates/log_streaming/src/lib.rs b/crates/log_streaming/src/lib.rs
-index 6ff4d3f66..e11ddf229 100644
+index 6ff4d3f66..bfb53ffcb 100644
 --- a/crates/log_streaming/src/lib.rs
 +++ b/crates/log_streaming/src/lib.rs
 @@ -94,6 +94,11 @@ use crate::sinks::{
@@ -520,7 +522,7 @@ index 6ff4d3f66..e11ddf229 100644
      handle: Arc<Mutex<Option<Box<dyn SpawnHandle>>>>,
      event_sender: mpsc::Sender<LogEvent>,
      active_sinks_count: Arc<AtomicUsize>,
-@@ -101,12 +106,33 @@ pub struct LogManagerClient {
+@@ -101,12 +106,36 @@ pub struct LogManagerClient {
  }
  
  impl LogManagerClient {
@@ -541,6 +543,9 @@ index 6ff4d3f66..e11ddf229 100644
 +    }
 +
 +    pub fn replace_with(&self, other: &Self) {
++        if Arc::ptr_eq(&self.inner, &other.inner) {
++            return;
++        }
 +        *self.inner.write() = other.inner.read().clone();
 +    }
 +
@@ -555,7 +560,7 @@ index 6ff4d3f66..e11ddf229 100644
                  Err(mpsc::error::TrySendError::Full(_)) => {
                      dropped += 1;
                  },
-@@ -133,15 +159,21 @@ impl LogManagerClient {
+@@ -133,15 +162,21 @@ impl LogManagerClient {
      }
  
      pub fn set_entitlement_enabled(&self, enabled: bool) {
@@ -580,7 +585,7 @@ index 6ff4d3f66..e11ddf229 100644
      }
  
      fn is_active(&self) -> bool {
-@@ -152,7 +184,7 @@ impl LogManagerClient {
+@@ -152,7 +187,7 @@ impl LogManagerClient {
  #[async_trait]
  impl LogSender for LogManagerClient {
      async fn shutdown(&self) -> anyhow::Result<()> {
@@ -589,7 +594,7 @@ index 6ff4d3f66..e11ddf229 100644
          if let Some(handle) = handle {
              shutdown_and_join(handle).await?;
          }
-@@ -276,12 +308,12 @@ impl<RT: Runtime> LogManager<RT> {
+@@ -276,12 +311,12 @@ impl<RT: Runtime> LogManager<RT> {
  
          let handle = Arc::new(Mutex::new(Some(runtime.spawn("log_manager", worker.go()))));
          let entitlement_enabled = Arc::new(AtomicBool::new(entitlement_enabled));
