@@ -29,6 +29,7 @@ git checkout --quiet FETCH_HEAD
 EOF
 
 COPY patches/backend /tmp/patches/backend
+COPY UPSTREAM /tmp/patches/UPSTREAM
 COPY apply-patches.sh /tmp/apply-patches.sh
 
 RUN PATCHES_DIR=/tmp/patches/backend bash /tmp/apply-patches.sh /convex
