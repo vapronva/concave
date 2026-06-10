@@ -125,7 +125,7 @@ spec:
             - name: BIGBRAIN_INTERVAL
               value: {{ $b.reconcileInterval | quote }}
             - name: BIGBRAIN_PROMOTE_DEBOUNCE
-              value: {{ $b.promoteDebounce | quote }}
+              value: {{ int64 $b.promoteDebounce | quote }}
             - name: BIGBRAIN_FAILBACK_ENABLED
               value: {{ $b.failback.enabled | quote }}
             - name: BIGBRAIN_FAILBACK_STABILITY
@@ -155,7 +155,7 @@ spec:
             - name: BIGBRAIN_METRICS_APISERVER_ENABLED
               value: "true"
             - name: BIGBRAIN_METRICS_APISERVER_PORT
-              value: {{ $b.metricsApiserver.port | quote }}
+              value: {{ int64 $b.metricsApiserver.port | quote }}
             {{- end }}
             {{- with $b.extraEnv }}
             {{- toYaml . | nindent 12 }}

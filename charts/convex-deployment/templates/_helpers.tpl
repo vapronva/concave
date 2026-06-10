@@ -84,7 +84,7 @@ imagePullSecrets:
 {{ $prefix }}/component: backend
 {{ $prefix }}/instance: {{ required "instance.name is required" $ctx.Values.instance.name | quote }}
 {{ $prefix }}/role: {{ required "role is required for backend discovery labels" .role }}
-{{ $prefix }}/leader-priority: {{ .priority | quote }}
+{{ $prefix }}/leader-priority: {{ int64 .priority | quote }}
 {{- end -}}
 
 {{- define "convex.componentDiscoveryLabel" -}}
@@ -148,7 +148,7 @@ imagePullSecrets:
 {{- include "convex.controlPlaneEnv" . }}
 {{- with .Values.ha.demotionDrainTimeoutSeconds }}
 - name: DEMOTION_DRAIN_TIMEOUT_SECS
-  value: {{ . | quote }}
+  value: {{ int64 . | quote }}
 {{- end }}
 {{- end -}}
 

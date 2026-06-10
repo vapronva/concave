@@ -37,7 +37,7 @@ bigbrain:
   image:
     repository: vapronva/concave/bigbrain
     tag: ""
-  insightsRingCap: 10000000
+  insightsRingCap: 50000
   reconcileInterval: 2s
   promoteDebounce: 3
   failback:

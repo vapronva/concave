@@ -42,7 +42,7 @@ spec:
             - { name: http, containerPort: {{ .Values.dashboard.port }} }
           env:
             - name: PORT
-              value: {{ .Values.dashboard.port | quote }}
+              value: {{ int64 .Values.dashboard.port | quote }}
             - name: HOSTNAME
               value: 0.0.0.0
             - name: NEXT_PUBLIC_DEPLOYMENT_URL
