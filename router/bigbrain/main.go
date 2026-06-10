@@ -32,7 +32,7 @@ const (
 	idleTimeout            = 60 * time.Second
 	maxHeaderBytes         = 64 * 1024
 	shutdownTimeout        = 10 * time.Second
-	actuationDrainTimeout  = 15 * time.Second
+	actuationDrainTimeout  = 35 * time.Second
 
 	defaultMetricsAPIServerPort    = 6443
 	defaultMetricsAPIServerCertDir = "/var/run/bigbrain-apiserver"
@@ -56,34 +56,19 @@ func run() int {
 		env("BIGBRAIN_DEPLOYMENTS", ""),
 		"comma-separated name=namespace pairs to register at boot (e.g., convex-dev=convex-dev,convex-prod=convex-prod)",
 	)
-	interval := flag.Duration(
-		"interval",
-		envDuration("BIGBRAIN_INTERVAL", election.DefaultInterval),
-		"reconcile interval",
-	)
-	debounce := flag.Int(
-		"promote-debounce",
-		envInt("BIGBRAIN_PROMOTE_DEBOUNCE", election.DefaultPromoteDebounce),
-		"leaderless polls before promoting",
-	)
-	failbackEnabled := flag.Bool("failback-enabled", envBool("BIGBRAIN_FAILBACK_ENABLED", true),
-		"fail back to a recovered higher-priority pod (the primary) once it is warm and stable")
-	failbackStability := flag.Duration("failback-stability",
-		envDuration("BIGBRAIN_FAILBACK_STABILITY", election.DefaultFailbackStability),
-		"how long the higher-priority pod must stay warm and ready before failback")
-	failbackWarmthLag := flag.Uint64("failback-warmth-lag",
-		envUint64("BIGBRAIN_FAILBACK_WARMTH_LAG", election.DefaultFailbackWarmthLagNs),
-		"max latest_ts lag for the candidate to count as warm/caught-up")
-	unreachableGrace := flag.Duration("unreachable-leader-grace",
-		envDuration("BIGBRAIN_UNREACHABLE_LEADER_GRACE", election.DefaultUnreachableLeaderGrace),
-		"how long an unreachable incumbent keeps its lease before being treated as gone")
-	insightsRingCap := flag.Int("insights-ring-cap", envInt("INSIGHTS_RING_CAP", defaultInsightsRingCap),
+	electionCfg := electionFlags(flag.CommandLine)
+	ringCapDefault, _ := envInt("INSIGHTS_RING_CAP", defaultInsightsRingCap)
+	insightsRingCap := flag.Int("insights-ring-cap", ringCapDefault,
 		"in-memory insights ring-buffer capacity (rows retained per deployment)")
 	flag.Parse()
 	log := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(log)
 	reg := registry.New()
-	deployments := parseDeployments(*bootstrap)
+	deployments, err := parseDeployments(*bootstrap)
+	if err != nil {
+		log.Error("bigbrain: invalid --deployments/BIGBRAIN_DEPLOYMENTS", "err", err)
+		return 1
+	}
 	controlPlaneTokens, usageTokens, err := loadDeploymentTokens(reg, deployments, log)
 	if err != nil {
 		log.Error("bigbrain: missing deployment control-plane token", "err", err)
@@ -98,14 +83,7 @@ func run() int {
 		log.Error("bigbrain: kubernetes client unavailable", "err", err)
 		return 1
 	}
-	ctrl := election.New(election.Config{
-		Interval:               *interval,
-		PromoteDebounce:        *debounce,
-		FailbackEnabled:        *failbackEnabled,
-		FailbackStability:      *failbackStability,
-		FailbackWarmthLagNs:    *failbackWarmthLag,
-		UnreachableLeaderGrace: *unreachableGrace,
-	}, k8s, backend.New(controlPlaneTokens), reg, log)
+	ctrl := election.New(electionCfg(), k8s, backend.New(controlPlaneTokens), reg, log)
 	ins := insights.New(*insightsRingCap)
 	srv := server.New(reg, ins, usageTokens, log)
 	if len(usageTokens) == 0 {
@@ -124,10 +102,6 @@ func run() int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	ctrlDone := runController(ctx, ctrl)
-	log.Info("bigbrain: election controller started",
-		"deployments", len(reg.Names()), "interval", interval.String(), "promoteDebounce", *debounce,
-		"failbackEnabled", *failbackEnabled, "failbackStability", failbackStability.String(),
-		"failbackWarmthLag", *failbackWarmthLag, "unreachableLeaderGrace", unreachableGrace.String())
 	startMetricsAPIServer(ctx, stop, k8s, reg, *labelPrefix, log)
 	var listenFailed atomic.Bool
 	go func() {
@@ -144,6 +118,48 @@ func run() int {
 		return 1
 	}
 	return 0
+}
+
+func electionFlags(fs *flag.FlagSet) func() election.Config {
+	intervalDefault, intervalSet := envDuration("BIGBRAIN_INTERVAL", election.DefaultInterval)
+	interval := fs.Duration("interval", intervalDefault, "reconcile interval")
+	debounceDefault, debounceSet := envInt("BIGBRAIN_PROMOTE_DEBOUNCE", election.DefaultPromoteDebounce)
+	debounce := fs.Int("promote-debounce", debounceDefault, "leaderless polls before promoting")
+	emptyDefault, emptySet := envInt("BIGBRAIN_EMPTY_DISCOVERY_DEBOUNCE", election.DefaultEmptyDiscoveryDebounce)
+	emptyDebounce := fs.Int("empty-discovery-debounce", emptyDefault,
+		"consecutive empty discovery results before publishing leaderless")
+	fbEnabledDefault, fbEnabledSet := envBool("BIGBRAIN_FAILBACK_ENABLED", true)
+	failbackEnabled := fs.Bool("failback-enabled", fbEnabledDefault,
+		"fail back to a recovered higher-priority pod (the primary) once it is warm and stable")
+	fbStabilityDefault, fbStabilitySet := envDuration("BIGBRAIN_FAILBACK_STABILITY", election.DefaultFailbackStability)
+	failbackStability := fs.Duration("failback-stability", fbStabilityDefault,
+		"how long the higher-priority pod must stay warm and stable before failback")
+	fbWarmthDefault, fbWarmthSet := envUint64("BIGBRAIN_FAILBACK_WARMTH_LAG", election.DefaultFailbackWarmthLagNs)
+	failbackWarmthLag := fs.Uint64("failback-warmth-lag", fbWarmthDefault,
+		"max latest_ts lag for the candidate to count as warm/caught-up")
+	graceDefault, graceSet := envDuration("BIGBRAIN_UNREACHABLE_LEADER_GRACE", election.DefaultUnreachableLeaderGrace)
+	unreachableGrace := fs.Duration("unreachable-leader-grace", graceDefault,
+		"how long an unreachable incumbent keeps its lease before being treated as gone")
+	return func() election.Config {
+		passed := make(map[string]bool)
+		fs.Visit(func(f *flag.Flag) { passed[f.Name] = true })
+		return election.Config{
+			Interval:               knob(intervalSet, "interval", passed, interval),
+			PromoteDebounce:        knob(debounceSet, "promote-debounce", passed, debounce),
+			EmptyDiscoveryDebounce: knob(emptySet, "empty-discovery-debounce", passed, emptyDebounce),
+			FailbackEnabled:        knob(fbEnabledSet, "failback-enabled", passed, failbackEnabled),
+			FailbackStability:      knob(fbStabilitySet, "failback-stability", passed, failbackStability),
+			FailbackWarmthLagNs:    knob(fbWarmthSet, "failback-warmth-lag", passed, failbackWarmthLag),
+			UnreachableLeaderGrace: knob(graceSet, "unreachable-leader-grace", passed, unreachableGrace),
+		}
+	}
+}
+
+func knob[T any](envSet bool, name string, passed map[string]bool, v *T) *T {
+	if envSet || passed[name] {
+		return v
+	}
+	return nil
 }
 
 func shutdown(httpSrv *http.Server, srv *server.Server, ctrlDone <-chan struct{}, log *slog.Logger) {
@@ -180,7 +196,7 @@ func startMetricsAPIServer(
 	labelPrefix string,
 	log *slog.Logger,
 ) {
-	if !envBool("BIGBRAIN_METRICS_APISERVER_ENABLED", false) {
+	if enabled, _ := envBool("BIGBRAIN_METRICS_APISERVER_ENABLED", false); !enabled {
 		return
 	}
 	prov := apiserver.NewProvider()
@@ -194,10 +210,11 @@ func startMetricsAPIServer(
 			}
 		}
 	}
-	scrapeInterval := envDuration("BIGBRAIN_METRICS_SCRAPE_INTERVAL", defaultMetricsScrapeInterval)
+	scrapeInterval, _ := envDuration("BIGBRAIN_METRICS_SCRAPE_INTERVAL", defaultMetricsScrapeInterval)
 	go apiserver.NewScraper(k8s.Clientset(), labelPrefix, namespaces, prov, scrapeInterval, log).Run(ctx)
+	securePort, _ := envInt("BIGBRAIN_METRICS_APISERVER_PORT", defaultMetricsAPIServerPort)
 	cfg := apiserver.Config{
-		SecurePort: envInt("BIGBRAIN_METRICS_APISERVER_PORT", defaultMetricsAPIServerPort),
+		SecurePort: securePort,
 		CertDir:    env("BIGBRAIN_METRICS_APISERVER_CERT_DIR", defaultMetricsAPIServerCertDir),
 	}
 	go func() {
@@ -234,8 +251,9 @@ func loadDeploymentTokens(
 
 type deploymentRef struct{ name, namespace string }
 
-func parseDeployments(s string) []deploymentRef {
+func parseDeployments(s string) ([]deploymentRef, error) {
 	var out []deploymentRef
+	seen := make(map[string]struct{})
 	for part := range strings.SplitSeq(s, ",") {
 		part = strings.TrimSpace(part)
 		if part == "" {
@@ -243,12 +261,20 @@ func parseDeployments(s string) []deploymentRef {
 		}
 		name, ns, ok := strings.Cut(part, "=")
 		name = strings.TrimSpace(name)
-		if !ok || strings.TrimSpace(ns) == "" {
+		if name == "" {
+			return nil, fmt.Errorf("deployment entry %q has an empty name", part)
+		}
+		ns = strings.TrimSpace(ns)
+		if !ok || ns == "" {
 			ns = name
 		}
-		out = append(out, deploymentRef{name: name, namespace: strings.TrimSpace(ns)})
+		if _, dup := seen[name]; dup {
+			return nil, fmt.Errorf("duplicate deployment name %q", name)
+		}
+		seen[name] = struct{}{}
+		out = append(out, deploymentRef{name: name, namespace: ns})
 	}
-	return out
+	return out, nil
 }
 
 func env(k, d string) string {
@@ -258,38 +284,55 @@ func env(k, d string) string {
 	return d
 }
 
-func envInt(k string, d int) int {
-	if v := os.Getenv(k); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			return n
-		}
+func envInt(k string, d int) (int, bool) {
+	v := os.Getenv(k)
+	if v == "" {
+		return d, false
 	}
-	return d
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		badEnv(k, v, err)
+	}
+	return n, true
 }
 
-func envDuration(k string, d time.Duration) time.Duration {
-	if v := os.Getenv(k); v != "" {
-		if dur, err := time.ParseDuration(v); err == nil {
-			return dur
-		}
+func envDuration(k string, d time.Duration) (time.Duration, bool) {
+	v := os.Getenv(k)
+	if v == "" {
+		return d, false
 	}
-	return d
+	dur, err := time.ParseDuration(v)
+	if err != nil {
+		badEnv(k, v, err)
+	}
+	return dur, true
 }
 
-func envUint64(k string, d uint64) uint64 {
-	if v := os.Getenv(k); v != "" {
-		if n, err := strconv.ParseUint(v, 10, 64); err == nil {
-			return n
-		}
+func envUint64(k string, d uint64) (uint64, bool) {
+	v := os.Getenv(k)
+	if v == "" {
+		return d, false
 	}
-	return d
+	n, err := strconv.ParseUint(v, 10, 64)
+	if err != nil {
+		badEnv(k, v, err)
+	}
+	return n, true
 }
 
-func envBool(k string, d bool) bool {
-	if v := os.Getenv(k); v != "" {
-		if b, err := strconv.ParseBool(v); err == nil {
-			return b
-		}
+func envBool(k string, d bool) (bool, bool) {
+	v := os.Getenv(k)
+	if v == "" {
+		return d, false
 	}
-	return d
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		badEnv(k, v, err)
+	}
+	return b, true
+}
+
+func badEnv(k, v string, err error) {
+	fmt.Fprintf(os.Stderr, "bigbrain: invalid %s=%q: %v\n", k, v, err)
+	os.Exit(1)
 }

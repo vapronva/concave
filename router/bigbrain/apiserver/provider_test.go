@@ -9,12 +9,17 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/custom-metrics-apiserver/pkg/provider"
 )
 
 func metricInfo() provider.CustomMetricInfo {
-	return provider.CustomMetricInfo{Metric: MetricName}
+	return provider.CustomMetricInfo{
+		GroupResource: schema.GroupResource{Resource: podsResource},
+		Namespaced:    true,
+		Metric:        MetricName,
+	}
 }
 
 func TestProviderReplaceWithEmptyClearsCache(t *testing.T) {
@@ -47,6 +52,26 @@ func TestProviderRejectsUnknownMetric(t *testing.T) {
 	if _, err := p.GetMetricByName(context.Background(), types.NamespacedName{}, info, nil); err == nil ||
 		!strings.Contains(err.Error(), "nope") {
 		t.Fatalf("unknown metric must be rejected, got %v", err)
+	}
+}
+
+func TestProviderRejectsNonPodResource(t *testing.T) {
+	t.Parallel()
+	p := NewProvider()
+	pod := types.NamespacedName{Namespace: "ns", Name: "funrun-0"}
+	p.replace(map[types.NamespacedName]podSample{
+		pod: {labels: labels.Set{}, value: milliPercent(42), ts: time.Now()},
+	})
+	info := provider.CustomMetricInfo{
+		GroupResource: schema.GroupResource{Resource: "services"},
+		Namespaced:    true,
+		Metric:        MetricName,
+	}
+	if _, err := p.GetMetricByName(context.Background(), pod, info, nil); err == nil {
+		t.Fatal("GetMetricByName must reject non-pod resources")
+	}
+	if _, err := p.GetMetricBySelector(context.Background(), "ns", labels.Everything(), info, nil); err == nil {
+		t.Fatal("GetMetricBySelector must reject non-pod resources")
 	}
 }
 

@@ -30,6 +30,7 @@ const (
 	busyGauge           = "convex_funrun_isolate_busy_threads"
 	totalGauge          = "convex_funrun_isolate_total_threads"
 	scrapeTimeout       = 2 * time.Second
+	listTimeout         = 5 * time.Second
 	scrapeBufferInitial = 64 * 1024
 	scrapeBufferMax     = 1 << 20
 	metricLineMinFields = 2
@@ -101,7 +102,9 @@ func (s *Scraper) scrapeAll(ctx context.Context) {
 
 func (s *Scraper) scrapeNamespace(ctx context.Context, ns string) map[types.NamespacedName]podSample {
 	sel := fmt.Sprintf("%s=funrun", s.componentLabel)
-	pods, err := s.cs.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{LabelSelector: sel})
+	lctx, cancel := context.WithTimeout(ctx, listTimeout)
+	pods, err := s.cs.CoreV1().Pods(ns).List(lctx, metav1.ListOptions{LabelSelector: sel})
+	cancel()
 	if err != nil {
 		s.log.WarnContext(ctx, "scraper: list funrun pods failed", "namespace", ns, "err", err)
 		return nil

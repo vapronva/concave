@@ -75,7 +75,10 @@ func TestController_ReconcileConcurrentWithActuation(t *testing.T) {
 	k8s := k8sclient.NewFromInterface(cs, "convex")
 	reg := registry.New()
 	reg.EnsureDeployment("race", "race")
-	c := New(Config{Interval: time.Millisecond, PromoteDebounce: 1}, k8s, backend.New(nil), reg, quietLogger())
+	c := New(
+		Config{Interval: new(time.Millisecond), PromoteDebounce: new(1)},
+		k8s, backend.New(nil), reg, quietLogger(),
+	)
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 	for range 3 {

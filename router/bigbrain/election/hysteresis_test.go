@@ -20,7 +20,7 @@ func TestActLeaderless_RetainsLastKnownLeaderDuringHysteresis(t *testing.T) {
 	reg := registry.New()
 	reg.EnsureDeployment("dev", "convex-dev")
 	const debounce = 3
-	c := New(Config{PromoteDebounce: debounce}, nil, nil, reg, quietLogger())
+	c := New(Config{PromoteDebounce: new(debounce)}, nil, nil, reg, quietLogger())
 	st := c.deploymentState("dev")
 	ctx := context.Background()
 	c.setLeader("dev", st, "backend-0", "http://10.0.0.1:3210")
@@ -46,7 +46,7 @@ func TestActLeaderless_RetainsUnreachableIncumbentWithinGrace(t *testing.T) {
 	reg := registry.New()
 	reg.EnsureDeployment("dev", "convex-dev")
 	const debounce = 3
-	c := New(Config{PromoteDebounce: debounce}, nil, nil, reg, quietLogger())
+	c := New(Config{PromoteDebounce: new(debounce)}, nil, nil, reg, quietLogger())
 	st := c.deploymentState("dev")
 	c.setLeader("dev", st, "backend-0", "http://10.0.0.1:3210")
 	leaderless := decision{liveLeaderCount: 0, incumbentUnreachable: true, promoteTarget: &observation{}}
@@ -58,18 +58,18 @@ func TestActLeaderless_RetainsUnreachableIncumbentWithinGrace(t *testing.T) {
 
 func TestCommitState_UnreachableIncumbentGraceExpiry(t *testing.T) {
 	t.Parallel()
-	c := New(Config{UnreachableLeaderGrace: 60 * time.Second}, nil, nil, registry.New(), quietLogger())
+	c := New(Config{UnreachableLeaderGrace: new(60 * time.Second)}, nil, nil, registry.New(), quietLogger())
 	st := c.deploymentState("dev")
 	base := time.Now()
 	d := decision{liveLeaderCount: 0, incumbentUnreachable: true}
-	if _, retain := c.commitState(st, d, false, base); !retain {
+	if _, _, retain := c.commitState(st, d, false, base); !retain {
 		t.Fatal("unreachable incumbent must be retained at the start of the grace window")
 	}
-	if _, retain := c.commitState(st, d, false, base.Add(61*time.Second)); retain {
+	if _, _, retain := c.commitState(st, d, false, base.Add(61*time.Second)); retain {
 		t.Fatal("unreachable incumbent must NOT be retained past the grace window")
 	}
 	reachable := decision{liveLeaderCount: 0, incumbentUnreachable: false}
-	if _, retain := c.commitState(st, reachable, false, base.Add(62*time.Second)); retain {
+	if _, _, retain := c.commitState(st, reachable, false, base.Add(62*time.Second)); retain {
 		t.Fatal("a reachable/absent incumbent must reset retain")
 	}
 }
@@ -78,11 +78,11 @@ func TestActLeaderless_EmptyListDoesNotAdvanceStreak(t *testing.T) {
 	t.Parallel()
 	reg := registry.New()
 	reg.EnsureDeployment("dev", "convex-dev")
-	c := New(Config{PromoteDebounce: 3}, nil, nil, reg, quietLogger())
+	c := New(Config{PromoteDebounce: new(3)}, nil, nil, reg, quietLogger())
 	st := c.deploymentState("dev")
 	emptyDecision := decision{liveLeaderCount: 0}
 	for range 10 {
-		if got, _ := c.commitState(st, emptyDecision, true, time.Now()); got != 0 {
+		if got, _, _ := c.commitState(st, emptyDecision, true, time.Now()); got != 0 {
 			t.Fatalf("empty backend list must not advance the leaderless streak, got %d", got)
 		}
 	}
@@ -90,15 +90,15 @@ func TestActLeaderless_EmptyListDoesNotAdvanceStreak(t *testing.T) {
 
 func TestCommitState_TransitioningDoesNotAdvanceStreak(t *testing.T) {
 	t.Parallel()
-	c := New(Config{PromoteDebounce: 3}, nil, nil, registry.New(), quietLogger())
+	c := New(Config{PromoteDebounce: new(3)}, nil, nil, registry.New(), quietLogger())
 	st := c.deploymentState("dev")
 	transitioning := decision{liveLeaderCount: 0, hasTransitioning: true}
 	for range 10 {
-		if got, _ := c.commitState(st, transitioning, false, time.Now()); got != 0 {
+		if got, _, _ := c.commitState(st, transitioning, false, time.Now()); got != 0 {
 			t.Fatalf("a tick with a mid-drain pod must not advance the leaderless streak, got %d", got)
 		}
 	}
-	if got, _ := c.commitState(st, decision{liveLeaderCount: 0}, false, time.Now()); got != 1 {
+	if got, _, _ := c.commitState(st, decision{liveLeaderCount: 0}, false, time.Now()); got != 1 {
 		t.Fatalf("a genuinely-leaderless tick must resume the streak at 1, got %d", got)
 	}
 }
@@ -108,7 +108,7 @@ func TestCommitState_LeaderfulClearsStreak(t *testing.T) {
 	c := New(Config{}, nil, nil, registry.New(), quietLogger())
 	st := c.deploymentState("dev")
 	st.leaderlessStreak = 5
-	if got, _ := c.commitState(st, decision{liveLeaderCount: 1}, false, time.Now()); got != 0 {
+	if got, _, _ := c.commitState(st, decision{liveLeaderCount: 1}, false, time.Now()); got != 0 {
 		t.Fatalf("a live leader must reset the streak to 0, got %d", got)
 	}
 }
@@ -118,7 +118,7 @@ func TestActLeaderless_RetainsLeaderWhenPromotionBlockedByInflight(t *testing.T)
 	reg := registry.New()
 	reg.EnsureDeployment("prod", "convex-prod")
 	const debounce = 3
-	c := New(Config{PromoteDebounce: debounce}, nil, nil, reg, quietLogger())
+	c := New(Config{PromoteDebounce: new(debounce)}, nil, nil, reg, quietLogger())
 	st := c.deploymentState("prod")
 	c.setLeader("prod", st, "backend-0", "http://10.0.0.1:3210")
 	st.inflight = true

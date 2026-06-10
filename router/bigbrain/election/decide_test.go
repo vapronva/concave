@@ -200,9 +200,9 @@ func TestPickLeader_TieBreakByPodName(t *testing.T) {
 		obs("backend-9", true, 100, 100),
 		obs("backend-3", true, 100, 100),
 	}
-	got, ok := pickLeader(claims, "")
-	if !ok || got.be.Pod != "backend-3" {
-		t.Fatalf("want lowest pod name backend-3, got %q (ok=%v)", got.be.Pod, ok)
+	got := pickLeader(claims, "")
+	if got.be.Pod != "backend-3" {
+		t.Fatalf("want lowest pod name backend-3, got %q", got.be.Pod)
 	}
 }
 
@@ -212,7 +212,7 @@ func TestPickLeader_IncumbentZombieDefersToFresh(t *testing.T) {
 		obs("backend-0", true, 100, 5),
 		obs("backend-1", true, 100, 80),
 	}
-	got, _ := pickLeader(claims, "backend-0")
+	got := pickLeader(claims, "backend-0")
 	if got.be.Pod != "backend-1" {
 		t.Fatalf("zombie incumbent must defer to fresher lease holder, got %q", got.be.Pod)
 	}

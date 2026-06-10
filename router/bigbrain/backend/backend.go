@@ -23,12 +23,18 @@ const (
 )
 
 type Client struct {
-	http   *http.Client
+	poll   *http.Client
+	act    *http.Client
 	tokens map[string]string
 }
 
 func New(tokens map[string]string) *Client {
-	return &Client{http: &http.Client{Timeout: clientTimeout}, tokens: tokens}
+	transport := http.DefaultTransport
+	return &Client{
+		poll:   &http.Client{Transport: transport, Timeout: clientTimeout},
+		act:    &http.Client{Transport: transport},
+		tokens: tokens,
+	}
 }
 
 func (c *Client) Leadership(ctx context.Context, deployment, base string) (Leadership, error) {
@@ -37,7 +43,7 @@ func (c *Client) Leadership(ctx context.Context, deployment, base string) (Leade
 		return Leadership{}, err
 	}
 	c.setControlPlaneToken(req, deployment)
-	status, body, err := c.do(req)
+	status, body, err := do(c.poll, req)
 	if err != nil {
 		return Leadership{}, err
 	}
@@ -65,12 +71,12 @@ func (c *Client) post(ctx context.Context, deployment, url string) (int, error) 
 		return 0, err
 	}
 	c.setControlPlaneToken(req, deployment)
-	status, _, err := c.do(req)
+	status, _, err := do(c.act, req)
 	return status, err
 }
 
-func (c *Client) do(req *http.Request) (int, []byte, error) {
-	resp, err := c.http.Do(req)
+func do(hc *http.Client, req *http.Request) (int, []byte, error) {
+	resp, err := hc.Do(req)
 	if err != nil {
 		return 0, nil, err
 	}

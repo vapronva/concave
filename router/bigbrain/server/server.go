@@ -20,6 +20,7 @@ const (
 	keepaliveInterval = 25 * time.Second
 	usageBodyLimit    = 4 * 1024 * 1024
 	writeTimeout      = 10 * time.Second
+	keepaliveFrame    = ": keepalive\n\n"
 )
 
 type Server struct {
@@ -102,10 +103,6 @@ func (s *Server) handleUsageIngest(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "unknown deployment "+body.Deployment)
 		return
 	}
-	if s.ins == nil {
-		writeErr(w, http.StatusServiceUnavailable, "insights disabled")
-		return
-	}
 	kept := s.ins.Ingest(body.Deployment, body.Events)
 	writeJSON(w, http.StatusOK, map[string]int{"ingested": kept})
 }
@@ -123,10 +120,6 @@ func (s *Server) handleUsageQuery(w http.ResponseWriter, r *http.Request) {
 	}
 	if _, ok := s.reg.Namespace(dep); !ok {
 		writeErr(w, http.StatusNotFound, "unknown deployment "+dep)
-		return
-	}
-	if s.ins == nil {
-		writeErr(w, http.StatusServiceUnavailable, "insights disabled")
 		return
 	}
 	now := time.Now().UTC()
@@ -193,18 +186,13 @@ func (s *Server) handleLeaderStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer cancel()
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		writeErr(w, http.StatusInternalServerError, "streaming unsupported")
-		return
-	}
 	rc := http.NewResponseController(w)
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(http.StatusOK)
 	if s.reg.Published(name) {
 		pod, url, seq, _ := s.reg.Leader(name)
-		if !emitSSE(w, rc, flusher, registry.LeaderEvent{Name: name, LeaderPod: pod, LeaderURL: url, Seq: seq}) {
+		if !emitFrame(w, rc, leaderFrame(registry.LeaderEvent{Name: name, LeaderPod: pod, LeaderURL: url, Seq: seq})) {
 			return
 		}
 	}
@@ -220,11 +208,11 @@ func (s *Server) handleLeaderStream(w http.ResponseWriter, r *http.Request) {
 			if !open {
 				return
 			}
-			if !emitSSE(w, rc, flusher, ev) {
+			if !emitFrame(w, rc, leaderFrame(ev)) {
 				return
 			}
 		case <-keepalive.C:
-			if !emitKeepalive(w, rc, flusher) {
+			if !emitFrame(w, rc, []byte(keepaliveFrame)) {
 				return
 			}
 		}
@@ -241,23 +229,28 @@ func writeErr(w http.ResponseWriter, code int, msg string) {
 	writeJSON(w, code, map[string]string{"error": msg})
 }
 
-func emitSSE(w http.ResponseWriter, rc *http.ResponseController, flusher http.Flusher, ev registry.LeaderEvent) bool {
-	_ = rc.SetWriteDeadline(time.Now().Add(writeTimeout))
+func leaderFrame(ev registry.LeaderEvent) []byte {
 	b, _ := json.Marshal(ev)
-	if _, err := fmt.Fprintf(w, "event: leader\ndata: %s\n\n", b); err != nil {
-		return false
-	}
-	flusher.Flush()
-	return true
+	return fmt.Appendf(nil, "event: leader\ndata: %s\n\n", b)
 }
 
-func emitKeepalive(w http.ResponseWriter, rc *http.ResponseController, flusher http.Flusher) bool {
+func emitFrame(w http.ResponseWriter, rc *http.ResponseController, frame []byte) bool {
 	_ = rc.SetWriteDeadline(time.Now().Add(writeTimeout))
-	if _, err := fmt.Fprint(w, ": keepalive\n\n"); err != nil {
+	if _, err := w.Write(frame); err != nil {
 		return false
 	}
-	flusher.Flush()
-	return true
+	return rc.Flush() == nil
+}
+
+func quietPath(path string) bool {
+	if path == "/healthz" || path == "/readyz" {
+		return true
+	}
+	rest, ok := strings.CutPrefix(path, "/registry/deployments/")
+	if !ok {
+		return false
+	}
+	return strings.HasSuffix(rest, "/leader") || strings.HasSuffix(rest, "/leader-stream")
 }
 
 func logging(log *slog.Logger, next http.Handler) http.Handler {
@@ -266,7 +259,7 @@ func logging(log *slog.Logger, next http.Handler) http.Handler {
 		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(sw, r)
 		level := slog.LevelInfo
-		if strings.HasSuffix(r.URL.Path, "/leader") || strings.HasSuffix(r.URL.Path, "/leader-stream") {
+		if quietPath(r.URL.Path) {
 			level = slog.LevelDebug
 		}
 		log.Log(
@@ -308,10 +301,4 @@ func (w *statusWriter) WriteHeader(code int) {
 func (w *statusWriter) Write(b []byte) (int, error) {
 	w.wrote = true
 	return w.ResponseWriter.Write(b)
-}
-
-func (w *statusWriter) Flush() {
-	if f, ok := w.ResponseWriter.(http.Flusher); ok {
-		f.Flush()
-	}
 }

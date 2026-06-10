@@ -12,12 +12,23 @@ import (
 )
 
 type Config struct {
-	Interval               time.Duration
-	PromoteDebounce        int
-	FailbackEnabled        bool
-	FailbackStability      time.Duration
-	FailbackWarmthLagNs    uint64
-	UnreachableLeaderGrace time.Duration
+	Interval               *time.Duration
+	PromoteDebounce        *int
+	FailbackEnabled        *bool
+	FailbackStability      *time.Duration
+	FailbackWarmthLagNs    *uint64
+	UnreachableLeaderGrace *time.Duration
+	EmptyDiscoveryDebounce *int
+}
+
+type settings struct {
+	interval               time.Duration
+	promoteDebounce        int
+	failbackEnabled        bool
+	failbackStability      time.Duration
+	failbackWarmthLagNs    uint64
+	unreachableLeaderGrace time.Duration
+	emptyDiscoveryDebounce int
 }
 
 const (
@@ -26,31 +37,47 @@ const (
 	DefaultFailbackStability             = 15 * time.Second
 	DefaultFailbackWarmthLagNs    uint64 = 5_000_000_000
 	DefaultUnreachableLeaderGrace        = 60 * time.Second
+	DefaultEmptyDiscoveryDebounce        = 5
 	discoverTimeout                      = 5 * time.Second
 	pollTimeout                          = 2 * time.Second
 )
 
-func (c Config) withDefaults() Config {
-	if c.Interval <= 0 {
-		c.Interval = DefaultInterval
+func (c Config) withDefaults() settings {
+	s := settings{
+		interval:               DefaultInterval,
+		promoteDebounce:        DefaultPromoteDebounce,
+		failbackEnabled:        true,
+		failbackStability:      DefaultFailbackStability,
+		failbackWarmthLagNs:    DefaultFailbackWarmthLagNs,
+		unreachableLeaderGrace: DefaultUnreachableLeaderGrace,
+		emptyDiscoveryDebounce: DefaultEmptyDiscoveryDebounce,
 	}
-	if c.PromoteDebounce <= 0 {
-		c.PromoteDebounce = DefaultPromoteDebounce
+	if c.Interval != nil && *c.Interval > 0 {
+		s.interval = *c.Interval
 	}
-	if c.FailbackStability <= 0 {
-		c.FailbackStability = DefaultFailbackStability
+	if c.PromoteDebounce != nil && *c.PromoteDebounce >= 0 {
+		s.promoteDebounce = *c.PromoteDebounce
 	}
-	if c.FailbackWarmthLagNs == 0 {
-		c.FailbackWarmthLagNs = DefaultFailbackWarmthLagNs
+	if c.FailbackEnabled != nil {
+		s.failbackEnabled = *c.FailbackEnabled
 	}
-	if c.UnreachableLeaderGrace <= 0 {
-		c.UnreachableLeaderGrace = DefaultUnreachableLeaderGrace
+	if c.FailbackStability != nil && *c.FailbackStability >= 0 {
+		s.failbackStability = *c.FailbackStability
 	}
-	return c
+	if c.FailbackWarmthLagNs != nil {
+		s.failbackWarmthLagNs = *c.FailbackWarmthLagNs
+	}
+	if c.UnreachableLeaderGrace != nil && *c.UnreachableLeaderGrace >= 0 {
+		s.unreachableLeaderGrace = *c.UnreachableLeaderGrace
+	}
+	if c.EmptyDiscoveryDebounce != nil && *c.EmptyDiscoveryDebounce >= 0 {
+		s.emptyDiscoveryDebounce = *c.EmptyDiscoveryDebounce
+	}
+	return s
 }
 
 type Controller struct {
-	cfg     Config
+	cfg     settings
 	k8s     *k8sclient.Client
 	backend *backend.Client
 	reg     *registry.Registry
@@ -62,6 +89,7 @@ type Controller struct {
 
 type deploymentState struct {
 	leaderlessStreak          int
+	emptyStreak               int
 	incumbentPod              string
 	incumbentUnreachableSince time.Time
 	inflight                  bool
@@ -83,6 +111,12 @@ func New(cfg Config, k8s *k8sclient.Client, b *backend.Client, reg *registry.Reg
 }
 
 func (c *Controller) Run(ctx context.Context) {
+	c.log.InfoContext(ctx, "election: controller starting",
+		"deployments", len(c.reg.Names()), "interval", c.cfg.interval.String(),
+		"promoteDebounce", c.cfg.promoteDebounce, "emptyDiscoveryDebounce", c.cfg.emptyDiscoveryDebounce,
+		"failbackEnabled", c.cfg.failbackEnabled, "failbackStability", c.cfg.failbackStability.String(),
+		"failbackWarmthLag", c.cfg.failbackWarmthLagNs,
+		"unreachableLeaderGrace", c.cfg.unreachableLeaderGrace.String())
 	var wg sync.WaitGroup
 	for _, name := range c.reg.Names() {
 		wg.Add(1)
@@ -98,7 +132,7 @@ func (c *Controller) Run(ctx context.Context) {
 func (c *Controller) runDeployment(ctx context.Context, name string) {
 	c.log.InfoContext(ctx, "election: starting reconcile loop", "deployment", name)
 	defer c.log.InfoContext(ctx, "election: stopping reconcile loop", "deployment", name)
-	tick := time.NewTicker(c.cfg.Interval)
+	tick := time.NewTicker(c.cfg.interval)
 	defer tick.Stop()
 	c.reconcileSafe(ctx, name)
 	for {
@@ -165,30 +199,35 @@ func (c *Controller) reconcile(ctx context.Context, name string) {
 		c.log.WarnContext(ctx, "election: discovery failed", "deployment", name, "err", err)
 		return
 	}
-	if len(pods) == 0 {
-		c.log.WarnContext(ctx, "election: discovery returned no backend pods",
-			"deployment", name, "namespace", ns)
-	}
 	snap := c.snapshotState(st)
 	obs := c.pollAll(ctx, name, pods)
 	dec := decide(obs, decideParams{
 		incumbent: snap.incumbentPod,
 		failback: failbackParams{
-			enabled:         c.cfg.FailbackEnabled,
-			stabilityWindow: c.cfg.FailbackStability,
-			warmthLagNs:     c.cfg.FailbackWarmthLagNs,
+			enabled:         c.cfg.failbackEnabled,
+			stabilityWindow: c.cfg.failbackStability,
+			warmthLagNs:     c.cfg.failbackWarmthLagNs,
 			now:             time.Now(),
 			prior:           snap.failback,
 		},
 	})
-	streak, retain := c.commitState(st, dec, len(pods) == 0, time.Now())
+	streak, emptyStreak, retain := c.commitState(st, dec, len(pods) == 0, time.Now())
+	if len(pods) == 0 {
+		c.actEmptyDiscovery(ctx, name, ns, st, emptyStreak)
+		return
+	}
 	c.act(ctx, name, st, dec, streak, retain)
 }
 
-func (c *Controller) commitState(st *deploymentState, dec decision, emptyList bool, now time.Time) (int, bool) {
+func (c *Controller) commitState(st *deploymentState, dec decision, emptyList bool, now time.Time) (int, int, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	st.failback = dec.failbackState
+	if emptyList {
+		st.emptyStreak++
+	} else {
+		st.emptyStreak = 0
+	}
 	if dec.liveLeaderCount == 0 {
 		if !emptyList && !dec.hasTransitioning {
 			st.leaderlessStreak++
@@ -201,11 +240,11 @@ func (c *Controller) commitState(st *deploymentState, dec decision, emptyList bo
 		if st.incumbentUnreachableSince.IsZero() {
 			st.incumbentUnreachableSince = now
 		}
-		retain = now.Sub(st.incumbentUnreachableSince) < c.cfg.UnreachableLeaderGrace
+		retain = now.Sub(st.incumbentUnreachableSince) < c.cfg.unreachableLeaderGrace
 	} else {
 		st.incumbentUnreachableSince = time.Time{}
 	}
-	return st.leaderlessStreak, retain
+	return st.leaderlessStreak, st.emptyStreak, retain
 }
 
 func (c *Controller) pollAll(ctx context.Context, name string, pods []k8sclient.Backend) []observation {

@@ -1,11 +1,11 @@
-FROM docker.io/library/golang:1.26.4-alpine AS build
+FROM docker.io/library/golang:1.26.4-alpine3.23 AS build
 
 WORKDIR /src
 
 RUN sed --in-place 's!https://dl-cdn.alpinelinux.org/alpine!https://linux.sex/dl-cdn.alpinelinux.org!g' /etc/apk/repositories || true && \
     apk --verbose update && \
     apk --no-cache --verbose upgrade --available && \
-    apk add --no-cache git ca-certificates tzdata && \
+    apk add --no-cache ca-certificates tzdata && \
     update-ca-certificates && \
     apk cache clean
 
@@ -15,10 +15,10 @@ RUN go mod download
 
 COPY . .
 
-RUN CGO_ENABLED=0 go build -ldflags="-s -w" -trimpath -a -o /bigbrain . && \
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -trimpath -o /bigbrain . && \
     chmod +x /bigbrain
 
-FROM docker.io/library/alpine:3
+FROM docker.io/library/alpine:3.24
 
 RUN sed --in-place 's!https://dl-cdn.alpinelinux.org/alpine!https://linux.sex/dl-cdn.alpinelinux.org!g' /etc/apk/repositories || true && \
     apk --verbose update && \
@@ -30,6 +30,8 @@ RUN sed --in-place 's!https://dl-cdn.alpinelinux.org/alpine!https://linux.sex/dl
 COPY --from=build /bigbrain /bigbrain
 
 EXPOSE 8081
+
+EXPOSE 6443
 
 USER 65532:65532
 

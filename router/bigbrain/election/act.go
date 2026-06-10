@@ -51,6 +51,25 @@ func (c *Controller) actFailback(
 	})
 }
 
+func (c *Controller) actEmptyDiscovery(ctx context.Context, name, ns string, st *deploymentState, streak int) {
+	switch {
+	case streak < c.cfg.emptyDiscoveryDebounce:
+		c.log.WarnContext(ctx, "election: discovery returned no backend pods; retaining last-known leader",
+			"deployment", name, "namespace", ns, "streak", streak, "need", c.cfg.emptyDiscoveryDebounce)
+		return
+	case streak == c.cfg.emptyDiscoveryDebounce:
+		c.log.WarnContext(ctx, "election: discovery persistently empty; publishing leaderless",
+			"deployment", name, "namespace", ns, "ticks", streak)
+	default:
+		c.log.DebugContext(ctx, "election: discovery still empty",
+			"deployment", name, "namespace", ns, "streak", streak)
+	}
+	c.mu.Lock()
+	st.leaderlessStreak = 0
+	c.mu.Unlock()
+	c.setLeader(name, st, "", "")
+}
+
 func (c *Controller) actLeaderless(
 	ctx context.Context,
 	name string,
@@ -59,14 +78,14 @@ func (c *Controller) actLeaderless(
 	streak int,
 	retain bool,
 ) {
-	if streak < c.cfg.PromoteDebounce {
-		c.log.InfoContext(ctx, "election: leaderless, retaining last-known leader during hysteresis",
-			"deployment", name, "streak", streak, "need", c.cfg.PromoteDebounce)
+	if streak < c.cfg.promoteDebounce {
+		c.log.DebugContext(ctx, "election: leaderless, retaining last-known leader during hysteresis",
+			"deployment", name, "streak", streak, "need", c.cfg.promoteDebounce)
 		return
 	}
 	if retain {
 		c.log.WarnContext(ctx, "election: incumbent unreachable but still discovered; retaining leader within grace",
-			"deployment", name, "streak", streak, "grace", c.cfg.UnreachableLeaderGrace)
+			"deployment", name, "streak", streak, "grace", c.cfg.unreachableLeaderGrace)
 		return
 	}
 	if d.promoteTarget == nil {
@@ -124,17 +143,20 @@ func (c *Controller) runActions(ctx context.Context, name string, st *deployment
 	base := context.WithoutCancel(ctx)
 	c.actWG.Go(func() {
 		defer c.release(st)
+		actx, cancel := context.WithTimeout(base, actuationTimeout)
+		defer cancel()
 		for _, a := range actions {
-			actx, cancel := context.WithTimeout(base, actuationTimeout)
 			code, err := c.backend.Demote(actx, name, a.url)
-			cancel()
 			if err != nil {
 				c.log.ErrorContext(base, "election: demote failed", "deployment", name, "pod", a.pod, "err", err)
 				continue
 			}
 			switch code {
-			case http.StatusOK, http.StatusAccepted, http.StatusConflict:
+			case http.StatusOK, http.StatusAccepted:
 				c.log.InfoContext(base, "election: demote accepted", "deployment", name, "pod", a.pod, "status", code)
+			case http.StatusConflict:
+				c.log.InfoContext(base, "election: demote deferred; backend is mid-transition, will retry",
+					"deployment", name, "pod", a.pod, "status", code)
 			case http.StatusInternalServerError:
 				c.log.WarnContext(base, "election: demote self-fenced; backend is restarting as follower",
 					"deployment", name, "pod", a.pod)

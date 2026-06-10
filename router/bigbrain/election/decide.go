@@ -57,10 +57,7 @@ func incumbentDiscoveredUnreachable(obs []observation, incumbent string) bool {
 	return false
 }
 
-func pickLeader(claims []observation, incumbent string) (observation, bool) {
-	if len(claims) == 0 {
-		return observation{}, false
-	}
+func pickLeader(claims []observation, incumbent string) observation {
 	best := claims[0]
 	for _, o := range claims[1:] {
 		if betterLeader(o, best) {
@@ -76,9 +73,9 @@ func pickLeader(claims []observation, incumbent string) (observation, bool) {
 		if bestHasLease && (!incumbentHasLease || incumbentLease < bestLease) {
 			break
 		}
-		return o, true
+		return o
 	}
-	return best, true
+	return best
 }
 
 func betterLeader(a, b observation) bool {
@@ -152,10 +149,7 @@ func decide(obs []observation, p decideParams) decision {
 		}
 		return d
 	}
-	leader, ok := pickLeader(claims, p.incumbent)
-	if !ok {
-		return d
-	}
+	leader := pickLeader(claims, p.incumbent)
 	d.leaderPod, d.leaderURL = leader.be.Pod, leader.be.URL
 	for _, o := range claims {
 		if o.be.Pod != leader.be.Pod {

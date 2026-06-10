@@ -3,6 +3,8 @@ package server_test
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -144,6 +146,39 @@ func TestServer_LeaderStreamSkipsUnpublishedSnapshot(t *testing.T) {
 	}
 	if !strings.Contains(body, "http://10.0.0.2:3210") {
 		t.Fatalf("stream did not emit the first reconciled event, got: %q", body)
+	}
+}
+
+func TestServer_ShutdownClosesLeaderStream(t *testing.T) {
+	t.Parallel()
+	reg := registry.New()
+	reg.EnsureDeployment("dev", "convex-dev")
+	reg.Update("dev", "backend-0", "http://10.0.0.1:3210")
+	srv := server.New(reg, insights.New(10), nil, slog.New(slog.DiscardHandler))
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	resp, err := http.Get(ts.URL + "/registry/deployments/dev/leader-stream")
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("stream: want 200, got %d", resp.StatusCode)
+	}
+	buf := make([]byte, 1)
+	if _, rerr := resp.Body.Read(buf); rerr != nil {
+		t.Fatalf("read initial event: %v", rerr)
+	}
+	srv.Shutdown()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = io.Copy(io.Discard, resp.Body)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Shutdown did not close the connected leader-stream client")
 	}
 }
 

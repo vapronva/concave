@@ -18,7 +18,7 @@ const (
 	groupSep                   = "\x1f"
 	defaultRingCap             = 50_000
 	maxRecentPerGroup          = 50
-	dayLookbackHours           = 24
+	inclusiveEndHours          = 24
 	occKeyPartsCount           = 3
 	readKeyPartsCount          = 2
 	kindOCC                    = "occ"
@@ -38,7 +38,7 @@ const (
 	fieldSuccess               = "success"
 )
 
-var ErrBadDateRange = errors.New("from/to must be YYYY-MM-DD and from < to")
+var ErrBadDateRange = errors.New("from must be on or before to")
 
 var dateRE = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
 
@@ -118,16 +118,6 @@ func (i *Insights) store(r Row) {
 	dep.start = (dep.start + 1) % len(dep.rows)
 }
 
-func (i *Insights) MemLen() int {
-	i.memMu.Lock()
-	defer i.memMu.Unlock()
-	total := 0
-	for _, dep := range i.mem {
-		total += dep.size
-	}
-	return total
-}
-
 func (i *Insights) rows(deployment string, fromMs, toMs int64) []Row {
 	i.memMu.Lock()
 	defer i.memMu.Unlock()
@@ -159,7 +149,7 @@ func (i *Insights) Query(deployment, fromDate, toDate string) ([][]any, error) {
 		return nil, ErrBadDateRange
 	}
 	fromMs := from.UTC().UnixMilli()
-	toMs := to.UTC().Add(dayLookbackHours * time.Hour).UnixMilli()
+	toMs := to.UTC().Add(inclusiveEndHours * time.Hour).UnixMilli()
 	if fromMs >= toMs {
 		return nil, ErrBadDateRange
 	}
@@ -366,8 +356,8 @@ func makeRow(deployment, kind string, p map[string]any) (Row, bool) {
 			Deployment:           deployment,
 			TS:                   now,
 			Kind:                 kindOCC,
-			UDFID:                getString(p, "udf_id"),
-			ComponentPath:        getStringPtr(p, "component_path"),
+			UDFID:                getGroupableString(p, "udf_id"),
+			ComponentPath:        getGroupableStringPtr(p, "component_path"),
 			RequestID:            getString(p, fieldRequestID),
 			ExecutionID:          getString(p, "id"),
 			OCCTableName:         getStringPtr(p, "occ_table_name"),
@@ -381,8 +371,8 @@ func makeRow(deployment, kind string, p map[string]any) (Row, bool) {
 			Deployment:    deployment,
 			TS:            now,
 			Kind:          kindRead,
-			UDFID:         getString(p, "udf_id"),
-			ComponentPath: getStringPtr(p, "component_path"),
+			UDFID:         getGroupableString(p, "udf_id"),
+			ComponentPath: getGroupableStringPtr(p, "component_path"),
 			RequestID:     getString(p, fieldRequestID),
 			ExecutionID:   getString(p, "id"),
 			Success:       getBoolPtr(p, fieldSuccess),
@@ -409,6 +399,18 @@ func getString(m map[string]any, k string) string {
 		return v
 	}
 	return ""
+}
+
+func getGroupableString(m map[string]any, k string) string {
+	return strings.ReplaceAll(getString(m, k), groupSep, "")
+}
+
+func getGroupableStringPtr(m map[string]any, k string) *string {
+	v := strings.ReplaceAll(getString(m, k), groupSep, "")
+	if v == "" {
+		return nil
+	}
+	return &v
 }
 
 func getStringPtr(m map[string]any, k string) *string {

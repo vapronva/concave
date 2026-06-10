@@ -16,6 +16,10 @@ import (
 	"time"
 )
 
+func (t *tracker) setLeader(leaderURL string) bool {
+	return t.applyLeader(leaderURL, 0)
+}
+
 func TestIsBlockedControlPath(t *testing.T) {
 	t.Parallel()
 	blocked := []string{
@@ -215,12 +219,27 @@ func TestServeHTTP_ForwardsPublicRequestMetadata(t *testing.T) {
 	if !tr.setLeader(upstream.URL) {
 		t.Fatal("setLeader should install proxy")
 	}
-	req := httptest.NewRequest(http.MethodGet, "https://api.example/api/query", nil)
-	req.RemoteAddr = "192.0.2.10:4567"
-	req.Host = "api.example"
-	tr.serveHTTP(httptest.NewRecorder(), req, false)
-	if gotProto != "https" || gotHost != "api.example" || gotXFF != "192.0.2.10" {
-		t.Fatalf("forwarded proto/host/for = %q/%q/%q", gotProto, gotHost, gotXFF)
+	fromEdge := httptest.NewRequest(http.MethodGet, "http://api.example/api/query", nil)
+	fromEdge.RemoteAddr = "192.0.2.10:4567"
+	fromEdge.Host = "api.example"
+	fromEdge.Header.Set("X-Forwarded-For", "203.0.113.7")
+	fromEdge.Header.Set("X-Forwarded-Proto", "https")
+	tr.serveHTTP(httptest.NewRecorder(), fromEdge, false)
+	if gotXFF != "203.0.113.7, 192.0.2.10" {
+		t.Fatalf("X-Forwarded-For=%q want %q (edge chain + usher-seen client)", gotXFF, "203.0.113.7, 192.0.2.10")
+	}
+	if gotProto != "https" || gotHost != "api.example" {
+		t.Fatalf("forwarded proto/host = %q/%q want https/api.example", gotProto, gotHost)
+	}
+	bare := httptest.NewRequest(http.MethodGet, "http://api.example/api/query", nil)
+	bare.RemoteAddr = "192.0.2.11:4567"
+	bare.Host = "api.example"
+	tr.serveHTTP(httptest.NewRecorder(), bare, false)
+	if gotProto != "http" {
+		t.Fatalf("X-Forwarded-Proto=%q want http when the edge sent none (plaintext hop)", gotProto)
+	}
+	if gotXFF != "192.0.2.11" {
+		t.Fatalf("X-Forwarded-For=%q want %q when the edge sent none", gotXFF, "192.0.2.11")
 	}
 }
 
@@ -392,6 +411,45 @@ func TestValidateConfig(t *testing.T) {
 	if err := validateConfig(cfg, "http://bigbrain:8081"); err != nil {
 		t.Fatalf("valid config rejected: %v", err)
 	}
+	dup := config{Deployments: []deploymentCfg{
+		{Host: "api.example", SiteHost: "site.example"},
+		{Host: "API.EXAMPLE"},
+	}}
+	if err := validateConfig(dup, "http://bigbrain:8081"); err == nil || !strings.Contains(err.Error(), "api.example") {
+		t.Fatalf("duplicate-host error must name the offending host, got %v", err)
+	}
+	for _, name := range []string{"bad/name", "bad name", "bad%name", "../escape"} {
+		bad := config{Deployments: []deploymentCfg{{Host: "api.example", Name: name}}}
+		if err := validateConfig(bad, "http://bigbrain:8081"); err == nil {
+			t.Errorf("name %q must be rejected at boot", name)
+		}
+	}
+	emptyDerived := config{Deployments: []deploymentCfg{{Host: ".example"}}}
+	if err := validateConfig(emptyDerived, "http://bigbrain:8081"); err == nil {
+		t.Fatal("host yielding an empty derived name must be rejected")
+	}
+	derived := config{Deployments: []deploymentCfg{{Host: "team-app.example.com"}}}
+	if err := validateConfig(derived, "http://bigbrain:8081"); err != nil {
+		t.Fatalf("derived name rejected: %v", err)
+	}
+}
+
+func TestParseConnIdle(t *testing.T) {
+	t.Parallel()
+	if got, err := parseConnIdle(""); err != nil || got != defaultConnIdle {
+		t.Fatalf("empty: got %s err=%v, want default %s", got, err, defaultConnIdle)
+	}
+	if got, err := parseConnIdle("90s"); err != nil || got != 90*time.Second {
+		t.Fatalf("90s: got %s err=%v", got, err)
+	}
+	if got, err := parseConnIdle("0"); err != nil || got != 0 {
+		t.Fatalf("0 (disabled): got %s err=%v", got, err)
+	}
+	for _, bad := range []string{"-5s", "-1h", "garbage", "10"} {
+		if _, err := parseConnIdle(bad); err == nil {
+			t.Errorf("%q: want parse error", bad)
+		}
+	}
 }
 
 func TestSetLeader_SiteProxyRoutesToHttpPathOnCloudPort(t *testing.T) {
@@ -484,6 +542,46 @@ func TestResolveOnce_ClearsLeaderOnAuthoritativeNoLeader(t *testing.T) {
 		tr.resolveOnce(context.Background())
 		if tr.currentLeader(false) == nil {
 			t.Fatal("transport error must preserve last-known leader")
+		}
+	})
+	t.Run("status_503_garbage_body_preserves", func(t *testing.T) {
+		t.Parallel()
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = io.WriteString(w, "intermediary melted")
+		}))
+		defer srv.Close()
+		tr := &tracker{name: "test", bigbrainURL: srv.URL, client: &http.Client{}, proxyTransport: newProxyTransport()}
+		tr.setLeader("http://10.0.0.5:3210")
+		tr.resolveOnce(context.Background())
+		if tr.currentLeader(false) == nil {
+			t.Fatal("503 with an undecodable body must preserve last-known leader")
+		}
+	})
+	t.Run("status_425_preserves", func(t *testing.T) {
+		t.Parallel()
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusTooEarly)
+		}))
+		defer srv.Close()
+		tr := &tracker{name: "test", bigbrainURL: srv.URL, client: &http.Client{}, proxyTransport: newProxyTransport()}
+		tr.setLeader("http://10.0.0.5:3210")
+		tr.resolveOnce(context.Background())
+		if tr.currentLeader(false) == nil {
+			t.Fatal("425 must preserve last-known leader")
+		}
+	})
+	t.Run("status_404_preserves", func(t *testing.T) {
+		t.Parallel()
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		defer srv.Close()
+		tr := &tracker{name: "test", bigbrainURL: srv.URL, client: &http.Client{}, proxyTransport: newProxyTransport()}
+		tr.setLeader("http://10.0.0.5:3210")
+		tr.resolveOnce(context.Background())
+		if tr.currentLeader(false) == nil {
+			t.Fatal("404 must preserve last-known leader")
 		}
 	})
 	t.Run("status_200_sets_leader", func(t *testing.T) {
@@ -585,6 +683,52 @@ func TestApplyLeader_SeqZeroAlwaysApplies(t *testing.T) {
 	}
 }
 
+func TestApplyLeader_BadURLDoesNotConsumeSeq(t *testing.T) {
+	t.Parallel()
+	tr := &tracker{host: "api.example", proxyTransport: newProxyTransport()}
+	if tr.applyLeader("http://[::1]:namedport", 7) {
+		t.Fatal("an unparseable leader URL must not apply")
+	}
+	if !tr.applyLeader("http://10.0.0.1:3210", 7) {
+		t.Fatal("the rejected event must not consume seq 7; a follow-up with the same seq must apply")
+	}
+	if got := leaderSnapshot(tr); got != "http://10.0.0.1:3210" {
+		t.Fatalf("leader=%q want the seq-7 applied URL", got)
+	}
+}
+
+func TestConsumeStream_IdleWatchdogCancelsSilentStream(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: leader\ndata: {\"leaderUrl\":\"http://10.0.0.8:3210\",\"seq\":3}\n\n")
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+	tr := &tracker{
+		host:           "api.example",
+		streamIdle:     150 * time.Millisecond,
+		streamClient:   &http.Client{},
+		proxyTransport: newProxyTransport(),
+	}
+	done := make(chan struct{})
+	go func() {
+		tr.consumeStream(context.Background(), srv.URL)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("idle watchdog did not cancel the silent stream")
+	}
+	if got := leaderSnapshot(tr); got != "http://10.0.0.8:3210" {
+		t.Fatalf("leader=%q want the event applied before the stream went silent", got)
+	}
+}
+
 func TestActivityConn_ClosesIdleAndSparesActive(t *testing.T) {
 	t.Parallel()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -618,5 +762,151 @@ func TestActivityConn_ClosesIdleAndSparesActive(t *testing.T) {
 			t.Fatalf("active connection was closed despite progress: %v", werr)
 		}
 		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func TestNewMux_HealthzOnlyOnUnknownHosts(t *testing.T) {
+	t.Parallel()
+	var paths []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "upstream-reached")
+	}))
+	defer upstream.Close()
+	tr := &tracker{host: "api.example", resolveCh: make(chan struct{}, 1), proxyTransport: newProxyTransport()}
+	if !tr.setLeader(upstream.URL) {
+		t.Fatal("setLeader should install proxy")
+	}
+	mux := newMux(map[string]route{"api.example": {tracker: tr}})
+	edge := httptest.NewServer(mux)
+	defer edge.Close()
+	resp, err := http.Get(edge.URL + "/usher/healthz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || string(body) != "ok" {
+		t.Fatalf("unknown-host healthz: status=%d body=%q", resp.StatusCode, body)
+	}
+	req, err := http.NewRequest(http.MethodGet, edge.URL+"/usher/healthz", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Host = "api.example"
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "upstream-reached") {
+		t.Fatalf("configured-host healthz must proxy to the leader: status=%d body=%q", resp.StatusCode, body)
+	}
+	if len(paths) != 1 || paths[0] != "/usher/healthz" {
+		t.Fatalf("upstream paths=%v want exactly [/usher/healthz]", paths)
+	}
+}
+
+func TestNewMux_MethodAndHostGates(t *testing.T) {
+	t.Parallel()
+	tr := &tracker{host: "api.example", resolveCh: make(chan struct{}, 1), proxyTransport: newProxyTransport()}
+	mux := newMux(map[string]route{"api.example": {tracker: tr}})
+	cases := []struct {
+		method, host, path string
+		want               int
+	}{
+		{http.MethodTrace, "probe.invalid", "/usher/healthz", http.StatusMethodNotAllowed},
+		{http.MethodPost, "probe.invalid", "/usher/healthz", http.StatusMethodNotAllowed},
+		{http.MethodHead, "probe.invalid", "/usher/healthz", http.StatusOK},
+		{http.MethodGet, "127.0.0.1:8080", "/usher/healthz", http.StatusOK},
+		{http.MethodTrace, "api.example", "/api/query", http.StatusMethodNotAllowed},
+		{http.MethodConnect, "api.example", "/api/query", http.StatusMethodNotAllowed},
+		{http.MethodTrace, "api.example", "/usher/healthz", http.StatusMethodNotAllowed},
+		{http.MethodGet, "probe.invalid", "/api/query", http.StatusNotFound},
+	}
+	for _, c := range cases {
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequest(c.method, c.path, nil)
+		req.Host = c.host
+		mux.ServeHTTP(rr, req)
+		if rr.Code != c.want {
+			t.Errorf("%s %s host=%s: status=%d want %d", c.method, c.path, c.host, rr.Code, c.want)
+		}
+	}
+}
+
+func TestNewMux_HostRoutingPreservesPublicHost(t *testing.T) {
+	t.Parallel()
+	var gotHost atomic.Value
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHost.Store(r.Host)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+	tr := &tracker{host: "api.example", resolveCh: make(chan struct{}, 1), proxyTransport: newProxyTransport()}
+	if !tr.setLeader(upstream.URL) {
+		t.Fatal("setLeader should install proxy")
+	}
+	mux := newMux(map[string]route{"api.example": {tracker: tr}})
+	edge := httptest.NewServer(mux)
+	defer edge.Close()
+	req, err := http.NewRequest(http.MethodGet, edge.URL+"/api/query", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Host = "API.Example:8443"
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d want 200 (routing must lowercase and strip the port)", resp.StatusCode)
+	}
+	if got, _ := gotHost.Load().(string); got != "API.Example:8443" {
+		t.Fatalf("upstream r.Host=%q want the original public Host %q", got, "API.Example:8443")
+	}
+}
+
+func TestServeHTTP_RejectsChunkedOversizedBody(t *testing.T) {
+	t.Parallel()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+	tr := &tracker{
+		host:           "api.example",
+		maxBodyBytes:   8,
+		resolveCh:      make(chan struct{}, 1),
+		proxyTransport: newProxyTransport(),
+	}
+	if !tr.setLeader(upstream.URL) {
+		t.Fatal("setLeader should install proxy")
+	}
+	edge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tr.serveHTTP(w, r, false)
+	}))
+	defer edge.Close()
+	req, err := http.NewRequest(http.MethodPost, edge.URL+"/api/mutation", strings.NewReader(strings.Repeat("x", 64)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.ContentLength = -1
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status=%d want 413 for a chunked oversize body", resp.StatusCode)
+	}
+	select {
+	case <-tr.resolveCh:
+		t.Fatal("an oversize body must not nudge leader resolution")
+	default:
 	}
 }

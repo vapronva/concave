@@ -203,6 +203,29 @@ func TestQueryReadLimitBytesThresholdAndLimit(t *testing.T) {
 	}
 }
 
+func TestIngestStripsGroupSeparator(t *testing.T) {
+	t.Parallel()
+	i := insights.New(100)
+	_ = i.Ingest("p", []insights.AnyEvent{
+		{"FunctionCall": map[string]any{
+			"is_occ": true, "udf_id": "u:f\x1fevil", "id": "x",
+			"component_path": "comp\x1fonent", "occ_table_name": "t",
+			"status": "retried",
+		}},
+	})
+	today := time.Now().UTC().Format("2006-01-02")
+	out, err := i.Query("p", today, today)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 1 {
+		t.Fatalf("expected 1 group row, got %v", out)
+	}
+	if out[0][1] != "u:fevil" || out[0][2] != "component" {
+		t.Errorf("0x1f must be stripped from udf_id/component_path at ingest, got %v/%v", out[0][1], out[0][2])
+	}
+}
+
 func TestOCCGroupKeySpaceSafe(t *testing.T) {
 	t.Parallel()
 	i := insights.New(100)

@@ -90,7 +90,7 @@ func loadConfig(kubeconfigPath string) (*rest.Config, error) {
 }
 
 func (c *Client) DiscoverBackends(ctx context.Context, ns, name string) ([]Backend, error) {
-	sel := fmt.Sprintf("%s=%s,%s", c.labels.deployment, name, c.labels.role)
+	sel := fmt.Sprintf("%s=%s,%s,%s=backend", c.labels.deployment, name, c.labels.role, c.labels.component)
 	list, err := c.cs.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{LabelSelector: sel})
 	if err != nil {
 		return nil, fmt.Errorf("list pods (%s in %s): %w", sel, ns, err)
@@ -101,7 +101,7 @@ func (c *Client) DiscoverBackends(ctx context.Context, ns, name string) ([]Backe
 		if p.DeletionTimestamp != nil || p.Status.PodIP == "" {
 			continue
 		}
-		if p.Labels[c.labels.component] != "backend" {
+		if p.Status.Phase == corev1.PodFailed || p.Status.Phase == corev1.PodSucceeded {
 			continue
 		}
 		role := p.Labels[c.labels.role]

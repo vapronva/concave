@@ -39,7 +39,9 @@ const (
 	streamBackoffInitial  = 1 * time.Second
 	streamBackoffCap      = 15 * time.Second
 	streamHealthyAfter    = 30 * time.Second
+	streamIdleTimeout     = 75 * time.Second
 	instancePrefix        = "/instance"
+	healthzPath           = "/usher/healthz"
 	routesPerDeployment   = 2
 	maxHeaderBytes        = 64 * 1024
 	defaultConnIdle       = time.Hour
@@ -59,8 +61,6 @@ type config struct {
 }
 
 type leaderResponse struct {
-	Name      string `json:"name"`
-	LeaderPod string `json:"leaderPod"`
 	LeaderURL string `json:"leaderUrl"`
 	Seq       uint64 `json:"seq"`
 }
@@ -76,17 +76,33 @@ type tracker struct {
 	name           string
 	bigbrainURL    string
 	maxBodyBytes   int64
+	streamIdle     time.Duration
 	client         *http.Client
 	streamClient   *http.Client
 	proxyTransport *http.Transport
 	resolveCh      chan struct{}
 	resolveMu      sync.Mutex
 	nextResolve    time.Time
+	pollGate       stateGate
+	streamGate     stateGate
+	eventGate      stateGate
 	mu             sync.RWMutex
 	lastAppliedSeq uint64
 	leaderURL      string
 	proxy          *httputil.ReverseProxy
 	siteProxy      *httputil.ReverseProxy
+}
+
+type stateGate struct {
+	down atomic.Bool
+}
+
+func (g *stateGate) fail() bool {
+	return g.down.CompareAndSwap(false, true)
+}
+
+func (g *stateGate) ok() bool {
+	return g.down.CompareAndSwap(true, false)
 }
 
 func clonedDefaultTransport() *http.Transport {
@@ -108,21 +124,24 @@ func newReverseProxy(u *url.URL, nudge func(), tr *http.Transport) *httputil.Rev
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(u)
+			pr.Out.Header["X-Forwarded-For"] = pr.In.Header["X-Forwarded-For"]
 			pr.SetXForwarded()
+			if proto := pr.In.Header.Get("X-Forwarded-Proto"); proto != "" {
+				pr.Out.Header.Set("X-Forwarded-Proto", proto)
+			}
 			pr.Out.Host = pr.In.Host
 		},
 		Transport:     tr,
 		FlushInterval: -1,
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			log.Printf("usher: upstream error: %v", err)
+			if r.Context().Err() != nil {
+				return
+			}
 			if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 				http.Error(w, "request entity too large", http.StatusRequestEntityTooLarge)
 				return
 			}
-			if r.Context().Err() != nil {
-				http.Error(w, "client closed request", http.StatusBadGateway)
-				return
-			}
+			log.Printf("usher: upstream error: %v", err)
 			nudge()
 			w.Header().Set("Retry-After", "1")
 			http.Error(w, "service unavailable", http.StatusServiceUnavailable)
@@ -148,10 +167,6 @@ func newReverseProxy(u *url.URL, nudge func(), tr *http.Transport) *httputil.Rev
 		},
 	}
 	return rp
-}
-
-func (t *tracker) setLeader(leaderURL string) bool {
-	return t.applyLeader(leaderURL, 0)
 }
 
 func (t *tracker) applyLeader(leaderURL string, seq uint64) bool {
@@ -205,7 +220,13 @@ func (t *tracker) currentLeader(site bool) *httputil.ReverseProxy {
 func (t *tracker) resolveOnce(ctx context.Context) {
 	lr, hasLeader, err := t.queryBigbrain(ctx)
 	if err != nil {
+		if !errors.Is(ctx.Err(), context.Canceled) && t.pollGate.fail() {
+			log.Printf("usher: %s leader poll failed: %v", t.host, err)
+		}
 		return
+	}
+	if t.pollGate.ok() {
+		log.Printf("usher: %s leader poll recovered", t.host)
 	}
 	if !hasLeader {
 		t.applyLeader("", lr.Seq)
@@ -227,7 +248,9 @@ func (t *tracker) queryBigbrain(ctx context.Context) (leaderResponse, bool, erro
 	defer drainClose(resp.Body)
 	if resp.StatusCode == http.StatusServiceUnavailable {
 		var lr leaderResponse
-		_ = json.NewDecoder(io.LimitReader(resp.Body, bodyReadLimit)).Decode(&lr)
+		if err = json.NewDecoder(io.LimitReader(resp.Body, bodyReadLimit)).Decode(&lr); err != nil {
+			return leaderResponse{}, false, err
+		}
 		lr.LeaderURL = ""
 		return lr, false, nil
 	}
@@ -266,38 +289,78 @@ func (t *tracker) streamBigbrain(ctx context.Context) {
 
 func (t *tracker) consumeStream(ctx context.Context, u string) bool {
 	started := time.Now()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
-	if err != nil {
-		return false
+	idle := t.streamIdle
+	if idle <= 0 {
+		idle = streamIdleTimeout
 	}
-	req.Header.Set("Accept", "text/event-stream")
-	resp, err := t.streamClient.Do(req) //nolint:bodyclose // drainClose drains and closes the body
+	sctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	resp, err := t.openStream(sctx, u) //nolint:bodyclose // drainClose drains and closes the body
 	if err != nil {
+		if ctx.Err() == nil && t.streamGate.fail() {
+			log.Printf("usher: %s leader-stream connect failed: %v", t.host, err)
+		}
 		return false
 	}
 	defer drainClose(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return false
+	if t.streamGate.ok() {
+		log.Printf("usher: %s leader-stream connected", t.host)
 	}
+	watchdog := time.AfterFunc(idle, cancel)
+	defer watchdog.Stop()
 	sc := bufio.NewScanner(resp.Body)
 	sc.Buffer(make([]byte, 0, bodyReadLimit), streamBufferMax)
 	for sc.Scan() {
-		line := sc.Text()
-		data, ok := strings.CutPrefix(line, "data: ")
-		if !ok {
-			continue
-		}
-		var ev leaderResponse
-		if json.Unmarshal([]byte(data), &ev) != nil {
-			continue
-		}
-		t.applyLeader(ev.LeaderURL, ev.Seq)
+		watchdog.Reset(idle)
+		t.handleStreamLine(sc.Text())
 	}
-	if scanErr := sc.Err(); scanErr != nil {
-		log.Printf("usher: %s leader-stream read error: %v", t.host, scanErr)
-		return false
+	healthy := time.Since(started) >= streamHealthyAfter
+	t.logStreamEnd(ctx, sctx, sc.Err(), idle)
+	return healthy
+}
+
+func (t *tracker) openStream(ctx context.Context, u string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, err
 	}
-	return time.Since(started) >= streamHealthyAfter
+	req.Header.Set("Accept", "text/event-stream")
+	resp, err := t.streamClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		drainClose(resp.Body)
+		return nil, fmt.Errorf("unexpected status %d", resp.StatusCode)
+	}
+	return resp, nil
+}
+
+func (t *tracker) handleStreamLine(line string) {
+	data, ok := strings.CutPrefix(line, "data: ")
+	if !ok {
+		return
+	}
+	var ev leaderResponse
+	if err := json.Unmarshal([]byte(data), &ev); err != nil {
+		if t.eventGate.fail() {
+			log.Printf("usher: %s leader-stream bad event: %v", t.host, err)
+		}
+		return
+	}
+	t.eventGate.ok()
+	t.applyLeader(ev.LeaderURL, ev.Seq)
+}
+
+func (t *tracker) logStreamEnd(ctx, sctx context.Context, scanErr error, idle time.Duration) {
+	if scanErr == nil || ctx.Err() != nil {
+		return
+	}
+	if sctx.Err() != nil {
+		log.Printf("usher: %s leader-stream idle for %s, reconnecting", t.host, idle)
+		return
+	}
+	log.Printf("usher: %s leader-stream read error: %v", t.host, scanErr)
 }
 
 func isBlockedControlPath(p string) bool {
@@ -362,6 +425,7 @@ func startTracker(
 		name:           name,
 		bigbrainURL:    bigbrainURL,
 		maxBodyBytes:   maxBodyBytes,
+		streamIdle:     streamIdleTimeout,
 		client:         client,
 		streamClient:   &http.Client{Transport: newStreamTransport()},
 		proxyTransport: newProxyTransport(),
@@ -419,6 +483,27 @@ func newStreamTransport() *http.Transport {
 	return tr
 }
 
+func newMux(routes map[string]route) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host := strings.ToLower(stripPort(r.Host))
+		rt, ok := routes[host]
+		if !ok {
+			if r.URL.Path == healthzPath {
+				if r.Method != http.MethodGet && r.Method != http.MethodHead {
+					http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+					return
+				}
+				w.WriteHeader(http.StatusOK)
+				_, _ = io.WriteString(w, "ok")
+				return
+			}
+			http.Error(w, "unknown deployment host", http.StatusNotFound)
+			return
+		}
+		rt.tracker.serveHTTP(w, r, rt.site)
+	})
+}
+
 func main() {
 	cfgPath := flag.String("config", env("USHER_CONFIG", "/etc/usher/config.json"), "config file path")
 	addr := flag.String("addr", env("USHER_ADDR", ":8080"), "listen address")
@@ -443,6 +528,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("invalid USHER_CONN_IDLE_TIMEOUT: %v", err)
 	}
+	if connIdle == 0 {
+		log.Print("usher: connection idle watchdog disabled (USHER_CONN_IDLE_TIMEOUT=0)")
+	}
 	maxBody, err := parseMaxBodyBytes(os.Getenv("USHER_MAX_BODY_BYTES"))
 	if err != nil {
 		log.Fatalf("invalid USHER_MAX_BODY_BYTES: %v", err)
@@ -450,40 +538,30 @@ func main() {
 	if maxBody == 0 {
 		log.Print("usher: request-body cap disabled (USHER_MAX_BODY_BYTES=0)")
 	}
-	client := &http.Client{Timeout: httpClientTimeout}
 	var lc net.ListenConfig
 	rawLn, err := lc.Listen(context.Background(), "tcp", *addr)
 	if err != nil {
 		log.Fatalf("usher: listen %s: %v", *addr, err)
 	}
-	routes := make(map[string]route, len(cfg.Deployments)*routesPerDeployment)
+	os.Exit(run(cfg, *addr, *bigbrainURL, connIdle, maxBody, rawLn))
+}
+
+func run(cfg config, addr, bigbrainURL string, connIdle time.Duration, maxBody int64, rawLn net.Listener) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	client := &http.Client{Timeout: httpClientTimeout}
+	routes := make(map[string]route, len(cfg.Deployments)*routesPerDeployment)
 	for _, d := range cfg.Deployments {
-		t := startTracker(ctx, client, *bigbrainURL, maxBody, d)
+		t := startTracker(ctx, client, bigbrainURL, maxBody, d)
 		routes[strings.ToLower(d.Host)] = route{tracker: t}
 		if d.SiteHost != "" {
 			routes[strings.ToLower(d.SiteHost)] = route{tracker: t, site: true}
 		}
 	}
-	mux := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/usher/healthz" {
-			w.WriteHeader(http.StatusOK)
-			_, _ = io.WriteString(w, "ok")
-			return
-		}
-		host := strings.ToLower(stripPort(r.Host))
-		rt, ok := routes[host]
-		if !ok {
-			http.Error(w, "unknown deployment host", http.StatusNotFound)
-			return
-		}
-		rt.tracker.serveHTTP(w, r, rt.site)
-	})
-	log.Printf("usher listening on %s, %d deployment(s), bigbrain=%q", *addr, len(cfg.Deployments), *bigbrainURL)
+	log.Printf("usher listening on %s, %d deployment(s), bigbrain=%q", addr, len(cfg.Deployments), bigbrainURL)
 	srv := &http.Server{
-		Addr:              *addr,
-		Handler:           mux,
+		Addr:              addr,
+		Handler:           newMux(routes),
 		ReadHeaderTimeout: readHeaderTimeout,
 		IdleTimeout:       idleTimeout,
 		MaxHeaderBytes:    maxHeaderBytes,
@@ -494,11 +572,16 @@ func main() {
 		log.Printf("usher: closing connections with no read/write progress for %s", connIdle.String())
 		ln = &activityListener{Listener: ln, idle: connIdle, ctx: ctx}
 	}
+	serveErr := make(chan error, 1)
 	go func() {
-		if serr := srv.Serve(ln); serr != nil && !errors.Is(serr, http.ErrServerClosed) {
+		serr := srv.Serve(ln)
+		if serr != nil && !errors.Is(serr, http.ErrServerClosed) {
 			log.Printf("usher: serve: %v", serr)
+			serveErr <- serr
 			stop()
+			return
 		}
+		serveErr <- nil
 	}()
 	<-ctx.Done()
 	log.Print("usher: shutting down")
@@ -507,6 +590,10 @@ func main() {
 	if serr := srv.Shutdown(shutCtx); serr != nil {
 		log.Printf("usher: shutdown: %v", serr)
 	}
+	if <-serveErr != nil {
+		return 1
+	}
+	return 0
 }
 
 type activityListener struct {
@@ -598,13 +685,20 @@ func validateConfig(cfg config, bigbrainURL string) error {
 		if d.Host == "" {
 			return errors.New("deployment host must not be empty")
 		}
+		name := d.Name
+		if name == "" {
+			name = firstLabel(d.Host)
+		}
+		if name == "" || url.PathEscape(name) != name {
+			return fmt.Errorf("deployment %s: name %q must be a non-empty URL path segment", d.Host, name)
+		}
 		for _, host := range []string{d.Host, d.SiteHost} {
 			if host == "" {
 				continue
 			}
 			host = strings.ToLower(host)
 			if _, exists := hosts[host]; exists {
-				return errors.New("deployment hosts must be unique")
+				return fmt.Errorf("duplicate deployment host %q", host)
 			}
 			hosts[host] = struct{}{}
 		}
@@ -616,7 +710,14 @@ func parseConnIdle(v string) (time.Duration, error) {
 	if v == "" {
 		return defaultConnIdle, nil
 	}
-	return time.ParseDuration(v)
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0, fmt.Errorf("parse %q: %w", v, err)
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("must be >= 0, got %s", d)
+	}
+	return d, nil
 }
 
 func parseMaxBodyBytes(v string) (int64, error) {

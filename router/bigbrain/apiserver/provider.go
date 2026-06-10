@@ -41,7 +41,7 @@ func (p *FunrunProvider) GetMetricByName(
 	info provider.CustomMetricInfo,
 	_ labels.Selector,
 ) (*custom_metrics.MetricValue, error) {
-	if info.Metric != MetricName {
+	if info.Metric != MetricName || info.GroupResource.Resource != podsResource {
 		return nil, provider.NewMetricNotFoundError(info.GroupResource, info.Metric)
 	}
 	p.mu.RLock()
@@ -61,7 +61,7 @@ func (p *FunrunProvider) GetMetricBySelector(
 	info provider.CustomMetricInfo,
 	_ labels.Selector,
 ) (*custom_metrics.MetricValueList, error) {
-	if info.Metric != MetricName {
+	if info.Metric != MetricName || info.GroupResource.Resource != podsResource {
 		return nil, provider.NewMetricNotFoundError(info.GroupResource, info.Metric)
 	}
 	p.mu.RLock()

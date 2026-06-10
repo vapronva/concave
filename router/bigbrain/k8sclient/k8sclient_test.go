@@ -87,6 +87,25 @@ func TestDiscoverBackends_DefaultPrefix(t *testing.T) {
 	}
 }
 
+func TestDiscoverBackends_SkipsTerminalPods(t *testing.T) {
+	t.Parallel()
+	const prefix = "convex"
+	running := pod(prefix, "backend-0", "leader", "backend", "100", "10.0.0.1", true)
+	failed := pod(prefix, "backend-1", "follower", "backend", "", "10.0.0.2", false)
+	failed.Status.Phase = corev1.PodFailed
+	succeeded := pod(prefix, "backend-2", "follower", "backend", "", "10.0.0.3", false)
+	succeeded.Status.Phase = corev1.PodSucceeded
+	cs := fake.NewClientset(running, failed, succeeded)
+	c := k8sclient.NewFromInterface(cs, prefix)
+	out, err := c.DiscoverBackends(context.Background(), "acme", "acme")
+	if err != nil {
+		t.Fatalf("DiscoverBackends: %v", err)
+	}
+	if len(out) != 1 || out[0].Pod != "backend-0" {
+		t.Fatalf("terminal pods with a retained PodIP must be skipped, got %+v", out)
+	}
+}
+
 func TestDiscoverBackends_SkipsNonBackendComponentAndNoIP(t *testing.T) {
 	t.Parallel()
 	const prefix = "convex"
