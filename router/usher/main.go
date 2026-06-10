@@ -413,6 +413,7 @@ func startTracker(
 	client *http.Client,
 	bigbrainURL string,
 	maxBodyBytes int64,
+	streamIdle time.Duration,
 	d deploymentCfg,
 ) *tracker {
 	name := d.Name
@@ -425,7 +426,7 @@ func startTracker(
 		name:           name,
 		bigbrainURL:    bigbrainURL,
 		maxBodyBytes:   maxBodyBytes,
-		streamIdle:     streamIdleTimeout,
+		streamIdle:     streamIdle,
 		client:         client,
 		streamClient:   &http.Client{Transport: newStreamTransport()},
 		proxyTransport: newProxyTransport(),
@@ -531,6 +532,10 @@ func main() {
 	if connIdle == 0 {
 		log.Print("usher: connection idle watchdog disabled (USHER_CONN_IDLE_TIMEOUT=0)")
 	}
+	streamIdle, err := parseStreamIdle(os.Getenv("USHER_STREAM_IDLE_TIMEOUT"))
+	if err != nil {
+		log.Fatalf("invalid USHER_STREAM_IDLE_TIMEOUT: %v", err)
+	}
 	maxBody, err := parseMaxBodyBytes(os.Getenv("USHER_MAX_BODY_BYTES"))
 	if err != nil {
 		log.Fatalf("invalid USHER_MAX_BODY_BYTES: %v", err)
@@ -543,16 +548,22 @@ func main() {
 	if err != nil {
 		log.Fatalf("usher: listen %s: %v", *addr, err)
 	}
-	os.Exit(run(cfg, *addr, *bigbrainURL, connIdle, maxBody, rawLn))
+	os.Exit(run(cfg, *addr, *bigbrainURL, connIdle, streamIdle, maxBody, rawLn))
 }
 
-func run(cfg config, addr, bigbrainURL string, connIdle time.Duration, maxBody int64, rawLn net.Listener) int {
+func run(
+	cfg config,
+	addr, bigbrainURL string,
+	connIdle, streamIdle time.Duration,
+	maxBody int64,
+	rawLn net.Listener,
+) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	client := &http.Client{Timeout: httpClientTimeout}
 	routes := make(map[string]route, len(cfg.Deployments)*routesPerDeployment)
 	for _, d := range cfg.Deployments {
-		t := startTracker(ctx, client, bigbrainURL, maxBody, d)
+		t := startTracker(ctx, client, bigbrainURL, maxBody, streamIdle, d)
 		routes[strings.ToLower(d.Host)] = route{tracker: t}
 		if d.SiteHost != "" {
 			routes[strings.ToLower(d.SiteHost)] = route{tracker: t, site: true}
@@ -704,6 +715,20 @@ func validateConfig(cfg config, bigbrainURL string) error {
 		}
 	}
 	return nil
+}
+
+func parseStreamIdle(v string) (time.Duration, error) {
+	if v == "" {
+		return streamIdleTimeout, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0, fmt.Errorf("parse %q: %w", v, err)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("must be > 0, got %s", d)
+	}
+	return d, nil
 }
 
 func parseConnIdle(v string) (time.Duration, error) {

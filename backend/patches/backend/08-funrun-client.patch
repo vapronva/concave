@@ -68,7 +68,7 @@ index 48a574cf1..c7f888e86 100644
  /// convenience) from allowing browsers to make these requests.
  pub fn platform_api_cors() -> CorsLayer {
 diff --git a/crates/common/src/knobs.rs b/crates/common/src/knobs.rs
-index 6c3244ffb..056e2d2ea 100644
+index 6c3244ffb..6afcdd238 100644
 --- a/crates/common/src/knobs.rs
 +++ b/crates/common/src/knobs.rs
 @@ -417,6 +417,17 @@ pub static MAX_REPEATABLE_TIMESTAMP_IDLE_FREQUENCY: LazyLock<Duration> = LazyLoc
@@ -101,7 +101,7 @@ index 6c3244ffb..056e2d2ea 100644
  /// The size of the pending commits in the committer queue. This is a FIFO
  /// queue, so if the queue is too large, we run into a risk of all requests
  /// waiting too long and no requests going through during overload. The size of
-@@ -1067,28 +1083,35 @@ pub static FUNRUN_MODULE_QUEUE_SIZE: LazyLock<usize> =
+@@ -1067,28 +1083,46 @@ pub static FUNRUN_MODULE_QUEUE_SIZE: LazyLock<usize> =
  pub static FUNRUN_CODE_CACHE_SIZE: LazyLock<u64> =
      LazyLock::new(|| env_config("FUNRUN_CODE_CACHE_SIZE", 500_000_000));
  
@@ -151,6 +151,17 @@ index 6c3244ffb..056e2d2ea 100644
 +/// added/removed pods and rebalance connections across them.
 +pub static FUNRUN_LB_REFRESH_INTERVAL: LazyLock<Duration> =
 +    LazyLock::new(|| Duration::from_secs(env_config("FUNRUN_LB_REFRESH_INTERVAL_SECONDS", 10)));
++
++/// Per-attempt response deadline for funrun queries and mutations (the call
++/// plus response-stream consumption). Actions are deliberately unbounded.
++pub static FUNRUN_RESPONSE_TIMEOUT: LazyLock<Duration> =
++    LazyLock::new(|| Duration::from_secs(env_config("FUNRUN_RESPONSE_TIMEOUT_SECS", 600)));
++
++/// How long the funrun endpoint set may stay empty (DNS yields no pods) before
++/// requests fail fast with a retryable error instead of parking in the balance
++/// channel.
++pub static FUNRUN_EMPTY_ENDPOINTS_FAIL_FAST: LazyLock<Duration> =
++    LazyLock::new(|| Duration::from_secs(env_config("FUNRUN_EMPTY_ENDPOINTS_FAIL_FAST_SECS", 30)));
  
  /// Value between 1 and 100 representing the percent of a the shared scheduler's
  /// worker pool that a single client can use.
@@ -420,10 +431,10 @@ index 000000000..17e83f819
 +}
 diff --git a/crates/function_runner/src/remote.rs b/crates/function_runner/src/remote.rs
 new file mode 100644
-index 000000000..b1093d239
+index 000000000..e185560ba
 --- /dev/null
 +++ b/crates/function_runner/src/remote.rs
-@@ -0,0 +1,897 @@
+@@ -0,0 +1,895 @@
 +use std::{
 +    collections::{
 +        BTreeMap,
@@ -607,8 +618,6 @@ index 000000000..b1093d239
 +const FUNRUN_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 +const FUNRUN_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
 +const FUNRUN_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(5);
-+const FUNRUN_RESPONSE_TIMEOUT: Duration = Duration::from_secs(600);
-+const FUNRUN_EMPTY_ENDPOINTS_FAIL_FAST: Duration = Duration::from_secs(30);
 +
 +fn funrun_endpoint(uri: &str, tls_config: &Option<ClientTlsConfig>) -> anyhow::Result<Endpoint> {
 +    let mut endpoint = Endpoint::from_shared(uri.to_string())
@@ -791,7 +800,7 @@ index 000000000..b1093d239
 +        }
 +        let elapsed_nanos = self.endpoints_epoch.elapsed().as_nanos() as u64;
 +        if elapsed_nanos.saturating_sub(empty_since)
-+            < FUNRUN_EMPTY_ENDPOINTS_FAIL_FAST.as_nanos() as u64
++            < common::knobs::FUNRUN_EMPTY_ENDPOINTS_FAIL_FAST.as_nanos() as u64
 +        {
 +            return Ok(());
 +        }
@@ -942,7 +951,7 @@ index 000000000..b1093d239
 +                    let attempt_fut =
 +                        self.run_function_attempt(req, &log_line_sender, &mut parts_forwarded);
 +                    let outcome = if retryable {
-+                        timeout(FUNRUN_RESPONSE_TIMEOUT, attempt_fut).await
++                        timeout(*common::knobs::FUNRUN_RESPONSE_TIMEOUT, attempt_fut).await
 +                    } else {
 +                        Ok(attempt_fut.await)
 +                    };

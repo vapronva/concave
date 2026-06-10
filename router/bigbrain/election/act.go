@@ -3,10 +3,7 @@ package election
 import (
 	"context"
 	"net/http"
-	"time"
 )
-
-const actuationTimeout = 30 * time.Second
 
 func (c *Controller) act(
 	ctx context.Context,
@@ -110,7 +107,7 @@ func (c *Controller) actLeaderless(
 }
 
 func (c *Controller) promoteAndLog(base context.Context, name, kind string, target observation) {
-	actx, cancel := context.WithTimeout(base, actuationTimeout)
+	actx, cancel := context.WithTimeout(base, c.cfg.actuationTimeout)
 	defer cancel()
 	code, err := c.backend.Promote(actx, name, target.be.URL)
 	if err != nil {
@@ -143,7 +140,7 @@ func (c *Controller) runActions(ctx context.Context, name string, st *deployment
 	base := context.WithoutCancel(ctx)
 	c.actWG.Go(func() {
 		defer c.release(st)
-		actx, cancel := context.WithTimeout(base, actuationTimeout)
+		actx, cancel := context.WithTimeout(base, c.cfg.actuationTimeout)
 		defer cancel()
 		for _, a := range actions {
 			code, err := c.backend.Demote(actx, name, a.url)

@@ -32,7 +32,7 @@ const (
 	idleTimeout            = 60 * time.Second
 	maxHeaderBytes         = 64 * 1024
 	shutdownTimeout        = 10 * time.Second
-	actuationDrainTimeout  = 35 * time.Second
+	actuationDrainSlack    = 5 * time.Second
 
 	defaultMetricsAPIServerPort    = 6443
 	defaultMetricsAPIServerCertDir = "/var/run/bigbrain-apiserver"
@@ -83,7 +83,9 @@ func run() int {
 		log.Error("bigbrain: kubernetes client unavailable", "err", err)
 		return 1
 	}
-	ctrl := election.New(electionCfg(), k8s, backend.New(controlPlaneTokens), reg, log)
+	cfg := electionCfg()
+	actuation := resolvedActuation(cfg)
+	ctrl := election.New(cfg, k8s, backend.New(controlPlaneTokens), reg, log)
 	ins := insights.New(*insightsRingCap)
 	srv := server.New(reg, ins, usageTokens, log)
 	if len(usageTokens) == 0 {
@@ -113,7 +115,7 @@ func run() int {
 		}
 	}()
 	<-ctx.Done()
-	shutdown(httpSrv, srv, ctrlDone, log)
+	shutdown(httpSrv, srv, ctrlDone, actuation+actuationDrainSlack, log)
 	if listenFailed.Load() {
 		return 1
 	}
@@ -140,6 +142,9 @@ func electionFlags(fs *flag.FlagSet) func() election.Config {
 	graceDefault, graceSet := envDuration("BIGBRAIN_UNREACHABLE_LEADER_GRACE", election.DefaultUnreachableLeaderGrace)
 	unreachableGrace := fs.Duration("unreachable-leader-grace", graceDefault,
 		"how long an unreachable incumbent keeps its lease before being treated as gone")
+	actuationDefault, actuationSet := envDuration("BIGBRAIN_ACTUATION_TIMEOUT", election.DefaultActuationTimeout)
+	actuationTimeout := fs.Duration("actuation-timeout", actuationDefault,
+		"budget for one promote/demote actuation batch per deployment")
 	return func() election.Config {
 		passed := make(map[string]bool)
 		fs.Visit(func(f *flag.Flag) { passed[f.Name] = true })
@@ -151,8 +156,16 @@ func electionFlags(fs *flag.FlagSet) func() election.Config {
 			FailbackStability:      knob(fbStabilitySet, "failback-stability", passed, failbackStability),
 			FailbackWarmthLagNs:    knob(fbWarmthSet, "failback-warmth-lag", passed, failbackWarmthLag),
 			UnreachableLeaderGrace: knob(graceSet, "unreachable-leader-grace", passed, unreachableGrace),
+			ActuationTimeout:       knob(actuationSet, "actuation-timeout", passed, actuationTimeout),
 		}
 	}
+}
+
+func resolvedActuation(cfg election.Config) time.Duration {
+	if cfg.ActuationTimeout != nil && *cfg.ActuationTimeout > 0 {
+		return *cfg.ActuationTimeout
+	}
+	return election.DefaultActuationTimeout
 }
 
 func knob[T any](envSet bool, name string, passed map[string]bool, v *T) *T {
@@ -162,7 +175,13 @@ func knob[T any](envSet bool, name string, passed map[string]bool, v *T) *T {
 	return nil
 }
 
-func shutdown(httpSrv *http.Server, srv *server.Server, ctrlDone <-chan struct{}, log *slog.Logger) {
+func shutdown(
+	httpSrv *http.Server,
+	srv *server.Server,
+	ctrlDone <-chan struct{},
+	actuationDrain time.Duration,
+	log *slog.Logger,
+) {
 	log.Info("bigbrain: shutting down")
 	srv.Shutdown()
 	shutCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
@@ -170,7 +189,7 @@ func shutdown(httpSrv *http.Server, srv *server.Server, ctrlDone <-chan struct{}
 	if serr := httpSrv.Shutdown(shutCtx); serr != nil {
 		log.Error("bigbrain: http shutdown failed", "err", serr)
 	}
-	drainCtx, drainCancel := context.WithTimeout(context.Background(), actuationDrainTimeout)
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), actuationDrain)
 	defer drainCancel()
 	select {
 	case <-ctrlDone:

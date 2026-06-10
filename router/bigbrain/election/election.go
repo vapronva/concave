@@ -19,6 +19,7 @@ type Config struct {
 	FailbackWarmthLagNs    *uint64
 	UnreachableLeaderGrace *time.Duration
 	EmptyDiscoveryDebounce *int
+	ActuationTimeout       *time.Duration
 }
 
 type settings struct {
@@ -29,6 +30,7 @@ type settings struct {
 	failbackWarmthLagNs    uint64
 	unreachableLeaderGrace time.Duration
 	emptyDiscoveryDebounce int
+	actuationTimeout       time.Duration
 }
 
 const (
@@ -38,6 +40,7 @@ const (
 	DefaultFailbackWarmthLagNs    uint64 = 5_000_000_000
 	DefaultUnreachableLeaderGrace        = 60 * time.Second
 	DefaultEmptyDiscoveryDebounce        = 5
+	DefaultActuationTimeout              = 30 * time.Second
 	discoverTimeout                      = 5 * time.Second
 	pollTimeout                          = 2 * time.Second
 )
@@ -51,6 +54,7 @@ func (c Config) withDefaults() settings {
 		failbackWarmthLagNs:    DefaultFailbackWarmthLagNs,
 		unreachableLeaderGrace: DefaultUnreachableLeaderGrace,
 		emptyDiscoveryDebounce: DefaultEmptyDiscoveryDebounce,
+		actuationTimeout:       DefaultActuationTimeout,
 	}
 	if c.Interval != nil && *c.Interval > 0 {
 		s.interval = *c.Interval
@@ -72,6 +76,9 @@ func (c Config) withDefaults() settings {
 	}
 	if c.EmptyDiscoveryDebounce != nil && *c.EmptyDiscoveryDebounce >= 0 {
 		s.emptyDiscoveryDebounce = *c.EmptyDiscoveryDebounce
+	}
+	if c.ActuationTimeout != nil && *c.ActuationTimeout > 0 {
+		s.actuationTimeout = *c.ActuationTimeout
 	}
 	return s
 }
