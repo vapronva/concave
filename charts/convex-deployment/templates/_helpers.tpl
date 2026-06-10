@@ -72,10 +72,14 @@ app.kubernetes.io/component: {{ .component }}
 {{- end -}}
 
 {{- define "convex.imagePullSecrets" -}}
-{{- with .Values.image.pullSecrets }}
+{{- with .Values.image.pullSecrets -}}
 imagePullSecrets:
-{{- toYaml . | nindent 0 }}
-{{- end }}
+  {{- toYaml . | nindent 2 }}
+{{- end -}}
+{{- end -}}
+
+{{- define "convex.listenPort" -}}
+{{- splitList ":" . | last -}}
 {{- end -}}
 
 {{- define "convex.backendDiscoveryLabels" -}}
@@ -163,11 +167,77 @@ imagePullSecrets:
 {{- end -}}
 
 {{- define "convex.funrunAddr" -}}
-http://{{ include "convex.funrunName" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ trimPrefix ":" .Values.funrun.listen }}
+http://{{ include "convex.funrunName" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ include "convex.listenPort" .Values.funrun.listen }}
 {{- end -}}
 
 {{- define "convex.insightsTokenSecretName" -}}
 {{- default (include "convex.instanceSecretName" .) .Values.insights.tokenRef.name -}}
+{{- end -}}
+
+{{- define "convex.containerSecurityContext" -}}
+runAsNonRoot: true
+runAsUser: 1001
+allowPrivilegeEscalation: false
+capabilities:
+  drop: ["ALL"]
+seccompProfile:
+  type: RuntimeDefault
+{{- end -}}
+
+{{- define "convex.backendContainer" -}}
+{{- $ctx := .ctx -}}
+- name: backend
+  image: {{ include "convex.image" (dict "ctx" $ctx "spec" $ctx.Values.image) }}
+  imagePullPolicy: {{ $ctx.Values.image.pullPolicy }}
+  ports:
+    - { name: cloud, containerPort: 3210 }
+    {{- range .extraPorts }}
+    - { name: {{ .name }}, containerPort: {{ .containerPort }} }
+    {{- end }}
+  envFrom:
+    - configMapRef:
+        name: {{ include "convex.envConfigName" $ctx }}
+  env:
+    - name: CONVEX_BACKEND_ROLE
+      value: {{ .role }}
+    {{- include "convex.commonBackendEnv" $ctx | nindent 4 }}
+    {{- if $ctx.Values.funrun.enabled }}
+    - name: CONVEX_FUNRUN_ADDR
+      value: {{ include "convex.funrunAddr" $ctx | quote }}
+    - name: POD_IP
+      valueFrom:
+        fieldRef:
+          fieldPath: status.podIP
+    - name: CONVEX_FUNRUN_CALLBACK_URL
+      value: "http://$(POD_IP):3210"
+    {{- end }}
+    {{- if $ctx.Values.insights.enabled }}
+    {{- include "convex.usageSinkEnv" $ctx | nindent 4 }}
+    {{- end }}
+    {{- with $ctx.Values.backend.extraEnv }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  volumeMounts:
+    {{- include "convex.dataVolumeMount" $ctx | nindent 4 }}
+  startupProbe:
+    httpGet: { path: /readyz, port: cloud }
+    initialDelaySeconds: {{ .probeInitialDelaySeconds }}
+    periodSeconds: 5
+    failureThreshold: 32
+  readinessProbe:
+    httpGet: { path: /readyz, port: cloud }
+    periodSeconds: 5
+    failureThreshold: 3
+  livenessProbe:
+    tcpSocket: { port: cloud }
+    initialDelaySeconds: 120
+    periodSeconds: 20
+  {{- with (index $ctx.Values.resources .resourcesKey) }}
+  resources:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  securityContext:
+    {{- include "convex.containerSecurityContext" $ctx | nindent 4 }}
 {{- end -}}
 
 {{- define "convex.usageSinkEnv" -}}

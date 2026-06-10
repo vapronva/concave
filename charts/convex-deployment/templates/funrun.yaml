@@ -26,11 +26,14 @@ spec:
         {{- include "convex.componentLabels" (dict "ctx" . "component" "funrun") | nindent 8 }}
         {{- include "convex.componentDiscoveryLabel" (dict "ctx" . "component" "funrun") | nindent 8 }}
     spec:
+      {{- with include "convex.imagePullSecrets" . }}{{- . | nindent 6 }}{{- end }}
       {{- if .Values.funrun.podDeletionCost.enabled }}
       serviceAccountName: {{ include "convex.funrunName" . }}
       {{- end }}
       affinity:
+        {{- if or .Values.ha.preferredNode .Values.funrun.nodes }}
         nodeAffinity:
+          {{- with .Values.ha.preferredNode }}
           preferredDuringSchedulingIgnoredDuringExecution:
             - weight: 1
               preference:
@@ -38,7 +41,8 @@ spec:
                   - key: kubernetes.io/hostname
                     operator: In
                     values:
-                      - {{ .Values.ha.preferredNode }}
+                      - {{ . }}
+          {{- end }}
           {{- if .Values.funrun.nodes }}
           requiredDuringSchedulingIgnoredDuringExecution:
             nodeSelectorTerms:
@@ -50,6 +54,7 @@ spec:
                       - {{ . }}
                       {{- end }}
           {{- end }}
+        {{- end }}
         podAntiAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
             - weight: 1
@@ -57,20 +62,23 @@ spec:
                 topologyKey: kubernetes.io/hostname
                 labelSelector:
                   matchLabels:
-                    app.kubernetes.io/component: funrun
+                    {{- include "convex.componentSelectorLabels" (dict "ctx" . "component" "funrun") | nindent 20 }}
       containers:
         - name: funrun
           image: {{ include "convex.image" (dict "ctx" . "spec" .Values.image) }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["/convex/convex-funrun"]
           ports:
-            - { name: grpc, containerPort: {{ trimPrefix ":" .Values.funrun.listen }} }
-            - { name: health, containerPort: {{ trimPrefix ":" .Values.funrun.healthListen }} }
+            - { name: grpc, containerPort: {{ include "convex.listenPort" .Values.funrun.listen }} }
+            - { name: health, containerPort: {{ include "convex.listenPort" .Values.funrun.healthListen }} }
+          envFrom:
+            - configMapRef:
+                name: {{ include "convex.envConfigName" . }}
           env:
             - name: FUNRUN_LISTEN
-              value: "0.0.0.0:{{ trimPrefix ":" .Values.funrun.listen }}"
+              value: "0.0.0.0:{{ include "convex.listenPort" .Values.funrun.listen }}"
             - name: FUNRUN_HEALTH_LISTEN
-              value: "0.0.0.0:{{ trimPrefix ":" .Values.funrun.healthListen }}"
+              value: "0.0.0.0:{{ include "convex.listenPort" .Values.funrun.healthListen }}"
             - name: FUNRUN_MAX_SNAPSHOT_LAG_SECS
               value: {{ .Values.funrun.maxSnapshotLagSeconds | quote }}
             {{- with .Values.funrun.drainDelaySeconds }}
@@ -91,8 +99,6 @@ spec:
             - name: FUNRUN_DO_NOT_REQUIRE_SSL
               value: "true"
             {{- end }}
-            - name: STORAGE_DIR
-              value: {{ include "convex.storageDir" . | quote }}
             {{- if .Values.funrun.podDeletionCost.enabled }}
             - name: CONVEX_FUNRUN_POD_DELETION_COST
               value: "true"
@@ -110,11 +116,15 @@ spec:
             {{- end }}
           volumeMounts:
             {{- include "convex.dataVolumeMount" . | nindent 12 }}
-          readinessProbe:
+          startupProbe:
             httpGet: { path: /readyz, port: health }
             initialDelaySeconds: 5
             periodSeconds: 10
             failureThreshold: 20
+          readinessProbe:
+            httpGet: { path: /readyz, port: health }
+            periodSeconds: 10
+            failureThreshold: 3
           livenessProbe:
             httpGet: { path: /healthz, port: health }
             initialDelaySeconds: 120
@@ -129,13 +139,7 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
           securityContext:
-            runAsNonRoot: true
-            runAsUser: 1001
-            allowPrivilegeEscalation: false
-            capabilities:
-              drop: ["ALL"]
-            seccompProfile:
-              type: RuntimeDefault
+            {{- include "convex.containerSecurityContext" . | nindent 12 }}
       terminationGracePeriodSeconds: {{ .Values.funrun.terminationGracePeriodSeconds }}
       volumes:
         {{- include "convex.dataVolume" . | nindent 8 }}
@@ -154,9 +158,12 @@ spec:
   selector:
     {{- include "convex.componentSelectorLabels" (dict "ctx" . "component" "funrun") | nindent 4 }}
   ports:
-    - { name: grpc, port: {{ trimPrefix ":" .Values.funrun.listen }}, targetPort: grpc }
+    - { name: grpc, port: {{ include "convex.listenPort" .Values.funrun.listen }}, targetPort: grpc }
 
 {{- if .Values.funrun.hpa.enabled }}
+{{- if and .Values.funrun.hpa.cpuAverageUtilization (not (dig "funrun" "requests" "cpu" "" (.Values.resources | default dict))) }}
+{{- fail "funrun.hpa.cpuAverageUtilization is set but resources.funrun.requests.cpu is not: an HPA CPU Utilization metric without a CPU request can never be computed and permanently blocks scale-down; set resources.funrun.requests.cpu or unset funrun.hpa.cpuAverageUtilization" }}
+{{- end }}
 ---
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
@@ -175,7 +182,7 @@ spec:
   maxReplicas: {{ .Values.funrun.hpa.maxReplicas }}
   behavior:
     scaleUp:
-      stabilizationWindowSeconds: 30
+      stabilizationWindowSeconds: 0
       policies:
         - { type: Pods, value: 2, periodSeconds: 30 }
         - { type: Percent, value: 100, periodSeconds: 30 }
@@ -194,12 +201,14 @@ spec:
           type: AverageValue
           averageValue: {{ .Values.funrun.hpa.isolateUtilization.targetPercent | quote }}
     {{- end }}
+    {{- with .Values.funrun.hpa.cpuAverageUtilization }}
     - type: Resource
       resource:
         name: cpu
         target:
           type: Utilization
-          averageUtilization: {{ .Values.funrun.hpa.cpuAverageUtilization }}
+          averageUtilization: {{ . }}
+    {{- end }}
     {{- with .Values.funrun.hpa.memoryAverageUtilization }}
     - type: Resource
       resource:

@@ -1,5 +1,5 @@
 {{- if .Values.ha.pdb.enabled }}
-{{- if gt (int .Values.ha.standbyReplicas) 0 }}
+{{- if ge (int .Values.ha.standbyReplicas) 2 }}
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget

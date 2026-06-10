@@ -28,8 +28,8 @@ data:
       import reverse-proxy-xri-hd http://{{ $.Values.ingress.usherService.name }}.{{ $.Values.ingress.usherService.namespace }}.svc.cluster.local:{{ $.Values.ingress.usherService.port }}
     }
     {{- end }}
-    {{- with .Values.hosts.dashboard }}
-    {{ . }}:443 {
+    {{- if and .Values.dashboard.enabled .Values.hosts.dashboard }}
+    {{ .Values.hosts.dashboard }}:443 {
       import basic-compression-set
       import default-headers-set-custom
       header * {

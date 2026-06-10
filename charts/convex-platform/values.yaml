@@ -12,6 +12,7 @@ image:
 
 usher:
   enabled: true
+  extraEnv: []
   replicas: 2
   listen: :8080
   image:
@@ -26,16 +27,17 @@ usher:
 
 bigbrain:
   enabled: true
+  extraEnv: []
   replicas: 1
   listen: :8081
   image:
     repository: vapronva/concave/bigbrain
     tag: ""
-  insightsRingCap: 1000000
+  insightsRingCap: 10000000
   reconcileInterval: 2s
   promoteDebounce: 3
   failback:
-    enabled: false
+    enabled: true
     stability: 15s
     warmthLag: 5000000000
   preferredNode: ""

@@ -19,6 +19,7 @@ spec:
         {{- include "convex.componentLabels" (dict "ctx" . "component" "dashboard") | nindent 8 }}
         {{- include "convex.componentDiscoveryLabel" (dict "ctx" . "component" "dashboard") | nindent 8 }}
     spec:
+      {{- with include "convex.imagePullSecrets" . }}{{- . | nindent 6 }}{{- end }}
       {{- if .Values.dashboard.nodes }}
       affinity:
         nodeAffinity:
@@ -64,13 +65,7 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
           securityContext:
-            runAsNonRoot: true
-            runAsUser: 1001
-            allowPrivilegeEscalation: false
-            capabilities:
-              drop: ["ALL"]
-            seccompProfile:
-              type: RuntimeDefault
+            {{- include "convex.containerSecurityContext" . | nindent 12 }}
 
 ---
 apiVersion: v1

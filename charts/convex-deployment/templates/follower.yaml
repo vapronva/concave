@@ -21,6 +21,7 @@ spec:
         {{- include "convex.componentLabels" (dict "ctx" . "component" "follower") | nindent 8 }}
         {{- include "convex.backendDiscoveryLabels" (dict "ctx" . "role" "follower" "priority" .Values.ha.followerPriority) | nindent 8 }}
     spec:
+      {{- with include "convex.imagePullSecrets" . }}{{- . | nindent 6 }}{{- end }}
       {{- with .Values.ha.follower.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
@@ -47,55 +48,7 @@ spec:
           {{- end }}
       terminationGracePeriodSeconds: 20
       containers:
-        - name: backend
-          image: {{ include "convex.image" (dict "ctx" . "spec" .Values.image) }}
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
-          ports:
-            - { name: cloud, containerPort: 3210 }
-          envFrom:
-            - configMapRef:
-                name: {{ include "convex.envConfigName" . }}
-          env:
-            - name: CONVEX_BACKEND_ROLE
-              value: follower
-            {{- include "convex.commonBackendEnv" . | nindent 12 }}
-            {{- if .Values.funrun.enabled }}
-            - name: CONVEX_FUNRUN_ADDR
-              value: {{ include "convex.funrunAddr" . | quote }}
-            {{- end }}
-            {{- if .Values.insights.enabled }}
-            {{- include "convex.usageSinkEnv" . | nindent 12 }}
-            {{- end }}
-            {{- with .Values.backend.extraEnv }}
-            {{- toYaml . | nindent 12 }}
-            {{- end }}
-          volumeMounts:
-            {{- include "convex.dataVolumeMount" . | nindent 12 }}
-          readinessProbe:
-            httpGet: { path: /readyz, port: cloud }
-            initialDelaySeconds: 8
-            periodSeconds: 5
-            failureThreshold: 30
-          livenessProbe:
-            tcpSocket: { port: cloud }
-            initialDelaySeconds: 120
-            periodSeconds: 20
-          lifecycle:
-            preStop:
-              exec:
-                command: ["sh", "-c", "kill -INT 1; sleep 2"]
-          {{- with .Values.resources.follower }}
-          resources:
-            {{- toYaml . | nindent 12 }}
-          {{- end }}
-          securityContext:
-            runAsNonRoot: true
-            runAsUser: 1001
-            allowPrivilegeEscalation: false
-            capabilities:
-              drop: ["ALL"]
-            seccompProfile:
-              type: RuntimeDefault
+        {{- include "convex.backendContainer" (dict "ctx" . "role" "follower" "extraPorts" (list) "probeInitialDelaySeconds" 8 "resourcesKey" "follower") | nindent 8 }}
       volumes:
         {{- include "convex.dataVolume" . | nindent 8 }}
 {{- end }}

@@ -40,6 +40,7 @@ spec:
       annotations:
         checksum/config: {{ toJson (dict "deployments" $deployments) | sha256sum }}
     spec:
+      {{- with include "convex.imagePullSecrets" . }}{{- . | nindent 6 }}{{- end }}
       affinity:
         nodeAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
@@ -70,7 +71,7 @@ spec:
                 topologyKey: kubernetes.io/hostname
                 labelSelector:
                   matchLabels:
-                    app.kubernetes.io/component: usher
+                    {{- include "convex.componentSelectorLabels" (dict "ctx" . "component" "usher") | nindent 20 }}
       containers:
         - name: usher
           image: {{ include "convex-platform.image" (dict "ctx" . "spec" $u.image) }}
@@ -80,21 +81,31 @@ spec:
             - --addr={{ $u.listen }}
           {{- $bbUrl := $u.bigbrainUrl }}
           {{- if and (not $bbUrl) .Values.bigbrain.enabled }}
-          {{- $bbUrl = printf "http://%s.%s.svc.cluster.local:%s" (include "convex.bigbrainName" .) .Values.namespace.system (trimPrefix ":" .Values.bigbrain.listen) }}
+          {{- $bbUrl = printf "http://%s.%s.svc.cluster.local:%s" (include "convex.bigbrainName" .) .Values.namespace.system (include "convex.listenPort" .Values.bigbrain.listen) }}
           {{- end }}
-          {{- if $bbUrl }}
+          {{- if or $bbUrl $u.extraEnv }}
           env:
+            {{- if $bbUrl }}
             - name: USHER_BIGBRAIN_URL
               value: {{ $bbUrl | quote }}
+            {{- end }}
+            {{- with $u.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           {{- end }}
           ports:
-            - { name: http, containerPort: {{ trimPrefix ":" $u.listen }} }
+            - { name: http, containerPort: {{ include "convex.listenPort" $u.listen }} }
           volumeMounts:
             - { name: config, mountPath: /etc/usher }
           readinessProbe:
-            tcpSocket: { port: http }
+            httpGet: { path: /usher/healthz, port: http }
             initialDelaySeconds: 2
             periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /usher/healthz, port: http }
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            failureThreshold: 6
           {{- with $u.resources }}
           resources:
             {{- toYaml . | nindent 12 }}

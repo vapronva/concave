@@ -18,12 +18,12 @@ metadata:
   labels:
     {{- include "convex.componentLabels" (dict "ctx" . "component" "bigbrain") | nindent 4 }}
 
----
 {{- $namespaces := dict -}}
 {{- range $deployments -}}
 {{- $_ := set $namespaces (required "deployments[].namespace is required" .namespace) true -}}
 {{- end -}}
 {{- range $namespace, $_ := $namespaces }}
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 
@@ -57,8 +57,6 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "convex.bigbrainName" $ }}
     namespace: {{ $.Values.namespace.system }}
-
----
 {{- end }}
 
 {{- end }}
@@ -84,6 +82,7 @@ spec:
       labels:
         {{- include "convex.componentLabels" (dict "ctx" . "component" "bigbrain") | nindent 8 }}
     spec:
+      {{- with include "convex.imagePullSecrets" . }}{{- . | nindent 6 }}{{- end }}
       terminationGracePeriodSeconds: 40
       {{- if $b.rbac.create }}
       serviceAccountName: {{ include "convex.bigbrainName" . }}
@@ -161,13 +160,16 @@ spec:
             - name: BIGBRAIN_METRICS_APISERVER_PORT
               value: {{ $b.metricsApiserver.port | quote }}
             {{- end }}
+            {{- with $b.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           ports:
-            - { name: http, containerPort: {{ trimPrefix ":" $b.listen }} }
+            - { name: http, containerPort: {{ include "convex.listenPort" $b.listen }} }
             {{- if $b.metricsApiserver.enabled }}
             - { name: metrics-api, containerPort: {{ $b.metricsApiserver.port }} }
             {{- end }}
           readinessProbe:
-            httpGet: { path: /healthz, port: http }
+            httpGet: { path: /readyz, port: http }
             initialDelaySeconds: 2
             periodSeconds: 10
           livenessProbe:
@@ -211,7 +213,7 @@ spec:
   selector:
     {{- include "convex.componentSelectorLabels" (dict "ctx" . "component" "bigbrain") | nindent 4 }}
   ports:
-    - { name: http, port: {{ trimPrefix ":" $b.listen }}, targetPort: http }
+    - { name: http, port: {{ include "convex.listenPort" $b.listen }}, targetPort: http }
     {{- if $b.metricsApiserver.enabled }}
     - { name: https, port: {{ $b.metricsApiserver.port }}, targetPort: metrics-api }
     {{- end }}

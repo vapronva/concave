@@ -52,10 +52,14 @@ app.kubernetes.io/component: {{ .component }}
 {{- end -}}
 
 {{- define "convex.imagePullSecrets" -}}
-{{- with .Values.image.pullSecrets }}
+{{- with .Values.image.pullSecrets -}}
 imagePullSecrets:
-{{- toYaml . | nindent 0 }}
-{{- end }}
+  {{- toYaml . | nindent 2 }}
+{{- end -}}
+{{- end -}}
+
+{{- define "convex.listenPort" -}}
+{{- splitList ":" . | last -}}
 {{- end -}}
 
 {{- define "convex-platform.image" -}}
