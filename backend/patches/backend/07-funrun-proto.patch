@@ -1,9 +1,9 @@
 diff --git a/crates/pb/protos/funrun.proto b/crates/pb/protos/funrun.proto
 new file mode 100644
-index 000000000..1af6bd062
+index 000000000..bbb76e89f
 --- /dev/null
 +++ b/crates/pb/protos/funrun.proto
-@@ -0,0 +1,150 @@
+@@ -0,0 +1,152 @@
 +syntax = "proto3";
 +
 +package funrun;
@@ -43,6 +43,7 @@ index 000000000..1af6bd062
 +  optional string backend_callback_url = 11;
 +  optional string callback_token = 12;
 +  optional string auth_header = 13;
++  optional string callback_transport_url = 14;
 +}
 +
 +message EnvVar {
@@ -91,6 +92,7 @@ index 000000000..1af6bd062
 +  string routed_path = 12;
 +  common.HttpActionRequestHead http_request_head = 13;
 +  optional bytes http_request_body = 14;
++  optional string callback_transport_url = 15;
 +}
 +
 +message HttpActionResponsePart {

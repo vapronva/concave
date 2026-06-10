@@ -169,13 +169,14 @@ index fc4a16678..9acb169c8 100644
  
  // Within a single transaction that writes multiple documents, this is the order
 diff --git a/crates/database/src/database.rs b/crates/database/src/database.rs
-index 3ed756279..0b2a1b23e 100644
+index 3ed756279..1fa7041bd 100644
 --- a/crates/database/src/database.rs
 +++ b/crates/database/src/database.rs
-@@ -54,12 +54,14 @@ use common::{
+@@ -54,12 +54,15 @@ use common::{
      interval::Interval,
      knobs::{
          DEFAULT_DOCUMENTS_PAGE_SIZE,
++        DEMOTION_DRAIN_TIMEOUT,
 +        LEASE_WATCH_POLL_INTERVAL,
          LIST_SNAPSHOT_MAX_AGE_SECS,
          SNAPSHOT_LIST_TIME_LIMIT,
@@ -187,7 +188,7 @@ index 3ed756279..0b2a1b23e 100644
          ConflictStrategy,
          DocumentLogEntry,
          DocumentRevisionStream,
-@@ -182,6 +184,10 @@ use crate::{
+@@ -182,6 +185,10 @@ use crate::{
          bootstrap_system_tables,
          DEFAULT_BOOTSTRAP_TABLE_NUMBERS,
      },
@@ -198,7 +199,7 @@ index 3ed756279..0b2a1b23e 100644
      metrics::{
          self,
          load_indexes_into_memory_timer,
-@@ -189,6 +195,7 @@ use crate::{
+@@ -189,6 +196,7 @@ use crate::{
          verify_invariants_timer,
      },
      retention::{
@@ -206,7 +207,7 @@ index 3ed756279..0b2a1b23e 100644
          LeaderRetentionManager,
          LeaderRetentionWorkers,
      },
-@@ -284,18 +291,13 @@ const MAX_VECTOR_ATTEMPTS: u32 = 5;
+@@ -284,18 +292,13 @@ const MAX_VECTOR_ATTEMPTS: u32 = 5;
  /// See the diagram in `database/README.md` for more details.
  #[derive(Clone)]
  pub struct Database<RT: Runtime> {
@@ -226,7 +227,7 @@ index 3ed756279..0b2a1b23e 100644
      virtual_system_mapping: VirtualSystemMapping,
      pub bootstrap_metadata: BootstrapMetadata,
      invalidation_callback: InvalidationMetricCallback,
-@@ -306,6 +308,20 @@ pub struct Database<RT: Runtime> {
+@@ -306,6 +309,20 @@ pub struct Database<RT: Runtime> {
      component_paths_snapshot_cache: AsyncLru<RT, Timestamp, BTreeMap<ComponentId, ComponentPath>>,
      list_snapshot_table_iterator_cache:
          Arc<tokio::sync::Mutex<Option<ListSnapshotTableIteratorCacheEntry<RT>>>>,
@@ -247,7 +248,7 @@ index 3ed756279..0b2a1b23e 100644
  }
  
  struct ListSnapshotTableIteratorCacheEntry<RT: Runtime> {
-@@ -1046,18 +1062,20 @@ impl<RT: Runtime> Database<RT> {
+@@ -1046,18 +1063,20 @@ impl<RT: Runtime> Database<RT> {
              AsyncLru::new(runtime.clone(), 20, 2, 200, "component_paths_snapshot");
          let list_snapshot_table_iterator_cache = Arc::new(tokio::sync::Mutex::new(None));
          let database = Self {
@@ -274,7 +275,7 @@ index 3ed756279..0b2a1b23e 100644
              virtual_system_mapping,
              bootstrap_metadata,
              invalidation_callback,
-@@ -1065,11 +1083,374 @@ impl<RT: Runtime> Database<RT> {
+@@ -1065,11 +1084,398 @@ impl<RT: Runtime> Database<RT> {
              by_id_indexes_snapshot_cache,
              component_paths_snapshot_cache,
              list_snapshot_table_iterator_cache,
@@ -493,7 +494,18 @@ index 3ed756279..0b2a1b23e 100644
 +            )
 +        })?;
 +        tracing::info!("[demote] stopping committer + recovering Writer (SACRED: before release)");
-+        let snapshot_writer = committer.shutdown_and_recover_writer().await?;
++        let recover_budget = 2 * *DEMOTION_DRAIN_TIMEOUT;
++        let recover = committer.shutdown_and_recover_writer().fuse();
++        pin_mut!(recover);
++        let recover_timeout = self.runtime.wait(recover_budget).fuse();
++        pin_mut!(recover_timeout);
++        let snapshot_writer = futures::select_biased! {
++            writer = recover => writer?,
++            _ = recover_timeout => anyhow::bail!(
++                "committer writer-recovery did not finish within {recover_budget:?}; demote \
++                 aborted with the committer wedged"
++            ),
++        };
 +        let tailed_ts = self.snapshot_manager.lock().latest_ts();
 +        tracing::info!(
 +            "[demote] committer stopped; recovered Writer; snapshot.latest_ts {tailed_ts}"
@@ -576,7 +588,9 @@ index 3ed756279..0b2a1b23e 100644
 +        let handler = self.lease_lost_handler.clone();
 +        let worker = async move {
 +            const MAX_NON_TRANSIENT_PROBE_FAILURES: usize = 3;
++            const TRANSIENT_HEARTBEAT_EVERY: usize = 20;
 +            let mut non_transient_failures = 0;
++            let mut transient_failures: usize = 0;
 +            let mut first_probe = true;
 +            loop {
 +                if !first_probe {
@@ -586,10 +600,21 @@ index 3ed756279..0b2a1b23e 100644
 +                let held = match rw_persistence.lease_held().await {
 +                    Ok(held) => {
 +                        non_transient_failures = 0;
++                        transient_failures = 0;
 +                        held
 +                    },
 +                    Err(e) => {
-+                        if !common::errors::is_transient_db_error(&e) {
++                        if common::errors::is_transient_db_error(&e) {
++                            non_transient_failures = 0;
++                            transient_failures += 1;
++                            if transient_failures % TRANSIENT_HEARTBEAT_EVERY == 0 {
++                                tracing::warn!(
++                                    "[lease-watch] {transient_failures} consecutive transient \
++                                     probe errors; lease ownership unverified: {e:#}"
++                                );
++                            }
++                        } else {
++                            transient_failures = 0;
 +                            non_transient_failures += 1;
 +                            if non_transient_failures >= MAX_NON_TRANSIENT_PROBE_FAILURES {
 +                                tracing::error!(
@@ -649,7 +674,7 @@ index 3ed756279..0b2a1b23e 100644
      /// Sets the invalidation callback for tracking which mutations invalidate
      /// subscriptions. Must be called after `load` and before any subscriptions
      /// are invalidated.
-@@ -1087,45 +1468,71 @@ impl<RT: Runtime> Database<RT> {
+@@ -1087,45 +1493,71 @@ impl<RT: Runtime> Database<RT> {
          tracing::info!("Set search storage to {search_storage:?}");
      }
  
@@ -735,7 +760,7 @@ index 3ed756279..0b2a1b23e 100644
      }
  
      /// Load the set of documents and tombstones in the given table between
-@@ -1555,7 +1962,7 @@ impl<RT: Runtime> Database<RT> {
+@@ -1555,7 +1987,7 @@ impl<RT: Runtime> Database<RT> {
              Arc::new(snapshot.in_memory_indexes),
              snapshot.table_registry.table_mapping().clone(),
              Arc::new(persistence_snapshot),
@@ -744,7 +769,7 @@ index 3ed756279..0b2a1b23e 100644
              None,
          );
          let (results, cursor) = db_index_snapshot
-@@ -1810,11 +2217,11 @@ impl<RT: Runtime> Database<RT> {
+@@ -1810,11 +2242,11 @@ impl<RT: Runtime> Database<RT> {
                      RepeatablePersistence::new(
                          self.reader.clone(),
                          repeatable_ts,
@@ -758,7 +783,7 @@ index 3ed756279..0b2a1b23e 100644
                  index_cache,
              ),
              Arc::new(TextIndexManagerSnapshot::new(
-@@ -1878,7 +2285,7 @@ impl<RT: Runtime> Database<RT> {
+@@ -1878,7 +2310,7 @@ impl<RT: Runtime> Database<RT> {
              bootstrap_metadata: self.bootstrap_metadata.clone(),
              snapshot,
              persistence_snapshot: repeatable_persistence.read_snapshot(ts)?,
@@ -767,7 +792,7 @@ index 3ed756279..0b2a1b23e 100644
              persistence_reader: self.reader.clone(),
              retention_validator: self.retention_validator(),
          })
-@@ -1900,7 +2307,7 @@ impl<RT: Runtime> Database<RT> {
+@@ -1900,7 +2332,7 @@ impl<RT: Runtime> Database<RT> {
          task::consume_budget().await;
          let readonly = transaction.is_readonly();
          let result = self
@@ -776,7 +801,7 @@ index 3ed756279..0b2a1b23e 100644
              .commit(transaction, write_source.into())
              .await?;
          if !readonly {
-@@ -1914,7 +2321,7 @@ impl<RT: Runtime> Database<RT> {
+@@ -1914,7 +2346,7 @@ impl<RT: Runtime> Database<RT> {
          &self,
          tables: BTreeSet<TableName>,
      ) -> anyhow::Result<()> {
@@ -785,7 +810,7 @@ index 3ed756279..0b2a1b23e 100644
      }
  
      pub fn write_commits_since_load(&self) -> usize {
-@@ -1925,14 +2332,14 @@ impl<RT: Runtime> Database<RT> {
+@@ -1925,14 +2357,14 @@ impl<RT: Runtime> Database<RT> {
      /// N.B. Only use this function for user subscriptions. System subscriptions
      /// should use `subscribe_and_wait_for_invalidation`.
      pub async fn subscribe(&self, token: Token) -> anyhow::Result<Subscription> {
@@ -802,7 +827,7 @@ index 3ed756279..0b2a1b23e 100644
          let invalid_ts = subscription.wait_for_invalidation().await;
          let current_ts = self.now_ts_for_reads();
          metrics::log_subscription_invalidation_lag(invalid_ts, *current_ts);
-@@ -2401,11 +2808,19 @@ impl<RT: Runtime> Database<RT> {
+@@ -2401,11 +2833,19 @@ impl<RT: Runtime> Database<RT> {
          ts: Timestamp,
      ) -> anyhow::Result<Result<Token, Option<Timestamp>>> {
          let _timer = metrics::refresh_token_timer();

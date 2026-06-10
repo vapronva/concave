@@ -28,10 +28,10 @@ index 986cfe59a..e7da231d6 100644
  }
 diff --git a/crates/local_backend/src/leadership.rs b/crates/local_backend/src/leadership.rs
 new file mode 100644
-index 000000000..e4ee2ad54
+index 000000000..ddddaa8ff
 --- /dev/null
 +++ b/crates/local_backend/src/leadership.rs
-@@ -0,0 +1,792 @@
+@@ -0,0 +1,798 @@
 +use std::sync::{
 +    atomic::{
 +        AtomicU8,
@@ -403,6 +403,12 @@ index 000000000..e4ee2ad54
 +        },
 +        Err(e) => {
 +            tracing::error!("[concave] promotion failed after lease acquisition: {e:#}");
++            if let Err(release_err) = rw_persistence.release_lease().await {
++                tracing::warn!(
++                    "[concave] failed to release the lease after a failed promotion (the next \
++                     acquirer steals it anyway): {release_err:#}"
++                );
++            }
 +            st.leader_handle.preempt_signal.signal(anyhow::anyhow!(
 +                "in-process promotion failed after acquiring the lease: {e:#}"
 +            ));

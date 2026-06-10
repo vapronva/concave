@@ -57,10 +57,10 @@ index 000000000..8375eb65c
 +workspace = true
 diff --git a/crates/funrun_server/src/callbacks.rs b/crates/funrun_server/src/callbacks.rs
 new file mode 100644
-index 000000000..d41a71003
+index 000000000..eb8a943d7
 --- /dev/null
 +++ b/crates/funrun_server/src/callbacks.rs
-@@ -0,0 +1,537 @@
+@@ -0,0 +1,566 @@
 +use anyhow::Context;
 +use async_trait::async_trait;
 +use common::{
@@ -190,7 +190,7 @@ index 000000000..d41a71003
 +        let status = response.status();
 +        let text = response.text().await?;
 +        if !status.is_success() {
-+            anyhow::bail!("funrun callback {path} returned {status}: {text}");
++            return Err(callback_status_error(path, status, text));
 +        }
 +        let parsed: RunFunctionResponse = serde_json::from_str(&text)
 +            .with_context(|| format!("funrun callback {path} returned unparseable body: {text}"))?;
@@ -207,6 +207,33 @@ index 000000000..d41a71003
 +        };
 +        Ok(FunctionResult { result })
 +    }
++}
++
++fn callback_status_error(path: &str, status: reqwest::StatusCode, text: String) -> anyhow::Error {
++    let err = anyhow::anyhow!("funrun callback {path} returned {status}: {text}");
++    let metadata = http::StatusCode::from_u16(status.as_u16())
++        .ok()
++        .and_then(|code| {
++            errors::ErrorMetadata::from_http_status_code(
++                code,
++                "CallbackFailed",
++                format!("funrun callback {path} returned {status}"),
++            )
++        });
++    match metadata {
++        Some(metadata) => err.context(metadata),
++        None => err,
++    }
++}
++
++async fn checked(response: reqwest::Response) -> anyhow::Result<reqwest::Response> {
++    let status = response.status();
++    if status.is_success() {
++        return Ok(response);
++    }
++    let path = response.url().path().to_owned();
++    let text = response.text().await.unwrap_or_default();
++    Err(callback_status_error(&path, status, text))
 +}
 +
 +fn build_js_error(message: String, data: Option<JsonValue>) -> common::errors::JsError {
@@ -388,8 +415,8 @@ index 000000000..d41a71003
 +            .request("/api/actions/schedule_job")
 +            .json(&body)
 +            .send()
-+            .await?
-+            .error_for_status()?;
++            .await?;
++        let response = checked(response).await?;
 +        let parsed: ScheduleJobResponse = response.json().await?;
 +        parsed.job_id.parse().context("invalid scheduled job id")
 +    }
@@ -399,13 +426,14 @@ index 000000000..d41a71003
 +        _identity: Identity,
 +        virtual_id: DeveloperDocumentId,
 +    ) -> anyhow::Result<()> {
-+        self.request("/api/actions/cancel_job")
++        let response = self
++            .request("/api/actions/cancel_job")
 +            .json(&CancelJobBody {
 +                id: virtual_id.to_string(),
 +            })
 +            .send()
-+            .await?
-+            .error_for_status()?;
++            .await?;
++        checked(response).await?;
 +        Ok(())
 +    }
 +
@@ -422,8 +450,8 @@ index 000000000..d41a71003
 +            .request("/api/actions/create_function_handle")
 +            .json(&body)
 +            .send()
-+            .await?
-+            .error_for_status()?;
++            .await?;
++        let response = checked(response).await?;
 +        let parsed: CreateFunctionHandleResponse = response.json().await?;
 +        parsed.handle.parse().context("invalid function handle")
 +    }
@@ -440,8 +468,8 @@ index 000000000..d41a71003
 +                storage_id: storage_id.to_string(),
 +            })
 +            .send()
-+            .await?
-+            .error_for_status()?;
++            .await?;
++        let response = checked(response).await?;
 +        let parsed: StorageGetUrlResponse = response.json().await?;
 +        Ok(parsed.url)
 +    }
@@ -452,13 +480,14 @@ index 000000000..d41a71003
 +        _component: ComponentId,
 +        storage_id: FileStorageId,
 +    ) -> anyhow::Result<()> {
-+        self.request("/api/actions/storage_delete")
++        let response = self
++            .request("/api/actions/storage_delete")
 +            .json(&StorageIdBody {
 +                storage_id: storage_id.to_string(),
 +            })
 +            .send()
-+            .await?
-+            .error_for_status()?;
++            .await?;
++        checked(response).await?;
 +        Ok(())
 +    }
 +
@@ -474,8 +503,8 @@ index 000000000..d41a71003
 +                storage_id: storage_id.to_string(),
 +            })
 +            .send()
-+            .await?
-+            .error_for_status()?;
++            .await?;
++        let response = checked(response).await?;
 +        let parsed: Option<StorageGetFileEntryResponse> = response.json().await?;
 +        match parsed {
 +            None => Ok(None),
@@ -504,8 +533,8 @@ index 000000000..d41a71003
 +                entry_proto: entry_proto.encode_to_vec(),
 +            })
 +            .send()
-+            .await?
-+            .error_for_status()?;
++            .await?;
++        let response = checked(response).await?;
 +        let parsed: StorageStoreFileEntryResponse = response.json().await?;
 +        let component_path: ComponentPath = parsed.component_path.parse()?;
 +        let document_id: DeveloperDocumentId = parsed.document_id.parse()?;
@@ -523,7 +552,7 @@ index 000000000..d41a71003
 +        if let Some(action_name) = &self.action_name {
 +            req = req.header(CONVEX_ACTION_FUNCTION_NAME_HEADER, action_name);
 +        }
-+        let response = req.send().await?.error_for_status()?;
++        let response = checked(req.send().await?).await?;
 +        let parsed: VectorSearchResponse = response.json().await?;
 +        let results = parsed
 +            .results
@@ -549,8 +578,8 @@ index 000000000..d41a71003
 +                handle: String::from(handle),
 +            })
 +            .send()
-+            .await?
-+            .error_for_status()?;
++            .await?;
++        let response = checked(response).await?;
 +        let parsed: SerializedComponentFunctionPath = response.json().await?;
 +        CanonicalizedComponentFunctionPath::try_from(parsed)
 +    }
@@ -888,10 +917,10 @@ index 000000000..7713e0faa
 +}
 diff --git a/crates/funrun_server/src/main.rs b/crates/funrun_server/src/main.rs
 new file mode 100644
-index 000000000..c73fc346c
+index 000000000..e064277fd
 --- /dev/null
 +++ b/crates/funrun_server/src/main.rs
-@@ -0,0 +1,271 @@
+@@ -0,0 +1,275 @@
 +use std::sync::{
 +    atomic::{
 +        AtomicBool,
@@ -960,9 +989,11 @@ index 000000000..c73fc346c
 +    spawn_pod_deletion_cost_updater(registry.clone());
 +    let service = FunrunService::new(runtime.clone(), registry.clone())?;
 +    let server = pb::funrun::funrun_server::FunrunServer::new(service)
-+        .max_decoding_message_size(MAX_GRPC_MESSAGE_BYTES)
-+        .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES);
-+    let mut builder = tonic::transport::Server::builder();
++        .max_decoding_message_size(*MAX_GRPC_MESSAGE_BYTES)
++        .max_encoding_message_size(*MAX_GRPC_MESSAGE_BYTES);
++    let mut builder = tonic::transport::Server::builder()
++        .http2_keepalive_interval(Some(std::time::Duration::from_secs(30)))
++        .http2_keepalive_timeout(Some(std::time::Duration::from_secs(10)));
 +    if let Some(tls) = &config.tls {
 +        let identity = tonic::transport::Identity::from_pem(&tls.cert_pem, &tls.key_pem);
 +        let tls_config = tonic::transport::ServerTlsConfig::new()
@@ -1019,14 +1050,20 @@ index 000000000..c73fc346c
 +    shutting_down: Arc<AtomicBool>,
 +}
 +
-+async fn liveness() -> &'static str {
-+    "ok"
++async fn liveness(State(state): State<HealthState>) -> impl IntoResponse {
++    if !state.registry.pool_healthy() {
++        return (
++            StatusCode::SERVICE_UNAVAILABLE,
++            "isolate scheduler has exited; pod must restart",
++        );
++    }
++    (StatusCode::OK, "ok")
 +}
 +
 +async fn readiness(State(state): State<HealthState>) -> impl IntoResponse {
 +    let report = state.registry.health_report(state.max_snapshot_lag).await;
 +    let draining = state.shutting_down.load(Ordering::Acquire);
-+    let status = if draining || !report.healthy {
++    let status = if draining || !report.healthy || !state.registry.pool_healthy() {
 +        StatusCode::SERVICE_UNAVAILABLE
 +    } else {
 +        StatusCode::OK
@@ -1091,11 +1128,7 @@ index 000000000..c73fc346c
 +        loop {
 +            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
 +            let (busy, total) = registry.isolate_workers();
-+            let cost = if total == 0 {
-+                0
-+            } else {
-+                (100i64 * busy as i64) / total as i64
-+            };
++            let cost = busy as i64;
 +            if last == Some(cost) {
 +                continue;
 +            }
@@ -1165,10 +1198,10 @@ index 000000000..c73fc346c
 +}
 diff --git a/crates/funrun_server/src/service.rs b/crates/funrun_server/src/service.rs
 new file mode 100644
-index 000000000..fbc80637c
+index 000000000..786dc4d2b
 --- /dev/null
 +++ b/crates/funrun_server/src/service.rs
-@@ -0,0 +1,653 @@
+@@ -0,0 +1,663 @@
 +use std::{
 +    collections::BTreeMap,
 +    pin::Pin,
@@ -1287,6 +1320,8 @@ index 000000000..fbc80637c
 +        ));
 +        let callback_client = reqwest::Client::builder()
 +            .redirect(reqwest::redirect::Policy::none())
++            .connect_timeout(std::time::Duration::from_secs(5))
++            .tcp_keepalive(std::time::Duration::from_secs(30))
 +            .build()
 +            .context("failed to build funrun action callback HTTP client")?;
 +        Ok(Self {
@@ -1339,6 +1374,7 @@ index 000000000..fbc80637c
 +        in_memory_index_last_modified: Vec<pb::funrun::IndexLastModified>,
 +        context: Option<pb::common::ExecutionContext>,
 +        backend_callback_url: Option<String>,
++        callback_transport_url: Option<String>,
 +        callback_token: Option<String>,
 +        auth_header: Option<String>,
 +        action_name: Option<String>,
@@ -1376,9 +1412,12 @@ index 000000000..fbc80637c
 +        let snapshot = instance.snapshot_inputs(ts).await?;
 +        let backend_url =
 +            ConvexOrigin::from(backend_callback_url.context("missing backend_callback_url")?);
++        let transport_url = callback_transport_url
++            .map(ConvexOrigin::from)
++            .unwrap_or_else(|| backend_url.clone());
 +        let action_callbacks = Arc::new(HttpActionCallbacks::new(
 +            callback_client,
-+            backend_url.clone(),
++            transport_url,
 +            callback_token.context("missing callback_token")?,
 +            auth_header,
 +            context.clone(),
@@ -1424,6 +1463,7 @@ index 000000000..fbc80637c
 +            backend_callback_url,
 +            callback_token,
 +            auth_header,
++            callback_transport_url,
 +        } = req;
 +        let udf_type =
 +            UdfType::from(pb::common::UdfType::try_from(udf_type).context("invalid udf_type")?);
@@ -1460,6 +1500,7 @@ index 000000000..fbc80637c
 +            in_memory_index_last_modified,
 +            context,
 +            backend_callback_url,
++            callback_transport_url,
 +            callback_token,
 +            auth_header,
 +            action_name,
@@ -1523,6 +1564,7 @@ index 000000000..fbc80637c
 +            backend_callback_url,
 +            callback_token,
 +            auth_header,
++            callback_transport_url,
 +            http_module_path,
 +            routed_path,
 +            http_request_head,
@@ -1561,6 +1603,7 @@ index 000000000..fbc80637c
 +            in_memory_index_last_modified,
 +            context,
 +            backend_callback_url,
++            callback_transport_url,
 +            callback_token,
 +            auth_header,
 +            action_name,
@@ -1824,10 +1867,10 @@ index 000000000..fbc80637c
 +}
 diff --git a/crates/funrun_server/src/snapshot.rs b/crates/funrun_server/src/snapshot.rs
 new file mode 100644
-index 000000000..0da3afa15
+index 000000000..7d0095981
 --- /dev/null
 +++ b/crates/funrun_server/src/snapshot.rs
-@@ -0,0 +1,659 @@
+@@ -0,0 +1,639 @@
 +use std::{
 +    collections::HashMap,
 +    sync::{
@@ -1890,7 +1933,6 @@ index 000000000..0da3afa15
 +use storage::Storage;
 +use sync_types::Timestamp;
 +use tokio::sync::OnceCell;
-+use usage_tracking::FunctionUsageTracker;
 +
 +use crate::config::{
 +    FunrunConfig,
@@ -1933,6 +1975,7 @@ index 000000000..0da3afa15
 +    require_ssl: bool,
 +    instances: HashMap<String, Arc<FunrunInstanceConfig>>,
 +    shared_isolate: SharedIsolateResources<RT>,
++    searcher: Arc<dyn search::Searcher>,
 +    states: Arc<Mutex<HashMap<String, RegistryEntry<RT>>>>,
 +}
 +
@@ -1956,6 +1999,7 @@ index 000000000..0da3afa15
 +            cap,
 +            instances.len(),
 +        );
++        let searcher: Arc<dyn search::Searcher> = Arc::new(InProcessSearcher::new(rt.clone())?);
 +        let idle_ttl = Duration::from_secs(15 * 60);
 +        let states = Arc::new(Mutex::new(HashMap::new()));
 +        Self::spawn_eviction_worker(rt.clone(), states.clone(), idle_ttl);
@@ -1966,6 +2010,7 @@ index 000000000..0da3afa15
 +            require_ssl: config.require_ssl,
 +            instances,
 +            shared_isolate,
++            searcher,
 +            states,
 +        })
 +    }
@@ -1975,6 +2020,10 @@ index 000000000..0da3afa15
 +            self.shared_isolate.active_isolate_workers(),
 +            self.shared_isolate.max_isolate_workers(),
 +        )
++    }
++
++    pub fn pool_healthy(&self) -> bool {
++        self.shared_isolate.pool_healthy()
 +    }
 +
 +    pub fn instance_config(
@@ -1991,8 +2040,9 @@ index 000000000..0da3afa15
 +        let config = lookup_instance_config(&self.instances, instance_name)?;
 +        let (rt, db, require_ssl) = (self.rt.clone(), self.db, self.require_ssl);
 +        let shared_isolate = self.shared_isolate.clone();
++        let searcher = self.searcher.clone();
 +        let state = get_or_init_entry(&self.states, instance_name, || async move {
-+            InstanceState::load(rt, &config, db, require_ssl, shared_isolate)
++            InstanceState::load(rt, &config, db, require_ssl, shared_isolate, searcher)
 +                .await
 +                .map(Arc::new)
 +        })
@@ -2185,6 +2235,7 @@ index 000000000..0da3afa15
 +        db: clusters::DbDriverTag,
 +        require_ssl: bool,
 +        shared_isolate: SharedIsolateResources<RT>,
++        searcher: Arc<dyn search::Searcher>,
 +    ) -> anyhow::Result<Self> {
 +        let reader = db_connection::connect_persistence_reader(
 +            db,
@@ -2200,9 +2251,15 @@ index 000000000..0da3afa15
 +        let key_broker =
 +            keybroker::KeyBroker::new(&config.instance_name, config.instance_secret.clone())?
 +                .function_runner_keybroker();
-+        let searcher: Arc<dyn search::Searcher> = Arc::new(InProcessSearcher::new(rt.clone())?);
-+        let storage_type =
-+            Self::read_storage_type(&rt, &reader, &retention_validator, &searcher).await?;
++        let database = Database::load_follower(
++            reader.clone(),
++            rt.clone(),
++            searcher.clone(),
++            virtual_system_mapping().clone(),
++            IndexCache::new(*common::knobs::FUNRUN_INDEX_CACHE_SIZE).new_handle(),
++        )
++        .await?;
++        let storage_type = Self::read_storage_type(&database).await?;
 +        let files_storage =
 +            create_storage(rt.clone(), &storage_type, storage::StorageUseCase::Files).await?;
 +        let modules_storage =
@@ -2221,14 +2278,6 @@ index 000000000..0da3afa15
 +            },
 +            shared_isolate,
 +        );
-+        let database = Database::load_follower(
-+            reader.clone(),
-+            rt.clone(),
-+            searcher.clone(),
-+            virtual_system_mapping().clone(),
-+            IndexCache::new(*common::knobs::FUNRUN_INDEX_CACHE_SIZE).new_handle(),
-+        )
-+        .await?;
 +        database.set_search_storage(search_storage.clone());
 +        tracing::info!(
 +            "[convex-funrun] loaded instance {} ({:?} storage); warm follower snapshot at {}",
@@ -2254,34 +2303,8 @@ index 000000000..0da3afa15
 +        })
 +    }
 +
-+    async fn read_storage_type(
-+        rt: &RT,
-+        reader: &Arc<dyn PersistenceReader>,
-+        retention_validator: &Arc<dyn RetentionValidator>,
-+        searcher: &Arc<dyn search::Searcher>,
-+    ) -> anyhow::Result<StorageType> {
-+        let ts = new_static_repeatable_recent(reader.as_ref()).await?;
-+        let snapshot = DatabaseSnapshot::load(
-+            rt.clone(),
-+            reader.clone(),
-+            ts,
-+            retention_validator.clone(),
-+            virtual_system_mapping().clone(),
-+        )
-+        .await?;
-+        let text_index_snapshot: Arc<dyn TransactionTextSnapshot> =
-+            Arc::new(TextIndexManagerSnapshot::new(
-+                snapshot.snapshot.index_registry.clone(),
-+                snapshot.snapshot.text_indexes.clone(),
-+                searcher.clone(),
-+                Arc::new(OnceLock::new()),
-+            ));
-+        let mut tx = snapshot.begin_tx(
-+            keybroker::Identity::system(),
-+            text_index_snapshot,
-+            FunctionUsageTracker::new(),
-+            virtual_system_mapping().clone(),
-+        )?;
++    async fn read_storage_type(database: &Database<RT>) -> anyhow::Result<StorageType> {
++        let mut tx = database.begin(keybroker::Identity::system()).await?;
 +        DatabaseGlobalsModel::new(&mut tx)
 +            .database_globals()
 +            .await?

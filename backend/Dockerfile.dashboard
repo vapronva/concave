@@ -13,7 +13,7 @@ RUN sed --in-place 's!http://deb.debian.org/debian-security!http://mirror.select
 
 WORKDIR /src
 
-ARG CONVEX_REF=4c5603afdd74bea3b8dbfe368ab50172a000835c
+ARG CONVEX_REF=3af062a9df490842c4d76f19b9db105aa5c395b9
 
 RUN git init --quiet . && \
       git remote add origin https://github.com/get-convex/convex-backend.git && \

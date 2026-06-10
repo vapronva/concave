@@ -1,8 +1,8 @@
 diff --git a/crates/common/src/persistence.rs b/crates/common/src/persistence.rs
-index 9da2989bb..783c4eec6 100644
+index 9da2989bb..9af453d36 100644
 --- a/crates/common/src/persistence.rs
 +++ b/crates/common/src/persistence.rs
-@@ -292,6 +292,22 @@ pub trait Persistence: Sync + Send + 'static {
+@@ -292,6 +292,26 @@ pub trait Persistence: Sync + Send + 'static {
      async fn finish_loading(&self) -> anyhow::Result<()> {
          Ok(())
      }
@@ -16,6 +16,10 @@ index 9da2989bb..783c4eec6 100644
 +    }
 +
 +    async fn lease_held(&self) -> anyhow::Result<bool> {
++        anyhow::ensure!(
++            !self.supports_lease(),
++            "lease-capable persistence must implement lease_held"
++        );
 +        Ok(true)
 +    }
 +
@@ -25,7 +29,7 @@ index 9da2989bb..783c4eec6 100644
  }
  
  #[derive(Debug, Clone, Copy)]
-@@ -579,7 +595,6 @@ pub trait PersistenceReader: Send + Sync + 'static {
+@@ -579,7 +599,6 @@ pub trait PersistenceReader: Send + Sync + 'static {
      async fn table_size_stats(&self) -> anyhow::Result<Vec<PersistenceTableSize>> {
          Ok(vec![])
      }
@@ -33,7 +37,7 @@ index 9da2989bb..783c4eec6 100644
  }
  
  /// Timestamp that is repeatable because the caller is holding the lease and
-@@ -593,7 +608,17 @@ pub async fn new_idle_repeatable_ts<RT: Runtime>(
+@@ -593,7 +612,17 @@ pub async fn new_idle_repeatable_ts<RT: Runtime>(
  ) -> anyhow::Result<RepeatableTimestamp> {
      let reader = persistence.reader();
      let max_ts = reader.max_ts().await?.unwrap_or(Timestamp::MIN);
@@ -53,7 +57,7 @@ index 9da2989bb..783c4eec6 100644
      persistence
          .write_persistence_global(PersistenceGlobalKey::MaxRepeatableTimestamp, now.into())
 diff --git a/crates/postgres/src/lib.rs b/crates/postgres/src/lib.rs
-index cce12606d..941d5fde1 100644
+index cce12606d..3da9a120c 100644
 --- a/crates/postgres/src/lib.rs
 +++ b/crates/postgres/src/lib.rs
 @@ -481,6 +481,22 @@ impl Persistence for PostgresPersistence {
@@ -79,7 +83,53 @@ index cce12606d..941d5fde1 100644
      #[fastrace::trace]
      async fn write<'a>(
          &self,
-@@ -1758,8 +1774,9 @@ struct Lease {
+@@ -746,6 +762,10 @@ impl Persistence for PostgresPersistence {
+         &self,
+         mut documents: BoxStream<'_, Vec<DocumentLogEntry>>,
+     ) -> anyhow::Result<()> {
++        anyhow::ensure!(
++            self.lease.lease_held().await?,
++            "import_documents_batch requires the lease (COPY bypasses the commit fence)"
++        );
+         let conn = self
+             .lease
+             .pool
+@@ -807,7 +827,10 @@ impl Persistence for PostgresPersistence {
+             writer.finish().await?;
+             break;
+         }
+-
++        anyhow::ensure!(
++            self.lease.lease_held().await?,
++            "lease lost during import_documents_batch; imported rows are not fenced"
++        );
+         Ok(())
+     }
+ 
+@@ -815,6 +838,10 @@ impl Persistence for PostgresPersistence {
+         &self,
+         mut indexes: BoxStream<'_, Vec<PersistenceIndexEntry>>,
+     ) -> anyhow::Result<()> {
++        anyhow::ensure!(
++            self.lease.lease_held().await?,
++            "import_indexes_batch requires the lease (COPY bypasses the commit fence)"
++        );
+         let conn = self
+             .lease
+             .pool
+@@ -873,7 +900,10 @@ impl Persistence for PostgresPersistence {
+             writer.finish().await?;
+             break;
+         }
+-
++        anyhow::ensure!(
++            self.lease.lease_held().await?,
++            "lease lost during import_indexes_batch; imported rows are not fenced"
++        );
+         Ok(())
+     }
+ 
+@@ -1758,8 +1788,9 @@ struct Lease {
  }
  
  impl Lease {
@@ -91,7 +141,7 @@ index cce12606d..941d5fde1 100644
      async fn acquire(
          pool: Arc<ConvexPgPool>,
          schema: &SchemaName,
-@@ -1777,27 +1794,27 @@ impl Lease {
+@@ -1777,27 +1808,27 @@ impl Lease {
              .as_nanos() as i64;
  
          tracing::info!("attempting to acquire lease");
@@ -133,7 +183,7 @@ index cce12606d..941d5fde1 100644
              schema: schema.clone(),
              instance_name,
              multitenant,
-@@ -1805,6 +1822,61 @@ impl Lease {
+@@ -1805,6 +1836,61 @@ impl Lease {
          })
      }
  

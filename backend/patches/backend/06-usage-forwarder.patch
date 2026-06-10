@@ -40,10 +40,10 @@ index d8ef7d6f1..a65ed43af 100644
 +}
 diff --git a/crates/local_backend/src/usage_forwarder.rs b/crates/local_backend/src/usage_forwarder.rs
 new file mode 100644
-index 000000000..e465d82d3
+index 000000000..373d81ada
 --- /dev/null
 +++ b/crates/local_backend/src/usage_forwarder.rs
-@@ -0,0 +1,303 @@
+@@ -0,0 +1,311 @@
 +use async_trait::async_trait;
 +use axum::{
 +    extract::RawQuery,
@@ -212,6 +212,14 @@ index 000000000..e465d82d3
 +        if let Some(mut handle) = self.worker.lock().await.take() {
 +            if timeout(Duration::from_secs(5), &mut handle).await.is_err() {
 +                handle.abort();
++                let queued = USAGE_FORWARDER_CHANNEL_CAPACITY.saturating_sub(self.tx.capacity());
++                if queued > 0 {
++                    log_counter(&USAGE_FORWARDER_DROPPED_BATCHES_TOTAL, queued as u64);
++                }
++                tracing::error!(
++                    "usage forwarder shutdown timed out; {queued} queued batches abandoned \
++                     (billing under-count)"
++                );
 +            }
 +        }
 +        Ok(())

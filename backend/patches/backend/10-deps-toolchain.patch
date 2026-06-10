@@ -6,7 +6,7 @@ index db49bb14d..b832e4001 100644
 -22.22.2
 +24.16.0
 diff --git a/Cargo.lock b/Cargo.lock
-index 9dc6ec314..06e941959 100644
+index bc1053fcd..11b5c81a3 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
 @@ -356,7 +356,7 @@ dependencies = [
