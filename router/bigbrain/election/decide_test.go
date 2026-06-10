@@ -14,9 +14,9 @@ const (
 	testWarmthLag       = uint64(5)
 )
 
-func obs(pod string, ready, isLeader bool, latestTS uint64, lease int64) observation {
+func obs(pod string, isLeader bool, latestTS uint64, lease int64) observation {
 	o := observation{
-		be:     k8sclient.Backend{Pod: pod, URL: "http://" + pod + ":3210", Ready: ready},
+		be:     k8sclient.Backend{Pod: pod, URL: "http://" + pod + ":3210"},
 		status: backend.Leadership{IsLeader: isLeader, LatestTS: latestTS},
 		reach:  true,
 	}
@@ -43,8 +43,8 @@ func sticky(incumbent string) decideParams {
 func TestDecide_SteadyState_SingleLeaderAdopted(t *testing.T) {
 	t.Parallel()
 	in := []observation{
-		obs("backend-0", true, true, 100, 100),
-		obs("backend-1", true, false, 98, -1),
+		obs("backend-0", true, 100, 100),
+		obs("backend-1", false, 98, -1),
 	}
 	d := decide(in, sticky("backend-0"))
 	if d.leaderPod != "backend-0" {
@@ -64,8 +64,8 @@ func TestDecide_SteadyState_SingleLeaderAdopted(t *testing.T) {
 func TestDecide_AdoptSoleLeader_NoIncumbentMatch(t *testing.T) {
 	t.Parallel()
 	in := []observation{
-		obs("backend-0", true, true, 200, 200),
-		obs("backend-1", true, false, 199, -1),
+		obs("backend-0", true, 200, 200),
+		obs("backend-1", false, 199, -1),
 	}
 	d := decide(in, sticky("backend-1"))
 	if d.leaderPod != "backend-0" {
@@ -76,8 +76,8 @@ func TestDecide_AdoptSoleLeader_NoIncumbentMatch(t *testing.T) {
 func TestDecide_StickyIncumbent_DemotesOther(t *testing.T) {
 	t.Parallel()
 	in := []observation{
-		obs("backend-0", true, true, 100, 100),
-		obs("backend-1", true, true, 100, 100),
+		obs("backend-0", true, 100, 100),
+		obs("backend-1", true, 100, 100),
 	}
 	d := decide(in, sticky("backend-1"))
 	if d.leaderPod != "backend-1" {
@@ -91,8 +91,8 @@ func TestDecide_StickyIncumbent_DemotesOther(t *testing.T) {
 func TestDecide_SplitBrain_FreshestLeaseWins(t *testing.T) {
 	t.Parallel()
 	in := []observation{
-		obs("backend-0", true, true, 100, 50),
-		obs("backend-1", true, true, 100, 150),
+		obs("backend-0", true, 100, 50),
+		obs("backend-1", true, 100, 150),
 	}
 	d := decide(in, sticky("backend-0"))
 	if d.leaderPod != "backend-1" {
@@ -106,9 +106,9 @@ func TestDecide_SplitBrain_FreshestLeaseWins(t *testing.T) {
 func TestDecide_Leaderless_PromotesWarmest(t *testing.T) {
 	t.Parallel()
 	in := []observation{
-		obs("backend-0", true, false, 90, -1),
-		obs("backend-1", true, false, 120, -1),
-		obs("backend-2", false, false, 130, -1),
+		obs("backend-0", false, 90, -1),
+		obs("backend-1", false, 120, -1),
+		unreachable("backend-2"),
 	}
 	d := decide(in, sticky("backend-0"))
 	if d.liveLeaderCount != 0 {
@@ -118,28 +118,72 @@ func TestDecide_Leaderless_PromotesWarmest(t *testing.T) {
 		t.Fatalf("want a promote target")
 	}
 	if d.promoteTarget.be.Pod != "backend-1" {
-		t.Fatalf("want warmest READY standby backend-1, got %q", d.promoteTarget.be.Pod)
+		t.Fatalf("want warmest reachable standby backend-1, got %q", d.promoteTarget.be.Pod)
 	}
 }
 
-func TestDecide_Leaderless_NoReadyStandby(t *testing.T) {
+func TestDecide_Leaderless_NoReachableStandby(t *testing.T) {
 	t.Parallel()
 	in := []observation{
 		unreachable("backend-0"),
-		obs("backend-1", false, false, 120, -1),
+		unreachable("backend-1"),
 	}
 	d := decide(in, sticky("backend-1"))
 	if d.promoteTarget != nil {
-		t.Fatalf("want no promote target when no ready standby")
+		t.Fatalf("want no promote target when no standby is reachable")
+	}
+}
+
+func TestDecide_Leaderless_NotReadyButReachableFollowerIsPromotable(t *testing.T) {
+	t.Parallel()
+	in := []observation{
+		unreachable("backend-0"),
+		obs("backend-1", false, 120, -1),
+	}
+	d := decide(in, sticky("backend-0"))
+	if d.promoteTarget == nil || d.promoteTarget.be.Pod != "backend-1" {
+		t.Fatalf("a reachable warm follower must be promotable regardless of k8s PodReady, got %+v", d.promoteTarget)
+	}
+}
+
+func TestDecide_TransitioningPodExcludedFromPromotion(t *testing.T) {
+	t.Parallel()
+	in := []observation{
+		withPriority(obs("draining", false, 200, 500), 100),
+		withPriority(obs("standby", false, 120, -1), 0),
+	}
+	d := decide(in, sticky("draining"))
+	if !d.hasTransitioning {
+		t.Fatalf("a reachable lease-holding non-leader must mark the decision transitioning")
+	}
+	if d.promoteTarget != nil {
+		t.Fatalf(
+			"no promotion may happen while a pod is mid-drain (steal-mid-drain), got %+v",
+			d.promoteTarget,
+		)
+	}
+}
+
+func TestDecide_TransitioningOnlyPodIsNotPromoted(t *testing.T) {
+	t.Parallel()
+	in := []observation{
+		obs("draining", false, 200, 500),
+	}
+	d := decide(in, sticky("draining"))
+	if d.promoteTarget != nil {
+		t.Fatalf("a sole mid-demotion pod must not be promoted, got %q", d.promoteTarget.be.Pod)
+	}
+	if !d.hasTransitioning {
+		t.Fatalf("decision must carry the transitioning marker so the streak freezes")
 	}
 }
 
 func TestDecide_SplitBrain_ThreeClaimants(t *testing.T) {
 	t.Parallel()
 	in := []observation{
-		obs("backend-0", true, true, 100, 10),
-		obs("backend-1", true, true, 100, 99),
-		obs("backend-2", true, true, 100, 30),
+		obs("backend-0", true, 100, 10),
+		obs("backend-1", true, 100, 99),
+		obs("backend-2", true, 100, 30),
 	}
 	d := decide(in, sticky("backend-2"))
 	if d.leaderPod != "backend-1" {
@@ -153,8 +197,8 @@ func TestDecide_SplitBrain_ThreeClaimants(t *testing.T) {
 func TestPickLeader_TieBreakByPodName(t *testing.T) {
 	t.Parallel()
 	claims := []observation{
-		obs("backend-9", true, true, 100, 100),
-		obs("backend-3", true, true, 100, 100),
+		obs("backend-9", true, 100, 100),
+		obs("backend-3", true, 100, 100),
 	}
 	got, ok := pickLeader(claims, "")
 	if !ok || got.be.Pod != "backend-3" {
@@ -165,8 +209,8 @@ func TestPickLeader_TieBreakByPodName(t *testing.T) {
 func TestPickLeader_IncumbentZombieDefersToFresh(t *testing.T) {
 	t.Parallel()
 	claims := []observation{
-		obs("backend-0", true, true, 100, 5),
-		obs("backend-1", true, true, 100, 80),
+		obs("backend-0", true, 100, 5),
+		obs("backend-1", true, 100, 80),
 	}
 	got, _ := pickLeader(claims, "backend-0")
 	if got.be.Pod != "backend-1" {
@@ -177,8 +221,8 @@ func TestPickLeader_IncumbentZombieDefersToFresh(t *testing.T) {
 func TestClaimedLeaders_IgnoresUnreachableAndFollowers(t *testing.T) {
 	t.Parallel()
 	in := []observation{
-		obs("backend-0", true, true, 100, 100),
-		obs("backend-1", true, false, 99, -1),
+		obs("backend-0", true, 100, 100),
+		obs("backend-1", false, 99, -1),
 		unreachable("backend-2"),
 	}
 	if got := claimedLeaders(in); len(got) != 1 || got[0].be.Pod != "backend-0" {
@@ -199,8 +243,8 @@ func fb(now time.Time, prior failbackState) failbackParams {
 func TestDecide_Leaderless_PromotesHighestPriorityNotWarmest(t *testing.T) {
 	t.Parallel()
 	in := []observation{
-		withPriority(obs("primary", true, false, 90, -1), 100),
-		withPriority(obs("standby", true, false, 120, -1), 0),
+		withPriority(obs("primary", false, 90, -1), 100),
+		withPriority(obs("standby", false, 120, -1), 0),
 	}
 	d := decide(in, sticky(""))
 	if d.promoteTarget == nil {
@@ -214,8 +258,8 @@ func TestDecide_Leaderless_PromotesHighestPriorityNotWarmest(t *testing.T) {
 func TestDecide_Leaderless_EqualPriorityBreaksByWarmth(t *testing.T) {
 	t.Parallel()
 	in := []observation{
-		withPriority(obs("a", true, false, 90, -1), 50),
-		withPriority(obs("b", true, false, 120, -1), 50),
+		withPriority(obs("a", false, 90, -1), 50),
+		withPriority(obs("b", false, 120, -1), 50),
 	}
 	d := decide(in, sticky(""))
 	if d.promoteTarget == nil || d.promoteTarget.be.Pod != "b" {
@@ -227,8 +271,8 @@ func TestDecide_Failback_FiresWhenPrimaryWarmStablePastWindow(t *testing.T) {
 	t.Parallel()
 	now := time.Unix(1000, 0)
 	in := []observation{
-		withPriority(obs("standby", true, true, 100, 100), 0),
-		withPriority(obs("primary", true, false, 99, -1), 100),
+		withPriority(obs("standby", true, 100, 100), 0),
+		withPriority(obs("primary", false, 99, -1), 100),
 	}
 	prior := failbackState{candidate: "primary", eligibleSince: now.Add(-30 * time.Second)}
 	d := decide(in, decideParams{incumbent: "standby", failback: fb(now, prior)})
@@ -247,8 +291,8 @@ func TestDecide_Failback_NoFailbackWithinWindow(t *testing.T) {
 	t.Parallel()
 	now := time.Unix(1000, 0)
 	in := []observation{
-		withPriority(obs("standby", true, true, 100, 100), 0),
-		withPriority(obs("primary", true, false, 99, -1), 100),
+		withPriority(obs("standby", true, 100, 100), 0),
+		withPriority(obs("primary", false, 99, -1), 100),
 	}
 	d := decide(in, decideParams{incumbent: "standby", failback: fb(now, failbackState{})})
 	if d.failbackTarget != nil {
@@ -263,8 +307,8 @@ func TestDecide_Failback_NoFailbackWhenNotWarm(t *testing.T) {
 	t.Parallel()
 	now := time.Unix(1000, 0)
 	in := []observation{
-		withPriority(obs("standby", true, true, 100, 100), 0),
-		withPriority(obs("primary", true, false, 80, -1), 100),
+		withPriority(obs("standby", true, 100, 100), 0),
+		withPriority(obs("primary", false, 80, -1), 100),
 	}
 	prior := failbackState{candidate: "primary", eligibleSince: now.Add(-1 * time.Hour)}
 	d := decide(in, decideParams{incumbent: "standby", failback: fb(now, prior)})
@@ -276,28 +320,49 @@ func TestDecide_Failback_NoFailbackWhenNotWarm(t *testing.T) {
 	}
 }
 
-func TestDecide_Failback_NoFailbackWhenNotReady(t *testing.T) {
+func TestDecide_Failback_DemotedNotReadyExLeaderIsEligible(t *testing.T) {
 	t.Parallel()
 	now := time.Unix(1000, 0)
 	in := []observation{
-		withPriority(obs("standby", true, true, 100, 100), 0),
-		withPriority(obs("primary", false, false, 99, -1), 100),
+		withPriority(obs("standby", true, 100, 100), 0),
+		withPriority(obs("primary", false, 99, -1), 100),
+	}
+	prior := failbackState{candidate: "primary", eligibleSince: now.Add(-1 * time.Hour)}
+	d := decide(in, decideParams{incumbent: "standby", failback: fb(now, prior)})
+	if d.failbackTarget == nil || d.failbackTarget.be.Pod != "primary" {
+		t.Fatalf("a demoted-in-place primary (NotReady by role-conformance readyz) must be failback-eligible, got %+v",
+			d.failbackTarget)
+	}
+}
+
+func TestDecide_Failback_TransitioningPrimaryNotEligible(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(1000, 0)
+	in := []observation{
+		withPriority(obs("standby", true, 100, 100), 0),
+		withPriority(obs("primary", false, 99, 90), 100),
 	}
 	prior := failbackState{candidate: "primary", eligibleSince: now.Add(-1 * time.Hour)}
 	d := decide(in, decideParams{incumbent: "standby", failback: fb(now, prior)})
 	if d.failbackTarget != nil {
-		t.Fatalf("must NOT fail back to a not-Ready primary, got %q", d.failbackTarget.be.Pod)
+		t.Fatalf(
+			"a mid-drain primary (lease still held) must NOT be failback-eligible, got %q",
+			d.failbackTarget.be.Pod,
+		)
 	}
 	if d.failbackState != (failbackState{}) {
-		t.Fatalf("a not-Ready candidate must RESET the clock (anti-thrash), got %+v", d.failbackState)
+		t.Fatalf("a transitioning candidate must RESET the clock, got %+v", d.failbackState)
+	}
+	if !d.hasTransitioning {
+		t.Fatalf("decision must carry the transitioning marker")
 	}
 }
 
 func TestDecide_Failback_FlappingResetsEligibleSince(t *testing.T) {
 	t.Parallel()
-	leader := withPriority(obs("standby", true, true, 100, 100), 0)
+	leader := withPriority(obs("standby", true, 100, 100), 0)
 	t0 := time.Unix(1000, 0)
-	in0 := []observation{leader, withPriority(obs("primary", true, false, 99, -1), 100)}
+	in0 := []observation{leader, withPriority(obs("primary", false, 99, -1), 100)}
 	d0 := decide(in0, decideParams{incumbent: "standby", failback: fb(t0, failbackState{})})
 	if d0.failbackTarget != nil {
 		t.Fatalf("t0: should not fire immediately")
@@ -306,13 +371,13 @@ func TestDecide_Failback_FlappingResetsEligibleSince(t *testing.T) {
 		t.Fatalf("t0: clock should start at t0, got %v", d0.failbackState.eligibleSince)
 	}
 	t1 := t0.Add(10 * time.Second)
-	in1 := []observation{leader, withPriority(obs("primary", false, false, 99, -1), 100)}
+	in1 := []observation{leader, unreachable("primary")}
 	d1 := decide(in1, decideParams{incumbent: "standby", failback: fb(t1, d0.failbackState)})
 	if d1.failbackState != (failbackState{}) {
 		t.Fatalf("t1: flap must reset the clock, got %+v", d1.failbackState)
 	}
 	t2 := t1.Add(1 * time.Second)
-	in2 := []observation{leader, withPriority(obs("primary", true, false, 99, -1), 100)}
+	in2 := []observation{leader, withPriority(obs("primary", false, 99, -1), 100)}
 	d2 := decide(in2, decideParams{incumbent: "standby", failback: fb(t2, d1.failbackState)})
 	if d2.failbackTarget != nil {
 		t.Fatalf("t2: a freshly-recovered primary must NOT fail back immediately after a flap")
@@ -326,8 +391,8 @@ func TestDecide_Failback_DisabledIsPureSticky(t *testing.T) {
 	t.Parallel()
 	now := time.Unix(1000, 0)
 	in := []observation{
-		withPriority(obs("standby", true, true, 100, 100), 0),
-		withPriority(obs("primary", true, false, 100, -1), 100),
+		withPriority(obs("standby", true, 100, 100), 0),
+		withPriority(obs("primary", false, 100, -1), 100),
 	}
 	prior := failbackState{candidate: "primary", eligibleSince: now.Add(-1 * time.Hour)}
 	d := decide(
@@ -349,8 +414,8 @@ func TestDecide_Failback_EqualPriorityNoFailback(t *testing.T) {
 	t.Parallel()
 	now := time.Unix(1000, 0)
 	in := []observation{
-		withPriority(obs("backend-0", true, true, 100, 100), 100),
-		withPriority(obs("backend-1", true, false, 100, -1), 100),
+		withPriority(obs("backend-0", true, 100, 100), 100),
+		withPriority(obs("backend-1", false, 100, -1), 100),
 	}
 	prior := failbackState{candidate: "backend-1", eligibleSince: now.Add(-1 * time.Hour)}
 	d := decide(in, decideParams{incumbent: "backend-0", failback: fb(now, prior)})
@@ -366,9 +431,9 @@ func TestDecide_Failback_SplitBrainResolvesFirst(t *testing.T) {
 	t.Parallel()
 	now := time.Unix(1000, 0)
 	in := []observation{
-		withPriority(obs("backend-0", true, true, 100, 150), 0),
-		withPriority(obs("backend-1", true, true, 100, 50), 0),
-		withPriority(obs("primary", true, false, 100, -1), 100),
+		withPriority(obs("backend-0", true, 100, 150), 0),
+		withPriority(obs("backend-1", true, 100, 50), 0),
+		withPriority(obs("primary", false, 100, -1), 100),
 	}
 	prior := failbackState{candidate: "primary", eligibleSince: now.Add(-1 * time.Hour)}
 	d := decide(in, decideParams{incumbent: "backend-0", failback: fb(now, prior)})

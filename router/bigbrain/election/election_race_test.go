@@ -99,9 +99,9 @@ func TestController_SnapshotCommitConcurrent(t *testing.T) {
 	c := New(Config{}, nil, nil, registry.New(), quietLogger())
 	st := c.deploymentState("d")
 	in := []observation{
-		obs("backend-0", true, false, 90, -1),
-		obs("backend-1", true, false, 120, -1),
-		obs("backend-2", true, false, 110, -1),
+		obs("backend-0", false, 90, -1),
+		obs("backend-1", false, 120, -1),
+		obs("backend-2", false, 110, -1),
 	}
 	var wg sync.WaitGroup
 	const iterations = 2000

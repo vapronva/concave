@@ -190,7 +190,7 @@ func (c *Controller) commitState(st *deploymentState, dec decision, emptyList bo
 	defer c.mu.Unlock()
 	st.failback = dec.failbackState
 	if dec.liveLeaderCount == 0 {
-		if !emptyList {
+		if !emptyList && !dec.hasTransitioning {
 			st.leaderlessStreak++
 		}
 	} else {

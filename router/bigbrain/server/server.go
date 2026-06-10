@@ -48,6 +48,14 @@ func (s *Server) Handler() http.Handler {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
+	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
+		if !s.reg.AllPublished() {
+			writeErr(w, http.StatusServiceUnavailable, "leadership not yet reconciled")
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
 	mux.HandleFunc("GET /registry/deployments/{name}/leader", s.handleGetLeader)
 	mux.HandleFunc("GET /registry/deployments/{name}/leader-stream", s.handleLeaderStream)
 	mux.HandleFunc("POST /internal/usage", s.handleUsageIngest)
@@ -75,6 +83,10 @@ func (s *Server) handleUsageIngest(w http.ResponseWriter, r *http.Request) {
 	dec := json.NewDecoder(r.Body)
 	dec.UseNumber()
 	if err := dec.Decode(&body); err != nil {
+		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
+			writeErr(w, http.StatusRequestEntityTooLarge, "usage body too large")
+			return
+		}
 		writeErr(w, http.StatusBadRequest, "invalid usage body")
 		return
 	}
@@ -82,12 +94,12 @@ func (s *Server) handleUsageIngest(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "missing deployment")
 		return
 	}
-	if _, ok := s.reg.Namespace(body.Deployment); !ok {
-		writeErr(w, http.StatusNotFound, "unknown deployment "+body.Deployment)
-		return
-	}
 	if !s.bearerOK(r, body.Deployment) {
 		writeErr(w, http.StatusUnauthorized, "invalid usage token")
+		return
+	}
+	if _, ok := s.reg.Namespace(body.Deployment); !ok {
+		writeErr(w, http.StatusNotFound, "unknown deployment "+body.Deployment)
 		return
 	}
 	if s.ins == nil {
@@ -105,12 +117,12 @@ func (s *Server) handleUsageQuery(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "deploymentName is required")
 		return
 	}
-	if _, ok := s.reg.Namespace(dep); !ok {
-		writeErr(w, http.StatusNotFound, "unknown deployment "+dep)
-		return
-	}
 	if !s.bearerOK(r, dep) {
 		writeErr(w, http.StatusUnauthorized, "invalid usage token")
+		return
+	}
+	if _, ok := s.reg.Namespace(dep); !ok {
+		writeErr(w, http.StatusNotFound, "unknown deployment "+dep)
 		return
 	}
 	if s.ins == nil {
@@ -157,12 +169,16 @@ func (s *Server) handleGetLeader(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "unknown deployment "+name)
 		return
 	}
-	pod, url, ok := s.reg.Leader(name)
-	if !ok {
-		writeErr(w, http.StatusServiceUnavailable, "no leader for "+name)
+	if !s.reg.Published(name) {
+		writeErr(w, http.StatusTooEarly, "leadership not yet reconciled for "+name)
 		return
 	}
-	writeJSON(w, http.StatusOK, registry.LeaderEvent{Name: name, LeaderPod: pod, LeaderURL: url})
+	pod, url, seq, ok := s.reg.Leader(name)
+	if !ok {
+		writeJSON(w, http.StatusServiceUnavailable, registry.LeaderEvent{Name: name, Seq: seq})
+		return
+	}
+	writeJSON(w, http.StatusOK, registry.LeaderEvent{Name: name, LeaderPod: pod, LeaderURL: url, Seq: seq})
 }
 
 func (s *Server) handleLeaderStream(w http.ResponseWriter, r *http.Request) {
@@ -186,9 +202,11 @@ func (s *Server) handleLeaderStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(http.StatusOK)
-	pod, url, _ := s.reg.Leader(name)
-	if !emitSSE(w, rc, flusher, registry.LeaderEvent{Name: name, LeaderPod: pod, LeaderURL: url}) {
-		return
+	if s.reg.Published(name) {
+		pod, url, seq, _ := s.reg.Leader(name)
+		if !emitSSE(w, rc, flusher, registry.LeaderEvent{Name: name, LeaderPod: pod, LeaderURL: url, Seq: seq}) {
+			return
+		}
 	}
 	keepalive := time.NewTicker(keepaliveInterval)
 	defer keepalive.Stop()

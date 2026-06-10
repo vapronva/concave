@@ -27,7 +27,6 @@ type Backend struct {
 	Pod      string
 	URL      string
 	Priority int
-	Ready    bool
 }
 
 type labelKeys struct {
@@ -102,7 +101,7 @@ func (c *Client) DiscoverBackends(ctx context.Context, ns, name string) ([]Backe
 		if p.DeletionTimestamp != nil || p.Status.PodIP == "" {
 			continue
 		}
-		if comp, ok := p.Labels[c.labels.component]; ok && comp != "backend" {
+		if p.Labels[c.labels.component] != "backend" {
 			continue
 		}
 		role := p.Labels[c.labels.role]
@@ -110,7 +109,6 @@ func (c *Client) DiscoverBackends(ctx context.Context, ns, name string) ([]Backe
 			Pod:      p.Name,
 			URL:      fmt.Sprintf("http://%s", net.JoinHostPort(p.Status.PodIP, strconv.Itoa(BackendPort))),
 			Priority: priorityFor(p.Labels[c.labels.leaderPriority], role),
-			Ready:    podReady(p),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Pod < out[j].Pod })
@@ -129,7 +127,7 @@ func priorityFor(label, role string) int {
 	return priorityFollowerDefault
 }
 
-func podReady(p *corev1.Pod) bool {
+func PodReady(p *corev1.Pod) bool {
 	if p.Status.Phase != corev1.PodRunning {
 		return false
 	}

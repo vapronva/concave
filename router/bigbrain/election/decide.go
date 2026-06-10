@@ -1,6 +1,9 @@
 package election
 
-import "time"
+import (
+	"slices"
+	"time"
+)
 
 type action struct {
 	pod string
@@ -12,6 +15,7 @@ type decision struct {
 	leaderURL            string
 	liveLeaderCount      int
 	incumbentUnreachable bool
+	hasTransitioning     bool
 	promoteTarget        *observation
 	demotes              []action
 	failbackTarget       *observation
@@ -31,6 +35,14 @@ func claimedLeaders(obs []observation) []observation {
 		}
 	}
 	return out
+}
+
+func isTransitioning(o observation) bool {
+	return o.reach && !o.status.IsLeader && o.status.LeaseTS != nil
+}
+
+func anyTransitioning(obs []observation) bool {
+	return slices.ContainsFunc(obs, isTransitioning)
 }
 
 func incumbentDiscoveredUnreachable(obs []observation, incumbent string) bool {
@@ -93,7 +105,7 @@ func bestCandidate(obs []observation) (observation, bool) {
 	var best observation
 	var found bool
 	for _, o := range obs {
-		if !o.reach || !o.be.Ready || o.status.IsLeader {
+		if !o.reach || o.status.IsLeader || isTransitioning(o) {
 			continue
 		}
 		if !found || morePreferredCandidate(o, best) {
@@ -129,9 +141,12 @@ type decideParams struct {
 
 func decide(obs []observation, p decideParams) decision {
 	claims := claimedLeaders(obs)
-	d := decision{liveLeaderCount: len(claims)}
+	d := decision{liveLeaderCount: len(claims), hasTransitioning: anyTransitioning(obs)}
 	if len(claims) == 0 {
 		d.incumbentUnreachable = incumbentDiscoveredUnreachable(obs, p.incumbent)
+		if d.hasTransitioning {
+			return d
+		}
 		if cand, ok := bestCandidate(obs); ok {
 			d.promoteTarget = &cand
 		}
@@ -186,7 +201,7 @@ func bestFailbackCandidate(
 	var best observation
 	var found bool
 	for _, o := range obs {
-		if !o.reach || !o.be.Ready || o.status.IsLeader {
+		if !o.reach || o.status.IsLeader || isTransitioning(o) {
 			continue
 		}
 		if o.be.Pod == leader.be.Pod {

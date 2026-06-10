@@ -11,7 +11,7 @@ import (
 
 func leaderOf(t *testing.T, reg *registry.Registry, name string) (string, bool) {
 	t.Helper()
-	pod, _, ok := reg.Leader(name)
+	pod, _, _, ok := reg.Leader(name)
 	return pod, ok
 }
 
@@ -85,6 +85,21 @@ func TestActLeaderless_EmptyListDoesNotAdvanceStreak(t *testing.T) {
 		if got, _ := c.commitState(st, emptyDecision, true, time.Now()); got != 0 {
 			t.Fatalf("empty backend list must not advance the leaderless streak, got %d", got)
 		}
+	}
+}
+
+func TestCommitState_TransitioningDoesNotAdvanceStreak(t *testing.T) {
+	t.Parallel()
+	c := New(Config{PromoteDebounce: 3}, nil, nil, registry.New(), quietLogger())
+	st := c.deploymentState("dev")
+	transitioning := decision{liveLeaderCount: 0, hasTransitioning: true}
+	for range 10 {
+		if got, _ := c.commitState(st, transitioning, false, time.Now()); got != 0 {
+			t.Fatalf("a tick with a mid-drain pod must not advance the leaderless streak, got %d", got)
+		}
+	}
+	if got, _ := c.commitState(st, decision{liveLeaderCount: 0}, false, time.Now()); got != 1 {
+		t.Fatalf("a genuinely-leaderless tick must resume the streak at 1, got %d", got)
 	}
 }
 

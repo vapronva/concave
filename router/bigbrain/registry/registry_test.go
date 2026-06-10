@@ -13,13 +13,73 @@ func TestRegistry_Leader(t *testing.T) {
 	t.Parallel()
 	r := registry.New()
 	r.EnsureDeployment("dev", "convex-dev")
-	if _, _, ok := r.Leader("dev"); ok {
+	if _, _, _, ok := r.Leader("dev"); ok {
 		t.Fatal("fresh deployment should have no leader")
 	}
 	r.Update("dev", "backend-0", "http://x:3210")
-	pod, url, ok := r.Leader("dev")
+	pod, url, seq, ok := r.Leader("dev")
 	if !ok || pod != "backend-0" || url != "http://x:3210" {
 		t.Fatalf("want backend-0/http://x:3210, got %q/%q ok=%v", pod, url, ok)
+	}
+	if seq == 0 {
+		t.Fatal("a published leader must carry a non-zero seq")
+	}
+}
+
+func TestRegistry_SeqMonotonicPerDistinctLeaderState(t *testing.T) {
+	t.Parallel()
+	r := registry.New()
+	r.EnsureDeployment("dev", "convex-dev")
+	floor := uint64(time.Now().UnixNano())
+	r.Update("dev", "backend-0", "http://a:3210")
+	_, _, seq1, _ := r.Leader("dev")
+	if seq1 < floor {
+		t.Fatalf("seq must be clock-seeded for cross-restart monotonicity: %d < %d", seq1, floor)
+	}
+	r.Update("dev", "backend-0", "http://a:3210")
+	if _, _, seq2, _ := r.Leader("dev"); seq2 != seq1 {
+		t.Fatalf("an unchanged Update must not advance seq: %d -> %d", seq1, seq2)
+	}
+	r.Update("dev", "backend-1", "http://b:3210")
+	_, _, seq3, _ := r.Leader("dev")
+	if seq3 <= seq1 {
+		t.Fatalf("a leader change must strictly advance seq: %d -> %d", seq1, seq3)
+	}
+	r.Update("dev", "", "")
+	if _, _, seq4, ok := r.Leader("dev"); ok || seq4 <= seq3 {
+		t.Fatalf("a leaderless publish must strictly advance seq: %d -> %d (ok=%v)", seq3, seq4, ok)
+	}
+}
+
+func TestRegistry_EventsCarrySeq(t *testing.T) {
+	t.Parallel()
+	r := registry.New()
+	r.EnsureDeployment("dev", "convex-dev")
+	ch, cancel, ok := r.Subscribe("dev")
+	if !ok {
+		t.Fatal("subscribe failed")
+	}
+	defer cancel()
+	r.Update("dev", "backend-0", "http://a:3210")
+	var first uint64
+	select {
+	case ev := <-ch:
+		_, _, seq, _ := r.Leader("dev")
+		if ev.Seq == 0 || ev.Seq != seq {
+			t.Fatalf("event seq %d must match Leader() seq %d and be non-zero", ev.Seq, seq)
+		}
+		first = ev.Seq
+	case <-time.After(time.Second):
+		t.Fatal("expected a leader event")
+	}
+	r.Update("dev", "backend-1", "http://b:3210")
+	select {
+	case ev := <-ch:
+		if ev.Seq <= first {
+			t.Fatalf("event seq must strictly increase across changes: %d -> %d", first, ev.Seq)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected a leader-change event")
 	}
 }
 
@@ -133,4 +193,27 @@ func TestRegistry_ConcurrentUpdateAndSubscribe(t *testing.T) {
 		})
 	}
 	wg.Wait()
+}
+
+func TestRegistry_PublishedLifecycle(t *testing.T) {
+	t.Parallel()
+	r := registry.New()
+	r.EnsureDeployment("dev", "convex-dev")
+	if r.Published("dev") || r.AllPublished() {
+		t.Fatal("nothing published before the first Update")
+	}
+	r.Update("dev", "", "")
+	if !r.Published("dev") || !r.AllPublished() {
+		t.Fatal("an explicit leaderless Update must publish")
+	}
+	if _, _, _, ok := r.Leader("dev"); ok {
+		t.Fatal("published leaderless deployment must still report no leader")
+	}
+	r.EnsureDeployment("prod", "convex-prod")
+	if r.AllPublished() {
+		t.Fatal("AllPublished must be false while prod is unreconciled")
+	}
+	if r.Published("ghost") {
+		t.Fatal("unknown deployment must not report published")
+	}
 }

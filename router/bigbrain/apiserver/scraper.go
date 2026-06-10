@@ -20,10 +20,13 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
+
+	"git.horse/vapronva/concave/router/bigbrain/k8sclient"
 )
 
 const (
 	funrunHealthPort    = 8091
+	healthPortName      = "health"
 	busyGauge           = "convex_funrun_isolate_busy_threads"
 	totalGauge          = "convex_funrun_isolate_total_threads"
 	scrapeTimeout       = 2 * time.Second
@@ -32,15 +35,10 @@ const (
 	metricLineMinFields = 2
 )
 
-type Deployment struct {
-	Name      string
-	Namespace string
-}
-
 type Scraper struct {
 	cs             kubernetes.Interface
 	componentLabel string
-	deployments    []Deployment
+	namespaces     []string
 	prov           *FunrunProvider
 	interval       time.Duration
 	httpc          *http.Client
@@ -50,18 +48,18 @@ type Scraper struct {
 func NewScraper(
 	cs kubernetes.Interface,
 	labelPrefix string,
-	deps []Deployment,
+	namespaces []string,
 	prov *FunrunProvider,
 	interval time.Duration,
 	log *slog.Logger,
 ) *Scraper {
 	if labelPrefix == "" {
-		labelPrefix = "convex"
+		labelPrefix = k8sclient.DefaultLabelPrefix
 	}
 	return &Scraper{
 		cs:             cs,
 		componentLabel: labelPrefix + "/component",
-		deployments:    deps,
+		namespaces:     namespaces,
 		prov:           prov,
 		interval:       interval,
 		httpc:          &http.Client{Timeout: scrapeTimeout},
@@ -87,58 +85,74 @@ func (s *Scraper) scrapeAll(ctx context.Context) {
 	fresh := make(map[types.NamespacedName]podSample)
 	var mu sync.Mutex
 	var wg sync.WaitGroup
-	for _, d := range s.deployments {
+	for _, ns := range s.namespaces {
 		wg.Add(1)
-		go func(d Deployment) {
+		go func(ns string) {
 			defer wg.Done()
-			samples := s.scrapeDeployment(ctx, d)
+			samples := s.scrapeNamespace(ctx, ns)
 			mu.Lock()
 			maps.Copy(fresh, samples)
 			mu.Unlock()
-		}(d)
+		}(ns)
 	}
 	wg.Wait()
-	if len(fresh) == 0 {
-		return
-	}
 	s.prov.replace(fresh)
 }
 
-func (s *Scraper) scrapeDeployment(ctx context.Context, d Deployment) map[types.NamespacedName]podSample {
+func (s *Scraper) scrapeNamespace(ctx context.Context, ns string) map[types.NamespacedName]podSample {
 	sel := fmt.Sprintf("%s=funrun", s.componentLabel)
-	pods, err := s.cs.CoreV1().Pods(d.Namespace).List(ctx, metav1.ListOptions{LabelSelector: sel})
+	pods, err := s.cs.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{LabelSelector: sel})
 	if err != nil {
-		s.log.WarnContext(ctx, "scraper: list funrun pods failed",
-			"deployment", d.Name, "namespace", d.Namespace, "err", err)
+		s.log.WarnContext(ctx, "scraper: list funrun pods failed", "namespace", ns, "err", err)
 		return nil
 	}
 	out := make(map[types.NamespacedName]podSample, len(pods.Items))
+	var mu sync.Mutex
+	var wg sync.WaitGroup
 	now := time.Now()
 	for i := range pods.Items {
 		p := &pods.Items[i]
-		if p.DeletionTimestamp != nil || p.Status.PodIP == "" || !podReady(p) {
+		if p.DeletionTimestamp != nil || p.Status.PodIP == "" || !k8sclient.PodReady(p) {
 			continue
 		}
-		busy, total, perr := s.scrapePod(ctx, p.Status.PodIP)
-		if perr != nil {
-			s.log.DebugContext(ctx, "scraper: pod scrape failed",
-				"deployment", d.Name, "pod", p.Name, "err", perr)
-			continue
-		}
-		if total == 0 {
-			continue
-		}
-		out[types.NamespacedName{Namespace: p.Namespace, Name: p.Name}] = podSample{
-			labels: labels.Set(p.Labels),
-			value:  milliPercent(100 * busy / total),
-			ts:     now,
-		}
+		wg.Add(1)
+		go func(p *corev1.Pod) {
+			defer wg.Done()
+			busy, total, perr := s.scrapePod(ctx, p.Status.PodIP, healthPort(p))
+			if perr != nil {
+				s.log.DebugContext(ctx, "scraper: pod scrape failed",
+					"namespace", ns, "pod", p.Name, "err", perr)
+				return
+			}
+			if total == 0 {
+				return
+			}
+			mu.Lock()
+			out[types.NamespacedName{Namespace: p.Namespace, Name: p.Name}] = podSample{
+				labels: labels.Set(p.Labels),
+				value:  milliPercent(100 * busy / total),
+				ts:     now,
+			}
+			mu.Unlock()
+		}(p)
 	}
+	wg.Wait()
 	return out
 }
 
-func (s *Scraper) scrapePod(ctx context.Context, podIP string) (float64, float64, error) {
-	addr := net.JoinHostPort(podIP, strconv.Itoa(funrunHealthPort))
+func healthPort(p *corev1.Pod) int {
+	for i := range p.Spec.Containers {
+		for _, port := range p.Spec.Containers[i].Ports {
+			if port.Name == healthPortName {
+				return int(port.ContainerPort)
+			}
+		}
+	}
+	return funrunHealthPort
+}
+
+func (s *Scraper) scrapePod(ctx context.Context, podIP string, port int) (float64, float64, error) {
+	addr := net.JoinHostPort(podIP, strconv.Itoa(port))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+"/metrics", nil)
 	if err != nil {
 		return 0, 0, err
@@ -201,16 +215,4 @@ func cutMetricLine(line string) (string, string, bool) {
 		name = name[:i]
 	}
 	return name, fields[1], true
-}
-
-func podReady(p *corev1.Pod) bool {
-	if p.Status.Phase != corev1.PodRunning {
-		return false
-	}
-	for _, cond := range p.Status.Conditions {
-		if cond.Type == corev1.PodReady {
-			return cond.Status == corev1.ConditionTrue
-		}
-	}
-	return false
 }

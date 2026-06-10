@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"git.horse/vapronva/concave/router/bigbrain/insights"
 	"git.horse/vapronva/concave/router/bigbrain/registry"
@@ -17,6 +18,7 @@ type leaderResponse struct {
 	Name      string `json:"name"`
 	LeaderPod string `json:"leaderPod"`
 	LeaderURL string `json:"leaderUrl"`
+	Seq       uint64 `json:"seq"`
 }
 
 func newTestServer(t *testing.T) (*registry.Registry, http.Handler) {
@@ -46,8 +48,14 @@ func TestServer_Leader(t *testing.T) {
 	}
 	rr = httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/registry/deployments/dev/leader", nil))
+	if rr.Code != http.StatusTooEarly {
+		t.Fatalf("unreconciled: want 425, got %d", rr.Code)
+	}
+	reg.Update("dev", "", "")
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/registry/deployments/dev/leader", nil))
 	if rr.Code != http.StatusServiceUnavailable {
-		t.Fatalf("leaderless: want 503, got %d", rr.Code)
+		t.Fatalf("known leaderless: want 503, got %d", rr.Code)
 	}
 	reg.Update("dev", "backend-0", "http://10.0.0.1:3210")
 	rr = httptest.NewRecorder()
@@ -61,6 +69,9 @@ func TestServer_Leader(t *testing.T) {
 	}
 	if lr.LeaderURL != "http://10.0.0.1:3210" || lr.LeaderPod != "backend-0" {
 		t.Fatalf("unexpected leader response: %+v", lr)
+	}
+	if lr.Seq == 0 {
+		t.Fatalf("leader response must carry a non-zero seq: %+v", lr)
 	}
 }
 
@@ -109,6 +120,48 @@ func TestServer_LeaderStreamInitialEvent(t *testing.T) {
 	if !strings.Contains(body, "event: leader") || !strings.Contains(body, "http://10.0.0.1:3210") {
 		t.Fatalf("stream did not emit initial leader event, got: %q", body)
 	}
+	if !strings.Contains(body, `"seq":`) || strings.Contains(body, `"seq":0`) {
+		t.Fatalf("stream event must carry a non-zero seq, got: %q", body)
+	}
+}
+
+func TestServer_LeaderStreamSkipsUnpublishedSnapshot(t *testing.T) {
+	t.Parallel()
+	reg, h := newTestServer(t)
+	reg.EnsureDeployment("dev", "convex-dev")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		reg.Update("dev", "backend-1", "http://10.0.0.2:3210")
+	}()
+	req := httptest.NewRequest(http.MethodGet, "/registry/deployments/dev/leader-stream", nil).WithContext(ctx)
+	rr := &flushRecorder{ResponseRecorder: httptest.NewRecorder(), onFlush: cancel}
+	h.ServeHTTP(rr, req)
+	body := rr.Body.String()
+	if strings.Contains(body, `"leaderUrl":""`) {
+		t.Fatalf("stream emitted an unreconciled snapshot: %q", body)
+	}
+	if !strings.Contains(body, "http://10.0.0.2:3210") {
+		t.Fatalf("stream did not emit the first reconciled event, got: %q", body)
+	}
+}
+
+func TestServer_Readyz(t *testing.T) {
+	t.Parallel()
+	reg, h := newTestServer(t)
+	reg.EnsureDeployment("dev", "convex-dev")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("unreconciled readyz: want 503, got %d", rr.Code)
+	}
+	reg.Update("dev", "", "")
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("reconciled readyz: want 200, got %d", rr.Code)
+	}
 }
 
 func TestServer_UsageIngestRequiresToken(t *testing.T) {
@@ -142,8 +195,8 @@ func TestServer_UsageIngestRejectsUnknownDeployment(t *testing.T) {
 	)
 	req.Header.Set("Authorization", "Bearer usage-secret")
 	h.ServeHTTP(rr, req)
-	if rr.Code != http.StatusNotFound {
-		t.Fatalf("unknown deployment: want 404, got %d", rr.Code)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("unknown deployment: want 401 (no existence leak), got %d", rr.Code)
 	}
 }
 
@@ -234,8 +287,8 @@ func TestServer_UsageQueryUnknownDeployment(t *testing.T) {
 		"/api/dashboard/teams/0/usage/query?deploymentName=ghost", nil)
 	req.Header.Set("Authorization", "Bearer usage-secret")
 	h.ServeHTTP(rr, req)
-	if rr.Code != http.StatusNotFound {
-		t.Fatalf("unknown deployment: want 404, got %d", rr.Code)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("unknown deployment: want 401 (no existence leak), got %d", rr.Code)
 	}
 }
 

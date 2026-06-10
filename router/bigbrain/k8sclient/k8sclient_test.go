@@ -41,9 +41,10 @@ func TestDiscoverBackends_CustomPrefix(t *testing.T) {
 	const prefix = "example.com"
 	cs := fake.NewClientset(
 		pod(prefix, "backend-0", "leader", "backend", "100", "10.0.0.1", true),
-		pod(prefix, "backend-1", "follower", "", "", "10.0.0.2", false),
+		pod(prefix, "backend-1", "follower", "backend", "", "10.0.0.2", false),
 		pod(prefix, "dashboard-0", "", "", "", "10.0.0.3", true),
 		pod(prefix, "funrun-0", "follower", "funrun", "", "10.0.0.4", true),
+		pod(prefix, "unlabeled-0", "follower", "", "", "10.0.0.6", true),
 		pod("convex", "other-0", "leader", "backend", "100", "10.0.0.5", true),
 	)
 	c := k8sclient.NewFromInterface(cs, prefix)
@@ -52,7 +53,7 @@ func TestDiscoverBackends_CustomPrefix(t *testing.T) {
 		t.Fatalf("DiscoverBackends: %v", err)
 	}
 	if len(out) != 2 {
-		t.Fatalf("want 2 backends (role-labelled, component=backend or unset), got %d: %+v", len(out), out)
+		t.Fatalf("want 2 backends (role-labelled with component=backend), got %d: %+v", len(out), out)
 	}
 	if out[0].Pod != "backend-0" || out[1].Pod != "backend-1" {
 		t.Fatalf("want backend-0,backend-1 sorted, got %q,%q", out[0].Pod, out[1].Pod)
@@ -60,11 +61,11 @@ func TestDiscoverBackends_CustomPrefix(t *testing.T) {
 	if out[0].URL != "http://10.0.0.1:3210" {
 		t.Fatalf("unexpected URL %q", out[0].URL)
 	}
-	if out[0].Priority != 100 || !out[0].Ready {
+	if out[0].Priority != 100 {
 		t.Fatalf("unexpected leader fields: %+v", out[0])
 	}
-	if out[1].Ready {
-		t.Fatalf("backend-1 is not Ready; want Ready=false, got %+v", out[1])
+	if out[1].Priority != 0 {
+		t.Fatalf("backend-1 has no priority label and role=follower; want Priority=0, got %+v", out[1])
 	}
 }
 

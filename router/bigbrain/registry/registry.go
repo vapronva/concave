@@ -2,12 +2,15 @@ package registry
 
 import (
 	"sync"
+	"time"
 )
 
 type Deployment struct {
 	Namespace string
 	LeaderPod string
 	LeaderURL string
+	seq       uint64
+	published bool
 }
 
 type Registry struct {
@@ -20,6 +23,7 @@ type LeaderEvent struct {
 	Name      string `json:"name"`
 	LeaderPod string `json:"leaderPod"`
 	LeaderURL string `json:"leaderUrl"`
+	Seq       uint64 `json:"seq"`
 }
 
 const (
@@ -69,13 +73,15 @@ func (r *Registry) Update(name, leaderPod, leaderURL string) {
 	if !ok {
 		return
 	}
-	changed := d.LeaderPod != leaderPod || d.LeaderURL != leaderURL
+	changed := d.LeaderPod != leaderPod || d.LeaderURL != leaderURL || !d.published
 	d.LeaderPod = leaderPod
 	d.LeaderURL = leaderURL
+	d.published = true
 	if !changed {
 		return
 	}
-	ev := LeaderEvent{Name: name, LeaderPod: leaderPod, LeaderURL: leaderURL}
+	d.seq = max(d.seq+1, uint64(time.Now().UnixNano()))
+	ev := LeaderEvent{Name: name, LeaderPod: leaderPod, LeaderURL: leaderURL, Seq: d.seq}
 	for ch := range r.subs[name] {
 		select {
 		case ch <- ev:
@@ -92,14 +98,32 @@ func (r *Registry) Update(name, leaderPod, leaderURL string) {
 	}
 }
 
-func (r *Registry) Leader(name string) (string, string, bool) {
+func (r *Registry) Leader(name string) (string, string, uint64, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	d, present := r.deps[name]
 	if !present {
-		return "", "", false
+		return "", "", 0, false
 	}
-	return d.LeaderPod, d.LeaderURL, d.LeaderURL != ""
+	return d.LeaderPod, d.LeaderURL, d.seq, d.LeaderURL != ""
+}
+
+func (r *Registry) Published(name string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	d, ok := r.deps[name]
+	return ok && d.published
+}
+
+func (r *Registry) AllPublished() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, d := range r.deps {
+		if !d.published {
+			return false
+		}
+	}
+	return len(r.deps) > 0
 }
 
 func (r *Registry) Subscribe(name string) (<-chan LeaderEvent, func(), bool) {
