@@ -5,9 +5,6 @@ stages:
   - post-test
   - publish
 
-variables:
-  CONVEX_REF: 96e9f1a689e678fbf7dc90604e1bfc474a217dff
-
 include:
   - component: $CI_SERVER_FQDN/ci/security/bundle@1
   - component: $CI_SERVER_FQDN/ci/golang/init-vet@2
@@ -47,7 +44,6 @@ include:
       scan_tag: $CI_COMMIT_SHA
       dockerfile: backend/Dockerfile.backend
       working_dir: backend
-      build_args: --build-arg CONVEX_REF=$CONVEX_REF
       architectures: linux/amd64
       rules_changes:
         - backend/**/*
@@ -60,7 +56,6 @@ include:
       scan_tag: $CI_COMMIT_SHA
       dockerfile: backend/Dockerfile.dashboard
       working_dir: backend
-      build_args: --build-arg CONVEX_REF=$CONVEX_REF
       architectures: linux/amd64
       rules_changes:
         - backend/**/*
