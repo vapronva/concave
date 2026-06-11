@@ -1387,3 +1387,102 @@ index 385a9a993..6282c08bc 100644
 +        .await
      }
  }
+diff --git a/crates/database/src/table_summary.rs b/crates/database/src/table_summary.rs
+index df6d23903..52dc00bac 100644
+--- a/crates/database/src/table_summary.rs
++++ b/crates/database/src/table_summary.rs
+@@ -369,42 +369,66 @@ pub async fn bootstrap<RT: Runtime>(
+     target_ts: RepeatableTimestamp,
+     bootstrap_kind: BootstrapKind,
+ ) -> anyhow::Result<(TableSummarySnapshot, usize)> {
+-    let _timer = metrics::bootstrap_table_summaries_timer();
+     let stored_snapshot = match bootstrap_kind {
+         BootstrapKind::FromScratch => None,
+         BootstrapKind::FromCheckpoint => TableSummarySnapshot::load(persistence.as_ref()).await?,
+     };
+-    let recent_ts = new_static_repeatable_recent(persistence.as_ref()).await?;
+-    let (table_mapping, _, index_registry, ..) =
+-        DatabaseSnapshot::<RT>::load_table_and_index_metadata(
+-            &RepeatablePersistence::new(
+-                persistence.clone(),
+-                recent_ts,
+-                retention_validator.clone(),
+-            )
+-            .read_snapshot(recent_ts)?,
+-        )
+-        .await?;
+-    let (base_snapshot, base_snapshot_ts) = match stored_snapshot {
+-        Some(base) => base,
+-        None => {
+-            let by_id_indexes = index_registry.by_id_indexes();
+-            let base_snapshot = TableSummaryWriter::<RT>::collect_snapshot(
+-                *recent_ts,
+-                || {
+-                    TableIterator::new(
+-                        runtime.clone(),
+-                        recent_ts,
++    bootstrap_from_base(
++        runtime,
++        persistence,
++        retention_validator,
++        target_ts,
++        stored_snapshot,
++        None,
++    )
++    .await
++}
++
++pub async fn bootstrap_from_base<RT: Runtime>(
++    runtime: RT,
++    persistence: Arc<dyn PersistenceReader>,
++    retention_validator: Arc<dyn RetentionValidator>,
++    target_ts: RepeatableTimestamp,
++    base: Option<(TableSummarySnapshot, RepeatableTimestamp)>,
++    table_mapping_hint: Option<TableMapping>,
++) -> anyhow::Result<(TableSummarySnapshot, usize)> {
++    let _timer = metrics::bootstrap_table_summaries_timer();
++    let (base_snapshot, base_snapshot_ts, table_mapping) = match (base, table_mapping_hint) {
++        (Some((snapshot, snapshot_ts)), Some(mapping)) => (snapshot, snapshot_ts, mapping),
++        (base, _) => {
++            let recent_ts = new_static_repeatable_recent(persistence.as_ref()).await?;
++            let (table_mapping, _, index_registry, ..) =
++                DatabaseSnapshot::<RT>::load_table_and_index_metadata(
++                    &RepeatablePersistence::new(
+                         persistence.clone(),
++                        recent_ts,
+                         retention_validator.clone(),
+-                        1000,
+                     )
++                    .read_snapshot(recent_ts)?,
++                )
++                .await?;
++            match base {
++                Some((snapshot, snapshot_ts)) => (snapshot, snapshot_ts, table_mapping),
++                None => {
++                    let by_id_indexes = index_registry.by_id_indexes();
++                    let base_snapshot = TableSummaryWriter::<RT>::collect_snapshot(
++                        *recent_ts,
++                        || {
++                            TableIterator::new(
++                                runtime.clone(),
++                                recent_ts,
++                                persistence.clone(),
++                                retention_validator.clone(),
++                                1000,
++                            )
++                        },
++                        &table_mapping,
++                        &by_id_indexes,
++                    )
++                    .await?;
++                    (base_snapshot, recent_ts, table_mapping)
+                 },
+-                &table_mapping,
+-                &by_id_indexes,
+-            )
+-            .await?;
+-            (base_snapshot, recent_ts)
++            }
+         },
+     };
+     let bootstrap_tables = BootstrapTableIds::new(&table_mapping);

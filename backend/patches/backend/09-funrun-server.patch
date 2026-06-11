@@ -1896,10 +1896,10 @@ index 000000000..786709af2
 +}
 diff --git a/crates/funrun_server/src/snapshot.rs b/crates/funrun_server/src/snapshot.rs
 new file mode 100644
-index 000000000..2db193242
+index 000000000..1d5de2481
 --- /dev/null
 +++ b/crates/funrun_server/src/snapshot.rs
-@@ -0,0 +1,716 @@
+@@ -0,0 +1,807 @@
 +use std::{
 +    collections::HashMap,
 +    sync::{
@@ -1923,7 +1923,12 @@ index 000000000..2db193242
 +        RetentionValidator,
 +    },
 +    runtime::Runtime,
-+    types::RepeatableTimestamp,
++    types::{
++        RepeatableReason,
++        RepeatableTimestamp,
++    },
++    value::TableMapping,
++    virtual_system_mapping::VirtualSystemMapping,
 +};
 +use database::{
 +    BootstrapMetadata,
@@ -2330,6 +2335,7 @@ index 000000000..2db193242
 +    pub core: FunctionRunnerCore<RT, DeploymentStorage>,
 +    pub database: Database<RT>,
 +    snapshot_cache: Cache<Timestamp, SnapshotInputs>,
++    summary_cache: tokio::sync::Mutex<Option<database::table_summary::TableSummarySnapshot>>,
 +}
 +
 +impl<RT: Runtime> InstanceState<RT> {
@@ -2404,6 +2410,7 @@ index 000000000..2db193242
 +            core,
 +            database,
 +            snapshot_cache,
++            summary_cache: tokio::sync::Mutex::new(None),
 +        })
 +    }
 +
@@ -2433,7 +2440,14 @@ index 000000000..2db193242
 +                let table_count_snapshot: Arc<dyn TableCountSnapshot> =
 +                    match snapshot.table_summaries.clone() {
 +                        Some(summaries) => Arc::new(Some(summaries)),
-+                        None => Arc::new(self.bootstrap_table_summaries(ts).await?),
++                        None => Arc::new(Some(
++                            self.rolled_table_summaries(
++                                ts,
++                                snapshot.table_registry.table_mapping(),
++                                &snapshot.virtual_system_mapping,
++                            )
++                            .await?,
++                        )),
 +                    };
 +                let search_storage_cell = Arc::new(OnceLock::new());
 +                let _ = search_storage_cell.set(self.search_storage.clone());
@@ -2468,25 +2482,53 @@ index 000000000..2db193242
 +        }
 +    }
 +
-+    async fn bootstrap_table_summaries(
++    async fn rolled_table_summaries(
 +        &self,
 +        ts: RepeatableTimestamp,
-+    ) -> anyhow::Result<Option<database::TableSummaries>> {
-+        let (table_summary_snapshot, _num_rows) = database::table_summary::bootstrap(
++        table_mapping: &TableMapping,
++        virtual_system_mapping: &VirtualSystemMapping,
++    ) -> anyhow::Result<database::TableSummaries> {
++        let mut cached = self.summary_cache.lock().await;
++        let base = cached.clone().map(|snapshot| {
++            let base_ts = RepeatableTimestamp::new_validated(
++                snapshot.ts,
++                RepeatableReason::TableSummarySnapshot,
++            );
++            (snapshot, base_ts)
++        });
++        let had_base = base.is_some();
++        let mapping_hint = had_base.then(|| table_mapping.clone());
++        let rolled = database::table_summary::bootstrap_from_base(
 +            self.rt.clone(),
 +            self.reader.clone(),
 +            self.retention_validator.clone(),
 +            ts,
-+            database::table_summary::BootstrapKind::FromCheckpoint,
++            base,
++            mapping_hint,
 +        )
-+        .await?;
-+        let snapshot = self.database.snapshot(ts)?;
-+        let summaries = database::TableSummaries::new(
-+            table_summary_snapshot,
-+            snapshot.table_registry.table_mapping(),
-+            &snapshot.virtual_system_mapping,
-+        )?;
-+        Ok(Some(summaries))
++        .await;
++        let (snapshot, _rows) = match rolled {
++            Ok(result) => result,
++            Err(e) if had_base => {
++                tracing::warn!(
++                    "[convex-funrun] summary roll from cached base failed ({e:#}); \
++                     re-bootstrapping from checkpoint"
++                );
++                *cached = None;
++                database::table_summary::bootstrap(
++                    self.rt.clone(),
++                    self.reader.clone(),
++                    self.retention_validator.clone(),
++                    ts,
++                    database::table_summary::BootstrapKind::FromCheckpoint,
++                )
++                .await?
++            },
++            Err(e) => return Err(e),
++        };
++        *cached = Some(snapshot.clone());
++        drop(cached);
++        database::TableSummaries::new(snapshot, table_mapping, virtual_system_mapping)
 +    }
 +
 +    async fn cold_snapshot_inputs(
@@ -2495,6 +2537,55 @@ index 000000000..2db193242
 +        index_reader: Arc<dyn IndexReader>,
 +    ) -> anyhow::Result<SnapshotInputs> {
 +        log_counter(&SNAPSHOT_COLD_LOAD_TOTAL, 1);
++        match self.warm_assembled_inputs(ts, index_reader.clone()).await {
++            Ok(inputs) => Ok(inputs),
++            Err(e) => {
++                tracing::warn!(
++                    "[convex-funrun] warm-assembled cold load failed at ts {} ({e:#}); falling \
++                     back to full snapshot load",
++                    *ts
++                );
++                self.full_cold_snapshot_inputs(ts, index_reader).await
++            },
++        }
++    }
++
++    async fn warm_assembled_inputs(
++        &self,
++        ts: RepeatableTimestamp,
++        index_reader: Arc<dyn IndexReader>,
++    ) -> anyhow::Result<SnapshotInputs> {
++        let warm = self.database.snapshot(self.database.now_ts_for_reads())?;
++        let summaries = self
++            .rolled_table_summaries(
++                ts,
++                warm.table_registry.table_mapping(),
++                &warm.virtual_system_mapping,
++            )
++            .await?;
++        let table_count_snapshot: Arc<dyn TableCountSnapshot> = Arc::new(Some(summaries));
++        let search_storage_cell = Arc::new(OnceLock::new());
++        let _ = search_storage_cell.set(self.search_storage.clone());
++        let text_index_snapshot: Arc<dyn TransactionTextSnapshot> =
++            Arc::new(TextIndexManagerSnapshot::new(
++                warm.index_registry,
++                warm.text_indexes,
++                self.searcher.clone(),
++                search_storage_cell,
++            ));
++        Ok(SnapshotInputs {
++            index_reader,
++            bootstrap_metadata: self.database.bootstrap_metadata.clone(),
++            table_count_snapshot,
++            text_index_snapshot,
++        })
++    }
++
++    async fn full_cold_snapshot_inputs(
++        &self,
++        ts: RepeatableTimestamp,
++        index_reader: Arc<dyn IndexReader>,
++    ) -> anyhow::Result<SnapshotInputs> {
 +        let mut snapshot = DatabaseSnapshot::load(
 +            self.rt.clone(),
 +            self.reader.clone(),
