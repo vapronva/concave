@@ -25,16 +25,18 @@ spec:
         {{- include "convex.backendDiscoveryLabels" (dict "ctx" . "role" "follower" "priority" .Values.ha.followerPriority) | nindent 8 }}
     spec:
       {{- with include "convex.imagePullSecrets" . }}{{- . | nindent 6 }}{{- end }}
-      {{- with .Values.ha.follower.nodeSelector }}
-      nodeSelector:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
+      {{- with include "convex.podScheduling" .Values.ha.follower }}{{- . | nindent 6 }}{{- end }}
+      {{- if .Values.ha.follower.affinity }}
+      affinity:
+        {{- toYaml .Values.ha.follower.affinity | nindent 8 }}
+      {{- else }}
       affinity:
         podAntiAffinity:
           {{- $prefix := include "convex.labelPrefix" . }}
+          {{- $spreadKey := .Values.ha.spreadTopologyKey | default "kubernetes.io/hostname" }}
           {{- if .Values.ha.requireNodeSpread }}
           requiredDuringSchedulingIgnoredDuringExecution:
-            - topologyKey: kubernetes.io/hostname
+            - topologyKey: {{ $spreadKey }}
               labelSelector:
                 matchLabels:
                   {{ $prefix }}/component: backend
@@ -43,12 +45,13 @@ spec:
           preferredDuringSchedulingIgnoredDuringExecution:
             - weight: 100
               podAffinityTerm:
-                topologyKey: kubernetes.io/hostname
+                topologyKey: {{ $spreadKey }}
                 labelSelector:
                   matchLabels:
                     {{ $prefix }}/component: backend
                     {{ $prefix }}/instance: {{ required "instance.name is required" .Values.instance.name | quote }}
           {{- end }}
+      {{- end }}
       terminationGracePeriodSeconds: 20
       automountServiceAccountToken: false
       containers:

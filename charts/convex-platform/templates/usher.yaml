@@ -49,6 +49,11 @@ spec:
         checksum/config: {{ toJson $usherConfig | sha256sum }}
     spec:
       {{- with include "convex.imagePullSecrets" . }}{{- . | nindent 6 }}{{- end }}
+      {{- with include "convex.podScheduling" $u }}{{- . | nindent 6 }}{{- end }}
+      {{- if $u.affinity }}
+      affinity:
+        {{- toYaml $u.affinity | nindent 8 }}
+      {{- else }}
       affinity:
         {{- if or $u.preferredNode $u.nodes }}
         nodeAffinity:
@@ -82,6 +87,7 @@ spec:
                 labelSelector:
                   matchLabels:
                     {{- include "convex.componentSelectorLabels" (dict "ctx" . "component" "usher") | nindent 20 }}
+      {{- end }}
       automountServiceAccountToken: false
       containers:
         - name: usher

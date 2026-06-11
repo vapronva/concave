@@ -46,13 +46,19 @@ ha:
   leaderPriority: 100
   followerPriority: 0
   requireNodeSpread: true
+  spreadTopologyKey: kubernetes.io/hostname
   demotionDrainTimeoutSeconds: ""
   pdb:
     enabled: true
   leader:
     nodeSelector: {}
+    tolerations: []
+    affinity: {}
   follower:
     nodeSelector: {}
+    tolerations: []
+    affinity: {}
+    topologySpreadConstraints: []
 
 insights:
   enabled: false
@@ -79,6 +85,10 @@ funrun:
   drainDelaySeconds: ""
   terminationGracePeriodSeconds: 630
   nodes: []
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  topologySpreadConstraints: []
   extraEnv: []
   podDeletionCost:
     enabled: true
@@ -97,6 +107,9 @@ dashboard:
   enabled: true
   port: 6791
   nodes: []
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
 
 ingress:
   usherService:

@@ -78,6 +78,20 @@ imagePullSecrets:
 {{- splitList ":" . | last -}}
 {{- end -}}
 
+{{- define "convex.podScheduling" -}}
+{{- $out := list -}}
+{{- with .nodeSelector -}}
+{{- $out = append $out (printf "nodeSelector:\n%s" (toYaml . | indent 2)) -}}
+{{- end -}}
+{{- with .tolerations -}}
+{{- $out = append $out (printf "tolerations:\n%s" (toYaml . | indent 2)) -}}
+{{- end -}}
+{{- with .topologySpreadConstraints -}}
+{{- $out = append $out (printf "topologySpreadConstraints:\n%s" (toYaml . | indent 2)) -}}
+{{- end -}}
+{{- join "\n" $out -}}
+{{- end -}}
+
 {{- define "convex.backendDiscoveryLabels" -}}
 {{- $ctx := .ctx -}}
 {{- $prefix := include "convex.labelPrefix" $ctx -}}

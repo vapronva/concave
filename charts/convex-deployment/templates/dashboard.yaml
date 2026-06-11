@@ -20,7 +20,11 @@ spec:
         {{- include "convex.componentDiscoveryLabel" (dict "ctx" . "component" "dashboard") | nindent 8 }}
     spec:
       {{- with include "convex.imagePullSecrets" . }}{{- . | nindent 6 }}{{- end }}
-      {{- if .Values.dashboard.nodes }}
+      {{- with include "convex.podScheduling" .Values.dashboard }}{{- . | nindent 6 }}{{- end }}
+      {{- if .Values.dashboard.affinity }}
+      affinity:
+        {{- toYaml .Values.dashboard.affinity | nindent 8 }}
+      {{- else if .Values.dashboard.nodes }}
       affinity:
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:

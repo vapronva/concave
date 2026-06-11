@@ -35,6 +35,11 @@ spec:
       {{- if .Values.funrun.podDeletionCost.enabled }}
       serviceAccountName: {{ include "convex.funrunName" . }}
       {{- end }}
+      {{- with include "convex.podScheduling" .Values.funrun }}{{- . | nindent 6 }}{{- end }}
+      {{- if .Values.funrun.affinity }}
+      affinity:
+        {{- toYaml .Values.funrun.affinity | nindent 8 }}
+      {{- else }}
       affinity:
         {{- if or .Values.ha.preferredNode .Values.funrun.nodes }}
         nodeAffinity:
@@ -68,6 +73,7 @@ spec:
                 labelSelector:
                   matchLabels:
                     {{- include "convex.componentSelectorLabels" (dict "ctx" . "component" "funrun") | nindent 20 }}
+      {{- end }}
       containers:
         - name: funrun
           image: {{ include "convex.image" (dict "ctx" . "spec" .Values.image) }}

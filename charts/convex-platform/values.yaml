@@ -25,6 +25,10 @@ usher:
   bigbrainUrl: ""
   preferredNode: ""
   nodes: []
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  topologySpreadConstraints: []
   resources: {}
   pdb:
     enabled: true
@@ -46,6 +50,9 @@ bigbrain:
     warmthLag: 5000000000
   preferredNode: ""
   nodes: []
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
   metricsApiserver:
     enabled: true
     port: 6443

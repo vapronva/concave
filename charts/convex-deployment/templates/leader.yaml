@@ -21,8 +21,9 @@ spec:
         {{- include "convex.backendDiscoveryLabels" (dict "ctx" . "role" "leader" "priority" .Values.ha.leaderPriority) | nindent 8 }}
     spec:
       {{- with include "convex.imagePullSecrets" . }}{{- . | nindent 6 }}{{- end }}
-      {{- with .Values.ha.leader.nodeSelector }}
-      nodeSelector:
+      {{- with include "convex.podScheduling" .Values.ha.leader }}{{- . | nindent 6 }}{{- end }}
+      {{- with .Values.ha.leader.affinity }}
+      affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       terminationGracePeriodSeconds: 40
