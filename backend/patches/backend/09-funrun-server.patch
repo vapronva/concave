@@ -57,10 +57,10 @@ index 000000000..8375eb65c
 +workspace = true
 diff --git a/crates/funrun_server/src/callbacks.rs b/crates/funrun_server/src/callbacks.rs
 new file mode 100644
-index 000000000..dc7a355ca
+index 000000000..b3b253642
 --- /dev/null
 +++ b/crates/funrun_server/src/callbacks.rs
-@@ -0,0 +1,584 @@
+@@ -0,0 +1,609 @@
 +use anyhow::Context;
 +use async_trait::async_trait;
 +use common::{
@@ -148,23 +148,31 @@ index 000000000..dc7a355ca
 +        )
 +    }
 +
-+    fn request(&self, path: &str, identity: &Identity) -> reqwest::RequestBuilder {
++    fn request(
++        &self,
++        path: &str,
++        identity: &Identity,
++        context: &ExecutionContext,
++    ) -> reqwest::RequestBuilder {
 +        let mut req = self
 +            .client
 +            .post(self.url(path))
 +            .header(CONVEX_ACTIONS_CALLBACK_TOKEN_HEADER, &self.callback_token)
-+            .header(
-+                CONVEX_REQUEST_ID_HEADER,
-+                self.context.request_id.to_string(),
-+            )
-+            .header(
-+                CONVEX_EXECUTION_ID_HEADER,
-+                self.context.execution_id.to_string(),
-+            )
-+            .header(
-+                CONVEX_ROOT_REQUEST_HEADER,
-+                self.context.is_root().to_string(),
-+            );
++            .header(CONVEX_REQUEST_ID_HEADER, context.request_id.to_string())
++            .header(CONVEX_EXECUTION_ID_HEADER, context.execution_id.to_string())
++            .header(CONVEX_ROOT_REQUEST_HEADER, context.is_root().to_string());
++        if let Some((component_id, job_id)) = &context.parent_scheduled_job {
++            req = req.header("Convex-Parent-Scheduled-Job", job_id.to_string());
++            if let Some(serialized) = component_id.serialize_to_string() {
++                req = req.header("Convex-Parent-Scheduled-Job-Component-Id", serialized);
++            }
++        }
++        if let Some(ip) = &context.request_metadata.ip {
++            req = req.header("Convex-Request-Client-Ip", ip.as_str());
++        }
++        if let Some(user_agent) = &context.request_metadata.user_agent {
++            req = req.header("Convex-Request-Client-User-Agent", user_agent.as_str());
++        }
 +        if *identity == self.request_identity {
 +            if let Some(auth) = &self.auth_header {
 +                req = req.header(http::header::AUTHORIZATION, auth);
@@ -179,6 +187,7 @@ index 000000000..dc7a355ca
 +        path: &str,
 +        function_path: CanonicalizedComponentFunctionPath,
 +        args: SerializedArgs,
++        context: &ExecutionContext,
 +    ) -> anyhow::Result<FunctionResult> {
 +        let args_raw: Box<RawValue> = RawValue::from_string(args.get().to_owned())?;
 +        let body = RunFunctionBody {
@@ -189,7 +198,7 @@ index 000000000..dc7a355ca
 +            args: args_raw,
 +        };
 +        let response = self
-+            .request(path, &identity)
++            .request(path, &identity, context)
 +            .json(&body)
 +            .send()
 +            .await
@@ -382,9 +391,9 @@ index 000000000..dc7a355ca
 +        identity: Identity,
 +        path: CanonicalizedComponentFunctionPath,
 +        args: SerializedArgs,
-+        _context: ExecutionContext,
++        context: ExecutionContext,
 +    ) -> anyhow::Result<FunctionResult> {
-+        self.run_function(identity, "/api/actions/query", path, args)
++        self.run_function(identity, "/api/actions/query", path, args, &context)
 +            .await
 +    }
 +
@@ -393,9 +402,9 @@ index 000000000..dc7a355ca
 +        identity: Identity,
 +        path: CanonicalizedComponentFunctionPath,
 +        args: SerializedArgs,
-+        _context: ExecutionContext,
++        context: ExecutionContext,
 +    ) -> anyhow::Result<FunctionResult> {
-+        self.run_function(identity, "/api/actions/mutation", path, args)
++        self.run_function(identity, "/api/actions/mutation", path, args, &context)
 +            .await
 +    }
 +
@@ -404,9 +413,9 @@ index 000000000..dc7a355ca
 +        identity: Identity,
 +        path: CanonicalizedComponentFunctionPath,
 +        args: SerializedArgs,
-+        _context: ExecutionContext,
++        context: ExecutionContext,
 +    ) -> anyhow::Result<FunctionResult> {
-+        self.run_function(identity, "/api/actions/action", path, args)
++        self.run_function(identity, "/api/actions/action", path, args, &context)
 +            .await
 +    }
 +
@@ -417,7 +426,7 @@ index 000000000..dc7a355ca
 +        scheduled_path: CanonicalizedComponentFunctionPath,
 +        udf_args: SerializedArgs,
 +        scheduled_ts: UnixTimestamp,
-+        _context: ExecutionContext,
++        context: ExecutionContext,
 +    ) -> anyhow::Result<DeveloperDocumentId> {
 +        let udf_args: Box<RawValue> = RawValue::from_string(udf_args.get().to_owned())?;
 +        let body = ScheduleJobBody {
@@ -429,7 +438,7 @@ index 000000000..dc7a355ca
 +            scheduled_ts: scheduled_ts.as_secs_f64(),
 +        };
 +        let response = self
-+            .request("/api/actions/schedule_job", &identity)
++            .request("/api/actions/schedule_job", &identity, &context)
 +            .json(&body)
 +            .send()
 +            .await?;
@@ -444,7 +453,7 @@ index 000000000..dc7a355ca
 +        virtual_id: DeveloperDocumentId,
 +    ) -> anyhow::Result<()> {
 +        let response = self
-+            .request("/api/actions/cancel_job", &identity)
++            .request("/api/actions/cancel_job", &identity, &self.context)
 +            .json(&CancelJobBody {
 +                id: virtual_id.to_string(),
 +            })
@@ -465,7 +474,11 @@ index 000000000..dc7a355ca
 +            reference: None,
 +        };
 +        let response = self
-+            .request("/api/actions/create_function_handle", &identity)
++            .request(
++                "/api/actions/create_function_handle",
++                &identity,
++                &self.context,
++            )
 +            .json(&body)
 +            .send()
 +            .await?;
@@ -481,7 +494,7 @@ index 000000000..dc7a355ca
 +        storage_id: FileStorageId,
 +    ) -> anyhow::Result<Option<String>> {
 +        let response = self
-+            .request("/api/actions/storage_get_url", &identity)
++            .request("/api/actions/storage_get_url", &identity, &self.context)
 +            .json(&StorageIdBody {
 +                storage_id: storage_id.to_string(),
 +            })
@@ -499,7 +512,7 @@ index 000000000..dc7a355ca
 +        storage_id: FileStorageId,
 +    ) -> anyhow::Result<()> {
 +        let response = self
-+            .request("/api/actions/storage_delete", &identity)
++            .request("/api/actions/storage_delete", &identity, &self.context)
 +            .json(&StorageIdBody {
 +                storage_id: storage_id.to_string(),
 +            })
@@ -516,7 +529,11 @@ index 000000000..dc7a355ca
 +        storage_id: FileStorageId,
 +    ) -> anyhow::Result<Option<(ComponentPath, FileStorageEntry)>> {
 +        let response = self
-+            .request("/api/actions/storage_get_file_entry", &identity)
++            .request(
++                "/api/actions/storage_get_file_entry",
++                &identity,
++                &self.context,
++            )
 +            .json(&StorageIdBody {
 +                storage_id: storage_id.to_string(),
 +            })
@@ -546,7 +563,11 @@ index 000000000..dc7a355ca
 +    ) -> anyhow::Result<(ComponentPath, DeveloperDocumentId)> {
 +        let entry_proto: pb::storage::FileStorageEntry = entry.into();
 +        let response = self
-+            .request("/api/actions/storage_store_file_entry", &identity)
++            .request(
++                "/api/actions/storage_store_file_entry",
++                &identity,
++                &self.context,
++            )
 +            .json(&StorageStoreFileEntryBody {
 +                entry_proto: entry_proto.encode_to_vec(),
 +            })
@@ -565,7 +586,7 @@ index 000000000..dc7a355ca
 +        query: JsonValue,
 +    ) -> anyhow::Result<(Vec<PublicVectorSearchQueryResult>, FunctionUsageStats)> {
 +        let mut req = self
-+            .request("/api/actions/vector_search", &identity)
++            .request("/api/actions/vector_search", &identity, &self.context)
 +            .json(&VectorSearchBody { query });
 +        if let Some(action_name) = &self.action_name {
 +            req = req.header(CONVEX_ACTION_FUNCTION_NAME_HEADER, action_name);
@@ -591,7 +612,11 @@ index 000000000..dc7a355ca
 +        handle: FunctionHandle,
 +    ) -> anyhow::Result<CanonicalizedComponentFunctionPath> {
 +        let response = self
-+            .request("/api/actions/lookup_function_handle", &identity)
++            .request(
++                "/api/actions/lookup_function_handle",
++                &identity,
++                &self.context,
++            )
 +            .json(&LookupFunctionHandleBody {
 +                handle: String::from(handle),
 +            })
