@@ -169,7 +169,7 @@ index fc4a16678..9acb169c8 100644
  
  // Within a single transaction that writes multiple documents, this is the order
 diff --git a/crates/database/src/database.rs b/crates/database/src/database.rs
-index 3ed756279..2aedd7b2e 100644
+index 2ccf16dc1..a4a1fcbbe 100644
 --- a/crates/database/src/database.rs
 +++ b/crates/database/src/database.rs
 @@ -54,12 +54,15 @@ use common::{
