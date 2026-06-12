@@ -135,7 +135,7 @@ imagePullSecrets:
       name: {{ include "convex.dbSecretName" . }}
       key: {{ default "db-password" $db.passwordRef.key }}
 - name: POSTGRES_URL
-  value: "postgres://{{ $db.user }}:$(DB_PASSWORD)@{{ required "db.host is required" $db.host }}:{{ $db.port }}"
+  value: "postgres://{{ $db.user }}:$(DB_PASSWORD)@{{ required "db.host is required" $db.host }}:{{ $db.port }}{{- if eq $db.sslMode "disable" }}?sslmode=disable{{- end }}"
 {{- if eq $db.sslMode "disable" }}
 - name: DO_NOT_REQUIRE_SSL
   value: "1"
