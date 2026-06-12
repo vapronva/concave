@@ -1,3 +1,4 @@
+{{- if .Values.ingress.ckic.enabled }}
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -38,3 +39,4 @@ data:
       import reverse-proxy-xri-hd http://{{ include "convex.dashboardName" $ }}.{{ $.Release.Namespace }}.svc.cluster.local:{{ $.Values.dashboard.port }}
     }
     {{- end }}
+{{- end }}

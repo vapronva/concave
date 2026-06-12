@@ -112,6 +112,8 @@ dashboard:
   affinity: {}
 
 ingress:
+  ckic:
+    enabled: true
   usherService:
     name: usher
     namespace: convex-system
