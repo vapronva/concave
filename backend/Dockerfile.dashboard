@@ -1,6 +1,7 @@
 FROM docker.io/library/node:24-trixie-slim AS build
 
-RUN sed --in-place 's!http://deb.debian.org/debian-security!http://mirror.selectel.ru/debian-security!g; s!http://deb.debian.org/debian!http://mirror.selectel.ru/debian!g' /etc/apt/sources.list.d/debian.sources && \
+RUN echo 'Acquire::ForceIPv4 "true";' > /etc/apt/apt.conf.d/99force-ipv4 && \
+      sed --in-place 's!http://deb.debian.org/debian-security!http://mirror.selectel.ru/debian-security!g; s!http://deb.debian.org/debian!http://mirror.selectel.ru/debian!g' /etc/apt/sources.list.d/debian.sources && \
       apt-get update && \
       apt-get install --assume-yes ca-certificates && \
       update-ca-certificates && \
@@ -49,7 +50,8 @@ FROM docker.io/library/node:24-trixie-slim
 
 LABEL org.opencontainers.image.source=https://github.com/get-convex/convex-backend
 
-RUN sed --in-place 's!http://deb.debian.org/debian-security!http://mirror.selectel.ru/debian-security!g; s!http://deb.debian.org/debian!http://mirror.selectel.ru/debian!g' /etc/apt/sources.list.d/debian.sources && \
+RUN echo 'Acquire::ForceIPv4 "true";' > /etc/apt/apt.conf.d/99force-ipv4 && \
+      sed --in-place 's!http://deb.debian.org/debian-security!http://mirror.selectel.ru/debian-security!g; s!http://deb.debian.org/debian!http://mirror.selectel.ru/debian!g' /etc/apt/sources.list.d/debian.sources && \
       apt-get update && \
       apt-get install --assume-yes ca-certificates && \
       update-ca-certificates && \

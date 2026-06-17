@@ -6,6 +6,7 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 RUN --mount=type=cache,target=/var/cache/apt --mount=type=cache,target=/var/lib/apt,sharing=locked <<EOF
 set -o errexit -o nounset -o xtrace
+echo 'Acquire::ForceIPv4 "true";' > /etc/apt/apt.conf.d/99force-ipv4
 sed --in-place 's!http://deb.debian.org/debian-security!http://mirror.selectel.ru/debian-security!g; s!http://deb.debian.org/debian!http://mirror.selectel.ru/debian!g' /etc/apt/sources.list.d/debian.sources
 apt-get update
 apt-get install --assume-yes ca-certificates
@@ -77,6 +78,7 @@ LABEL org.opencontainers.image.source=https://git.horse/vapronva/concave
 
 RUN --mount=type=cache,target=/var/cache/apt --mount=type=cache,target=/var/lib/apt,sharing=locked <<EOF
 set -o errexit -o nounset -o xtrace
+echo 'Acquire::ForceIPv4 "true";' > /etc/apt/apt.conf.d/99force-ipv4
 sed --in-place 's!http://archive.ubuntu.com/ubuntu!http://mirror.selectel.ru/ubuntu!g; s!http://security.ubuntu.com/ubuntu!http://mirror.selectel.ru/ubuntu!g' /etc/apt/sources.list.d/ubuntu.sources
 apt-get update
 apt-get install --assume-yes ca-certificates
