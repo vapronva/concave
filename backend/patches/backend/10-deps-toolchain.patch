@@ -6,7 +6,7 @@ index db49bb14d..b832e4001 100644
 -22.22.2
 +24.16.0
 diff --git a/Cargo.lock b/Cargo.lock
-index 5cb3939c7..8838d2955 100644
+index dc4b223c5..f13f80d9b 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
 @@ -356,7 +356,7 @@ dependencies = [
@@ -18,7 +18,7 @@ index 5cb3939c7..8838d2955 100644
   "http_client",
   "humansize",
   "indexing",
-@@ -639,7 +639,7 @@ dependencies = [
+@@ -640,7 +640,7 @@ dependencies = [
   "derive_more",
   "errors",
   "futures",
@@ -27,7 +27,7 @@ index 5cb3939c7..8838d2955 100644
   "keybroker",
   "metrics",
   "mime",
-@@ -681,7 +681,7 @@ dependencies = [
+@@ -682,7 +682,7 @@ dependencies = [
   "bytes",
   "fastrand",
   "hex",
@@ -36,7 +36,7 @@ index 5cb3939c7..8838d2955 100644
   "ring",
   "time",
   "tokio",
-@@ -745,7 +745,7 @@ dependencies = [
+@@ -746,7 +746,7 @@ dependencies = [
   "bytes-utils",
   "fastrand",
   "http 0.2.12",
@@ -45,7 +45,7 @@ index 5cb3939c7..8838d2955 100644
   "http-body 0.4.6",
   "http-body 1.0.1",
   "percent-encoding",
-@@ -801,7 +801,7 @@ dependencies = [
+@@ -802,7 +802,7 @@ dependencies = [
   "hex",
   "hmac",
   "http 0.2.12",
@@ -54,7 +54,7 @@ index 5cb3939c7..8838d2955 100644
   "http-body 1.0.1",
   "lru 0.16.4",
   "percent-encoding",
-@@ -830,7 +830,7 @@ dependencies = [
+@@ -831,7 +831,7 @@ dependencies = [
   "bytes",
   "fastrand",
   "http 0.2.12",
@@ -63,7 +63,7 @@ index 5cb3939c7..8838d2955 100644
   "regex-lite",
   "tracing",
  ]
-@@ -854,7 +854,7 @@ dependencies = [
+@@ -855,7 +855,7 @@ dependencies = [
   "bytes",
   "fastrand",
   "http 0.2.12",
@@ -72,7 +72,7 @@ index 5cb3939c7..8838d2955 100644
   "regex-lite",
   "tracing",
  ]
-@@ -879,7 +879,7 @@ dependencies = [
+@@ -880,7 +880,7 @@ dependencies = [
   "aws-types",
   "fastrand",
   "http 0.2.12",
@@ -81,7 +81,7 @@ index 5cb3939c7..8838d2955 100644
   "regex-lite",
   "tracing",
  ]
-@@ -901,7 +901,7 @@ dependencies = [
+@@ -902,7 +902,7 @@ dependencies = [
   "hex",
   "hmac",
   "http 0.2.12",
@@ -90,7 +90,7 @@ index 5cb3939c7..8838d2955 100644
   "p256",
   "percent-encoding",
   "ring",
-@@ -934,7 +934,7 @@ dependencies = [
+@@ -935,7 +935,7 @@ dependencies = [
   "bytes",
   "crc-fast",
   "hex",
@@ -99,7 +99,7 @@ index 5cb3939c7..8838d2955 100644
   "http-body 1.0.1",
   "http-body-util",
   "md-5",
-@@ -968,7 +968,7 @@ dependencies = [
+@@ -969,7 +969,7 @@ dependencies = [
   "futures-core",
   "futures-util",
   "http 0.2.12",
@@ -108,7 +108,7 @@ index 5cb3939c7..8838d2955 100644
   "http-body 0.4.6",
   "percent-encoding",
   "pin-project-lite",
-@@ -989,7 +989,7 @@ dependencies = [
+@@ -990,7 +990,7 @@ dependencies = [
   "bytes-utils",
   "futures-core",
   "futures-util",
@@ -117,7 +117,7 @@ index 5cb3939c7..8838d2955 100644
   "http-body 1.0.1",
   "http-body-util",
   "percent-encoding",
-@@ -1008,7 +1008,7 @@ dependencies = [
+@@ -1009,7 +1009,7 @@ dependencies = [
   "aws-smithy-runtime-api",
   "aws-smithy-types",
   "h2",
@@ -126,7 +126,7 @@ index 5cb3939c7..8838d2955 100644
   "hyper",
   "hyper-rustls",
   "hyper-util",
-@@ -1074,7 +1074,7 @@ dependencies = [
+@@ -1075,7 +1075,7 @@ dependencies = [
   "bytes",
   "fastrand",
   "http 0.2.12",
@@ -135,7 +135,7 @@ index 5cb3939c7..8838d2955 100644
   "http-body 0.4.6",
   "http-body 1.0.1",
   "http-body-util",
-@@ -1094,7 +1094,7 @@ dependencies = [
+@@ -1095,7 +1095,7 @@ dependencies = [
   "aws-smithy-types",
   "bytes",
   "http 0.2.12",
@@ -144,7 +144,7 @@ index 5cb3939c7..8838d2955 100644
   "pin-project-lite",
   "tokio",
   "tracing",
-@@ -1112,7 +1112,7 @@ dependencies = [
+@@ -1113,7 +1113,7 @@ dependencies = [
   "bytes-utils",
   "futures-core",
   "http 0.2.12",
@@ -153,7 +153,7 @@ index 5cb3939c7..8838d2955 100644
   "http-body 0.4.6",
   "http-body 1.0.1",
   "http-body-util",
-@@ -1214,7 +1214,7 @@ dependencies = [
+@@ -1215,7 +1215,7 @@ dependencies = [
   "bytes",
   "form_urlencoded",
   "futures-util",
@@ -162,7 +162,7 @@ index 5cb3939c7..8838d2955 100644
   "http-body 1.0.1",
   "http-body-util",
   "hyper",
-@@ -1248,7 +1248,7 @@ checksum = "08c78f31d7b1291f7ee735c1c6780ccde7785daae9a9206026862dab7d8792d1"
+@@ -1249,7 +1249,7 @@ checksum = "08c78f31d7b1291f7ee735c1c6780ccde7785daae9a9206026862dab7d8792d1"
  dependencies = [
   "bytes",
   "futures-core",
@@ -171,7 +171,7 @@ index 5cb3939c7..8838d2955 100644
   "http-body 1.0.1",
   "http-body-util",
   "mime",
-@@ -1271,7 +1271,7 @@ dependencies = [
+@@ -1272,7 +1272,7 @@ dependencies = [
   "cookie",
   "futures-util",
   "headers",
@@ -180,7 +180,34 @@ index 5cb3939c7..8838d2955 100644
   "http-body 1.0.1",
   "http-body-util",
   "mime",
-@@ -2147,7 +2147,7 @@ dependencies = [
+@@ -1485,7 +1485,7 @@ dependencies = [
+  "bitflags 2.10.0",
+  "cexpr",
+  "clang-sys",
+- "itertools 0.13.0",
++ "itertools 0.12.1",
+  "log",
+  "prettyplease",
+  "proc-macro2",
+@@ -2094,7 +2094,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "117725a109d387c937a1533ce01b450cbde6b88abceea8473c4d7a85853cda3c"
+ dependencies = [
+  "lazy_static",
+- "windows-sys 0.59.0",
++ "windows-sys 0.48.0",
+ ]
+ 
+ [[package]]
+@@ -2103,7 +2103,7 @@ version = "3.0.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "fde0e0ec90c9dfb3b4b1a0891a7dcd0e2bffde2f7efed5fe7c9bb00e5bfb915e"
+ dependencies = [
+- "windows-sys 0.59.0",
++ "windows-sys 0.48.0",
+ ]
+ 
+ [[package]]
+@@ -2148,7 +2148,7 @@ dependencies = [
   "governor",
   "headers",
   "hex",
@@ -189,7 +216,7 @@ index 5cb3939c7..8838d2955 100644
   "http-body-util",
   "humansize",
   "hyper",
-@@ -3395,7 +3395,7 @@ version = "0.1.0"
+@@ -3397,7 +3397,7 @@ version = "0.1.0"
  dependencies = [
   "anyhow",
   "cmd_util",
@@ -198,7 +225,34 @@ index 5cb3939c7..8838d2955 100644
   "metrics",
   "prometheus",
   "proptest",
-@@ -3888,6 +3888,7 @@ dependencies = [
+@@ -3658,7 +3658,7 @@ dependencies = [
+  "maplit",
+  "pb_build",
+  "proptest",
+- "prost 0.14.3",
++ "prost 0.14.4",
+  "prost-types",
+  "tonic",
+  "tonic-prost",
+@@ -3690,7 +3690,7 @@ dependencies = [
+  "pretty_assertions",
+  "proptest",
+  "proptest-derive",
+- "prost 0.14.3",
++ "prost 0.14.4",
+  "prost-types",
+  "reqwest",
+  "serde",
+@@ -3721,7 +3721,7 @@ dependencies = [
+  "pretty_assertions",
+  "proptest",
+  "proptest-derive",
+- "prost 0.14.3",
++ "prost 0.14.4",
+  "prost-types",
+  "rand 0.9.4",
+  "reqwest",
+@@ -3890,6 +3890,7 @@ dependencies = [
   "anyhow",
   "async-trait",
   "async_lru",
@@ -206,7 +260,7 @@ index 5cb3939c7..8838d2955 100644
   "common",
   "convex_sync_types",
   "database",
-@@ -3902,19 +3903,65 @@ dependencies = [
+@@ -3904,17 +3905,63 @@ dependencies = [
   "model",
   "moka",
   "parking_lot",
@@ -217,16 +271,16 @@ index 5cb3939c7..8838d2955 100644
   "rand 0.9.4",
   "runtime",
 + "search",
-  "storage",
-  "tokio",
-  "tokio-stream",
++ "storage",
++ "tokio",
++ "tokio-stream",
 + "tonic",
 + "tracing",
-  "udf",
-  "usage_tracking",
-  "value",
- ]
- 
++ "udf",
++ "usage_tracking",
++ "value",
++]
++
 +[[package]]
 +name = "funrun_server"
 +version = "0.1.0"
@@ -251,28 +305,26 @@ index 5cb3939c7..8838d2955 100644
 + "model",
 + "moka",
 + "pb",
-+ "prost 0.14.3",
++ "prost 0.14.4",
 + "reqwest",
 + "runtime",
 + "search",
 + "serde",
 + "serde_json",
-+ "storage",
-+ "tokio",
-+ "tokio-stream",
+  "storage",
+  "tokio",
+  "tokio-stream",
 + "tonic",
 + "tracing",
 + "tracing-subscriber",
-+ "udf",
-+ "usage_tracking",
-+ "value",
+  "udf",
+  "usage_tracking",
+  "value",
 + "vector",
-+]
-+
+ ]
+ 
  [[package]]
- name = "funty"
- version = "2.0.0"
-@@ -4261,7 +4308,7 @@ dependencies = [
+@@ -4263,7 +4310,7 @@ dependencies = [
   "fnv",
   "futures-core",
   "futures-sink",
@@ -281,7 +333,7 @@ index 5cb3939c7..8838d2955 100644
   "indexmap 2.11.4",
   "slab",
   "tokio",
-@@ -4383,7 +4430,7 @@ dependencies = [
+@@ -4385,7 +4432,7 @@ dependencies = [
   "base64 0.21.7",
   "bytes",
   "headers-core",
@@ -290,7 +342,7 @@ index 5cb3939c7..8838d2955 100644
   "httpdate",
   "mime",
   "sha1",
-@@ -4395,7 +4442,7 @@ version = "0.3.0"
+@@ -4397,7 +4444,7 @@ version = "0.3.0"
  source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "54b4a22553d4242c49fddb9ba998a99962b5cc6f22cb5a3482bec22522403ce4"
  dependencies = [
@@ -299,7 +351,7 @@ index 5cb3939c7..8838d2955 100644
  ]
  
  [[package]]
-@@ -4486,12 +4533,11 @@ dependencies = [
+@@ -4488,12 +4535,11 @@ dependencies = [
  
  [[package]]
  name = "http"
@@ -314,7 +366,7 @@ index 5cb3939c7..8838d2955 100644
   "itoa",
  ]
  
-@@ -4513,7 +4559,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -4515,7 +4561,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "1efedce1fb8e6913f23e0c92de8e62cd5b772a67e7b3946df930a62566c93184"
  dependencies = [
   "bytes",
@@ -323,7 +375,7 @@ index 5cb3939c7..8838d2955 100644
  ]
  
  [[package]]
-@@ -4524,7 +4570,7 @@ checksum = "b021d93e26becf5dc7e1b75b1bed1fd93124b374ceb73f43d4d4eafec896a64a"
+@@ -4526,7 +4572,7 @@ checksum = "b021d93e26becf5dc7e1b75b1bed1fd93124b374ceb73f43d4d4eafec896a64a"
  dependencies = [
   "bytes",
   "futures-core",
@@ -332,7 +384,7 @@ index 5cb3939c7..8838d2955 100644
   "http-body 1.0.1",
   "pin-project-lite",
  ]
-@@ -4538,7 +4584,7 @@ dependencies = [
+@@ -4540,7 +4586,7 @@ dependencies = [
   "async-trait",
   "bincode",
   "cacache",
@@ -341,7 +393,7 @@ index 5cb3939c7..8838d2955 100644
   "http-cache-semantics",
   "httpdate",
   "moka",
-@@ -4554,7 +4600,7 @@ checksum = "e076afd9d376f09073b515ce95071b29393687d98ed521948edb899195595ddf"
+@@ -4556,7 +4602,7 @@ checksum = "e076afd9d376f09073b515ce95071b29393687d98ed521948edb899195595ddf"
  dependencies = [
   "anyhow",
   "async-trait",
@@ -350,7 +402,7 @@ index 5cb3939c7..8838d2955 100644
   "http-cache",
   "http-cache-semantics",
   "reqwest",
-@@ -4569,7 +4615,7 @@ version = "2.1.0"
+@@ -4571,7 +4617,7 @@ version = "2.1.0"
  source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "92baf25cf0b8c9246baecf3a444546360a97b569168fdf92563ee6a47829920c"
  dependencies = [
@@ -359,7 +411,7 @@ index 5cb3939c7..8838d2955 100644
   "http-serde",
   "serde",
   "time",
-@@ -4581,7 +4627,7 @@ version = "2.1.1"
+@@ -4583,7 +4629,7 @@ version = "2.1.1"
  source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "0f056c8559e3757392c8d091e796416e4649d8e49e88b8d76df6c002f05027fd"
  dependencies = [
@@ -368,7 +420,7 @@ index 5cb3939c7..8838d2955 100644
   "serde",
  ]
  
-@@ -4637,7 +4683,7 @@ dependencies = [
+@@ -4639,7 +4685,7 @@ dependencies = [
   "futures-channel",
   "futures-core",
   "h2",
@@ -377,7 +429,7 @@ index 5cb3939c7..8838d2955 100644
   "http-body 1.0.1",
   "httparse",
   "httpdate",
-@@ -4656,7 +4702,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -4658,7 +4704,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "5ee4be2c948921a1a5320b629c4193916ed787a7f7f293fd3f7f5a6c9de74155"
  dependencies = [
   "futures-util",
@@ -386,7 +438,7 @@ index 5cb3939c7..8838d2955 100644
   "hyper",
   "hyper-util",
   "rustls",
-@@ -4707,7 +4753,7 @@ dependencies = [
+@@ -4709,7 +4755,7 @@ dependencies = [
   "futures-channel",
   "futures-core",
   "futures-util",
@@ -395,7 +447,16 @@ index 5cb3939c7..8838d2955 100644
   "http-body 1.0.1",
   "hyper",
   "ipnet",
-@@ -5218,7 +5264,7 @@ dependencies = [
+@@ -5080,7 +5126,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "4b0f83760fb341a774ed326568e19f5a863af4a952def8c39f9ab92fd95b88e5"
+ dependencies = [
+  "equivalent",
+- "hashbrown 0.15.2",
++ "hashbrown 0.16.1",
+  "serde",
+  "serde_core",
+ ]
+@@ -5220,7 +5266,7 @@ dependencies = [
   "file_storage",
   "futures",
   "headers",
@@ -404,7 +465,16 @@ index 5cb3939c7..8838d2955 100644
   "http-body-util",
   "humansize",
   "hyper",
-@@ -5668,6 +5714,7 @@ dependencies = [
+@@ -5419,7 +5465,7 @@ dependencies = [
+  "pretty_assertions",
+  "proptest",
+  "proptest-derive",
+- "prost 0.14.3",
++ "prost 0.14.4",
+  "rand 0.9.4",
+  "rsa",
+  "runtime",
+@@ -5671,6 +5717,7 @@ dependencies = [
   "anyhow",
   "application",
   "async-broadcast",
@@ -412,7 +482,7 @@ index 5cb3939c7..8838d2955 100644
   "authentication",
   "axum",
   "axum-extra",
-@@ -5692,7 +5739,7 @@ dependencies = [
+@@ -5695,7 +5742,7 @@ dependencies = [
   "futures",
   "futures-async-stream",
   "governor",
@@ -421,17 +491,17 @@ index 5cb3939c7..8838d2955 100644
   "http-body-util",
   "http_client",
   "hyper-util",
-@@ -5705,7 +5752,9 @@ dependencies = [
+@@ -5708,7 +5755,9 @@ dependencies = [
   "model",
   "node_executor",
   "parking_lot",
 + "pb",
   "proptest",
-+ "prost 0.14.3",
++ "prost 0.14.4",
   "reqwest",
+  "roles",
   "runtime",
-  "search",
-@@ -5787,7 +5836,7 @@ dependencies = [
+@@ -5791,7 +5840,7 @@ dependencies = [
   "errors",
   "futures",
   "hex",
@@ -440,7 +510,7 @@ index 5cb3939c7..8838d2955 100644
   "keybroker",
   "maplit",
   "metrics",
-@@ -6239,7 +6288,7 @@ dependencies = [
+@@ -6243,7 +6292,7 @@ dependencies = [
   "bytes",
   "encoding_rs",
   "futures-util",
@@ -449,7 +519,7 @@ index 5cb3939c7..8838d2955 100644
   "httparse",
   "memchr",
   "mime",
-@@ -6660,7 +6709,7 @@ dependencies = [
+@@ -6664,7 +6713,7 @@ dependencies = [
   "base64 0.22.1",
   "chrono",
   "getrandom 0.2.15",
@@ -458,7 +528,7 @@ index 5cb3939c7..8838d2955 100644
   "rand 0.8.6",
   "reqwest",
   "serde",
-@@ -6719,7 +6768,7 @@ dependencies = [
+@@ -6723,7 +6772,7 @@ dependencies = [
   "base64 0.21.7",
   "chrono",
   "dyn-clone",
@@ -467,7 +537,7 @@ index 5cb3939c7..8838d2955 100644
   "itertools 0.10.5",
   "log",
   "oauth2",
-@@ -6959,7 +7008,7 @@ dependencies = [
+@@ -6963,11 +7012,11 @@ dependencies = [
   "cmd_util",
   "convex_sync_types",
   "errors",
@@ -476,7 +546,21 @@ index 5cb3939c7..8838d2955 100644
   "pb_build",
   "pb_extras",
   "proptest",
-@@ -7498,7 +7547,7 @@ name = "proptest-http"
+- "prost 0.14.3",
++ "prost 0.14.4",
+  "prost-reflect",
+  "prost-types",
+  "tonic",
+@@ -6979,7 +7028,7 @@ dependencies = [
+ name = "pb_build"
+ version = "0.1.0"
+ dependencies = [
+- "prost 0.14.3",
++ "prost 0.14.4",
+  "tonic-prost-build",
+ ]
+ 
+@@ -7502,7 +7551,7 @@ name = "proptest-http"
  version = "0.1.0"
  source = "git+https://github.com/nipunn1313/proptest-http?rev=0e658bd4f6dbb73bdd3be66f0d2c34c00cc3a446#0e658bd4f6dbb73bdd3be66f0d2c34c00cc3a446"
  dependencies = [
@@ -485,7 +569,89 @@ index 5cb3939c7..8838d2955 100644
   "proptest",
  ]
  
-@@ -8028,7 +8077,7 @@ dependencies = [
+@@ -7518,27 +7567,27 @@ dependencies = [
+ 
+ [[package]]
+ name = "prost"
+-version = "0.14.3"
++version = "0.14.4"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "d2ea70524a2f82d518bce41317d0fae74151505651af45faf1ffbd6fd33f0568"
++checksum = "528ac67416ff8646872a3c02cad9cc4ee5dc9f9540c9b10771855c95cb2e5ae1"
+ dependencies = [
+  "bytes",
+- "prost-derive 0.14.3",
++ "prost-derive 0.14.4",
+ ]
+ 
+ [[package]]
+ name = "prost-build"
+-version = "0.14.3"
++version = "0.14.4"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "343d3bd7056eda839b03204e68deff7d1b13aba7af2b2fd16890697274262ee7"
++checksum = "03da047801ff44bb6a4d407d4860c05fd70bb81714e6b2f3812603d5b145b042"
+ dependencies = [
+  "heck",
+- "itertools 0.14.0",
++ "itertools 0.12.1",
+  "log",
+  "multimap",
+  "petgraph 0.8.3",
+  "prettyplease",
+- "prost 0.14.3",
++ "prost 0.14.4",
+  "prost-types",
+  "pulldown-cmark",
+  "pulldown-cmark-to-cmark",
+@@ -7554,7 +7603,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "18bec9b0adc4eba778b33684b7ba3e7137789434769ee3ce3930463ef904cfca"
+ dependencies = [
+  "anyhow",
+- "itertools 0.13.0",
++ "itertools 0.12.1",
+  "proc-macro2",
+  "quote",
+  "syn 2.0.108",
+@@ -7562,12 +7611,12 @@ dependencies = [
+ 
+ [[package]]
+ name = "prost-derive"
+-version = "0.14.3"
++version = "0.14.4"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "27c6023962132f4b30eb4c172c91ce92d933da334c59c23cddee82358ddafb0b"
++checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
+ dependencies = [
+  "anyhow",
+- "itertools 0.14.0",
++ "itertools 0.12.1",
+  "proc-macro2",
+  "quote",
+  "syn 2.0.108",
+@@ -7581,17 +7630,17 @@ checksum = "b89455ef41ed200cafc47c76c552ee7792370ac420497e551f16123a9135f76e"
+ dependencies = [
+  "logos",
+  "miette 7.2.0",
+- "prost 0.14.3",
++ "prost 0.14.4",
+  "prost-types",
+ ]
+ 
+ [[package]]
+ name = "prost-types"
+-version = "0.14.3"
++version = "0.14.4"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "8991c4cbdb8bc5b11f0b074ffe286c30e523de90fee5ba8132f1399f23cb3dd7"
++checksum = "f94967dc7688f3054c7fac87473ffae4cc4c3904800e2d9f5b857246d8963b0a"
+ dependencies = [
+- "prost 0.14.3",
++ "prost 0.14.4",
+ ]
+ 
+ [[package]]
+@@ -8032,7 +8081,7 @@ dependencies = [
   "futures-core",
   "futures-util",
   "h2",
@@ -494,7 +660,7 @@ index 5cb3939c7..8838d2955 100644
   "http-body 1.0.1",
   "http-body-util",
   "hyper",
-@@ -8067,7 +8116,7 @@ checksum = "64e8975513bd9a7a43aad01030e79b3498e05db14e9d945df6483e8cf9b8c4c4"
+@@ -8071,7 +8120,7 @@ checksum = "64e8975513bd9a7a43aad01030e79b3498e05db14e9d945df6483e8cf9b8c4c4"
  dependencies = [
   "anyhow",
   "async-trait",
@@ -503,7 +669,7 @@ index 5cb3939c7..8838d2955 100644
   "reqwest",
   "serde",
   "thiserror 1.0.59",
-@@ -8779,7 +8828,7 @@ version = "0.46.0"
+@@ -8784,7 +8833,7 @@ version = "0.46.0"
  source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "7eec9885bceb8ba374858d015bb6fa39dbb341d94ca088bc8f13bee2e64e2c68"
  dependencies = [
@@ -512,7 +678,19 @@ index 5cb3939c7..8838d2955 100644
   "pin-project",
   "sentry-core",
   "tower-layer",
-@@ -10381,7 +10430,7 @@ dependencies = [
+@@ -10376,9 +10425,9 @@ dependencies = [
+ 
+ [[package]]
+ name = "tonic"
+-version = "0.14.5"
++version = "0.14.6"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "fec7c61a0695dc1887c1b53952990f3ad2e3a31453e1f49f10e75424943a93ec"
++checksum = "ac2a5518c70fa84342385732db33fb3f44bc4cc748936eb5833d2df34d6445ef"
+ dependencies = [
+  "async-trait",
+  "axum",
+@@ -10386,7 +10435,7 @@ dependencies = [
   "bytes",
   "flate2",
   "h2",
@@ -521,7 +699,60 @@ index 5cb3939c7..8838d2955 100644
   "http-body 1.0.1",
   "http-body-util",
   "hyper",
-@@ -10493,7 +10542,7 @@ dependencies = [
+@@ -10408,9 +10457,9 @@ dependencies = [
+ 
+ [[package]]
+ name = "tonic-build"
+-version = "0.14.5"
++version = "0.14.6"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "1882ac3bf5ef12877d7ed57aad87e75154c11931c2ba7e6cde5e22d63522c734"
++checksum = "c68f61875ac5293cf72e6c8cf0158086428c82c37229e98c840878f1706b0322"
+ dependencies = [
+  "prettyplease",
+  "proc-macro2",
+@@ -10420,11 +10469,11 @@ dependencies = [
+ 
+ [[package]]
+ name = "tonic-health"
+-version = "0.14.5"
++version = "0.14.6"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "f4ff0636fef47afb3ec02818f5bceb4377b8abb9d6a386aeade18bd6212f8eb7"
++checksum = "fcfab99db777fba2802f0dfa861d1628d1ae916fb199d29819941f139ae85082"
+ dependencies = [
+- "prost 0.14.3",
++ "prost 0.14.4",
+  "tokio",
+  "tokio-stream",
+  "tonic",
+@@ -10445,20 +10494,20 @@ dependencies = [
+ 
+ [[package]]
+ name = "tonic-prost"
+-version = "0.14.5"
++version = "0.14.6"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "a55376a0bbaa4975a3f10d009ad763d8f4108f067c7c2e74f3001fb49778d309"
++checksum = "50849f68853be452acf590cde0b146665b8d507b3b8af17261df47e02c209ea0"
+ dependencies = [
+  "bytes",
+- "prost 0.14.3",
++ "prost 0.14.4",
+  "tonic",
+ ]
+ 
+ [[package]]
+ name = "tonic-prost-build"
+-version = "0.14.5"
++version = "0.14.6"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "f3144df636917574672e93d0f56d7edec49f90305749c668df5101751bb8f95a"
++checksum = "654e5643eff75d7f8c99197ce1440ed19a3474eada74c12bbac488b2cafdae27"
+ dependencies = [
+  "prettyplease",
+  "proc-macro2",
+@@ -10498,7 +10547,7 @@ dependencies = [
   "axum-core",
   "cookie",
   "futures-util",
@@ -530,7 +761,7 @@ index 5cb3939c7..8838d2955 100644
   "parking_lot",
   "pin-project-lite",
   "tower-layer",
-@@ -10511,7 +10560,7 @@ dependencies = [
+@@ -10516,7 +10565,7 @@ dependencies = [
   "bytes",
   "futures-core",
   "futures-util",
@@ -539,7 +770,16 @@ index 5cb3939c7..8838d2955 100644
   "http-body 1.0.1",
   "http-body-util",
   "iri-string",
-@@ -10659,7 +10708,7 @@ dependencies = [
+@@ -10646,7 +10695,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "69fff37da548239c3bf9e64a12193d261e8b22b660991c6fd2df057c168f435f"
+ dependencies = [
+  "cc",
+- "windows-targets 0.52.6",
++ "windows-targets 0.48.0",
+ ]
+ 
+ [[package]]
+@@ -10664,7 +10713,7 @@ dependencies = [
   "data-encoding",
   "flate2",
   "headers",
@@ -548,7 +788,7 @@ index 5cb3939c7..8838d2955 100644
   "httparse",
   "log",
   "native-tls",
-@@ -10704,7 +10753,7 @@ dependencies = [
+@@ -10709,7 +10758,7 @@ dependencies = [
   "fastrace",
   "futures",
   "headers",
@@ -557,7 +797,7 @@ index 5cb3939c7..8838d2955 100644
   "humansize",
   "keybroker",
   "metrics",
-@@ -10859,7 +10908,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -10865,7 +10914,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "d81f9efa9df032be5934a46a068815a10a042b494b6a58cb0a1a97bb5467ed6f"
  dependencies = [
   "base64 0.22.1",
@@ -566,7 +806,7 @@ index 5cb3939c7..8838d2955 100644
   "httparse",
   "log",
  ]
-@@ -12049,7 +12098,7 @@ dependencies = [
+@@ -12055,7 +12104,7 @@ dependencies = [
   "async-trait",
   "common",
   "errors",
@@ -576,10 +816,10 @@ index 5cb3939c7..8838d2955 100644
   "parking_lot",
   "serde",
 diff --git a/crates/local_backend/Cargo.toml b/crates/local_backend/Cargo.toml
-index aa6c9021e..bfe24e0be 100644
+index 13d8d9a69..6d919d75d 100644
 --- a/crates/local_backend/Cargo.toml
 +++ b/crates/local_backend/Cargo.toml
-@@ -41,6 +41,7 @@ testing = [
+@@ -42,6 +42,7 @@ testing = [
  anyhow = { workspace = true }
  application = { workspace = true }
  async-broadcast = { workspace = true }
@@ -587,21 +827,21 @@ index aa6c9021e..bfe24e0be 100644
  authentication = { workspace = true }
  axum = { workspace = true }
  axum-extra = { workspace = true }
-@@ -75,6 +76,8 @@ metrics = { workspace = true }
+@@ -76,6 +77,8 @@ metrics = { workspace = true }
  model = { workspace = true }
  node_executor = { workspace = true }
  parking_lot = { workspace = true }
 +pb = { workspace = true }
 +prost = { workspace = true }
  reqwest = { workspace = true }
+ roles = { workspace = true }
  runtime = { workspace = true }
- search = { workspace = true }
 diff --git a/rust-toolchain b/rust-toolchain
-index 2a8b1190d..82af430f6 100644
+index 2a8b1190d..90c43910c 100644
 --- a/rust-toolchain
 +++ b/rust-toolchain
 @@ -1,2 +1,3 @@
  [toolchain]
 -channel = "nightly-2026-02-18"
-+channel = "nightly-2026-06-09"
++channel = "nightly-2026-06-17"
 +components = ["rustfmt"]

@@ -29,7 +29,7 @@ index 6c018be51..0b891fcc1 100644
      >
        {children}
 diff --git a/npm-packages/common/config/rush/pnpm-lock.yaml b/npm-packages/common/config/rush/pnpm-lock.yaml
-index 86a913b39..fdf1630ce 100644
+index 7f8f8e463..fafafd6c3 100644
 --- a/npm-packages/common/config/rush/pnpm-lock.yaml
 +++ b/npm-packages/common/config/rush/pnpm-lock.yaml
 @@ -1194,6 +1194,9 @@ importers:

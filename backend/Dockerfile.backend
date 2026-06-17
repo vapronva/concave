@@ -47,8 +47,8 @@ node --version
 npm --version
 EOF
 
-ARG JUST_VERSION=1.51.0
-ARG JUST_SHA256=c8f085ca3e885723c341d06243fc291b5abfdc8bbe3b2c076b117de490387b59
+ARG JUST_VERSION=1.53.0
+ARG JUST_SHA256=7fedeb22c7e14d9ef1551e8b793700866d80f409f9884b0e80ebb65c11d4874d
 
 RUN <<EOF
 set -o errexit -o nounset -o xtrace

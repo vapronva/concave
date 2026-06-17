@@ -38,10 +38,10 @@ index d8ef7d6f1..81bb043dd 100644
 +}
 diff --git a/crates/local_backend/src/usage_forwarder.rs b/crates/local_backend/src/usage_forwarder.rs
 new file mode 100644
-index 000000000..5711183a9
+index 000000000..9d0749048
 --- /dev/null
 +++ b/crates/local_backend/src/usage_forwarder.rs
-@@ -0,0 +1,342 @@
+@@ -0,0 +1,343 @@
 +use async_trait::async_trait;
 +use axum::{
 +    extract::RawQuery,
@@ -61,6 +61,7 @@ index 000000000..5711183a9
 +    register_convex_counter,
 +};
 +use reqwest::Client;
++use roles::RequireDeploymentOp;
 +use tokio::{
 +    sync::{
 +        mpsc,
