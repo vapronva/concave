@@ -16,6 +16,7 @@ image:
 
 usher:
   enabled: true
+  mono: false
   extraEnv: []
   replicas: 2
   listen: :8080

@@ -405,31 +405,32 @@ func TestParseMaxBodyBytes(t *testing.T) {
 func TestValidateConfig(t *testing.T) {
 	t.Parallel()
 	cfg := config{Deployments: []deploymentCfg{{Host: "api.example"}}}
-	if err := validateConfig(cfg, ""); err == nil {
+	if err := validateConfig(cfg, "", false); err == nil {
 		t.Fatal("missing bigbrain URL must fail")
 	}
-	if err := validateConfig(cfg, "http://bigbrain:8081"); err != nil {
+	if err := validateConfig(cfg, "http://bigbrain:8081", false); err != nil {
 		t.Fatalf("valid config rejected: %v", err)
 	}
 	dup := config{Deployments: []deploymentCfg{
 		{Host: "api.example", SiteHost: "site.example"},
 		{Host: "API.EXAMPLE"},
 	}}
-	if err := validateConfig(dup, "http://bigbrain:8081"); err == nil || !strings.Contains(err.Error(), "api.example") {
-		t.Fatalf("duplicate-host error must name the offending host, got %v", err)
+	dupErr := validateConfig(dup, "http://bigbrain:8081", false)
+	if dupErr == nil || !strings.Contains(dupErr.Error(), "api.example") {
+		t.Fatalf("duplicate-host error must name the offending host, got %v", dupErr)
 	}
 	for _, name := range []string{"bad/name", "bad name", "bad%name", "../escape"} {
 		bad := config{Deployments: []deploymentCfg{{Host: "api.example", Name: name}}}
-		if err := validateConfig(bad, "http://bigbrain:8081"); err == nil {
+		if err := validateConfig(bad, "http://bigbrain:8081", false); err == nil {
 			t.Errorf("name %q must be rejected at boot", name)
 		}
 	}
 	emptyDerived := config{Deployments: []deploymentCfg{{Host: ".example"}}}
-	if err := validateConfig(emptyDerived, "http://bigbrain:8081"); err == nil {
+	if err := validateConfig(emptyDerived, "http://bigbrain:8081", false); err == nil {
 		t.Fatal("host yielding an empty derived name must be rejected")
 	}
 	derived := config{Deployments: []deploymentCfg{{Host: "team-app.example.com"}}}
-	if err := validateConfig(derived, "http://bigbrain:8081"); err != nil {
+	if err := validateConfig(derived, "http://bigbrain:8081", false); err != nil {
 		t.Fatalf("derived name rejected: %v", err)
 	}
 }
@@ -798,7 +799,7 @@ func TestNewMux_HealthzOnlyOnUnknownHosts(t *testing.T) {
 	if !tr.setLeader(upstream.URL) {
 		t.Fatal("setLeader should install proxy")
 	}
-	mux := newMux(map[string]route{"api.example": {tracker: tr}})
+	mux := newMux(map[string]route{"api.example": {tracker: tr}}, "")
 	edge := httptest.NewServer(mux)
 	defer edge.Close()
 	resp, err := http.Get(edge.URL + "/usher/healthz")
@@ -832,7 +833,7 @@ func TestNewMux_HealthzOnlyOnUnknownHosts(t *testing.T) {
 func TestNewMux_ReadyzGatesOnFirstResolve(t *testing.T) {
 	t.Parallel()
 	tr := &tracker{host: "api.example", resolveCh: make(chan struct{}, 1), proxyTransport: newProxyTransport()}
-	mux := newMux(map[string]route{"api.example": {tracker: tr}})
+	mux := newMux(map[string]route{"api.example": {tracker: tr}}, "")
 	probe := func(path string) int {
 		rr := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet, path, nil)
@@ -855,7 +856,7 @@ func TestNewMux_ReadyzGatesOnFirstResolve(t *testing.T) {
 func TestNewMux_MethodAndHostGates(t *testing.T) {
 	t.Parallel()
 	tr := &tracker{host: "api.example", resolveCh: make(chan struct{}, 1), proxyTransport: newProxyTransport()}
-	mux := newMux(map[string]route{"api.example": {tracker: tr}})
+	mux := newMux(map[string]route{"api.example": {tracker: tr}}, "")
 	cases := []struct {
 		method, host, path string
 		want               int
@@ -892,7 +893,7 @@ func TestNewMux_HostRoutingPreservesPublicHost(t *testing.T) {
 	if !tr.setLeader(upstream.URL) {
 		t.Fatal("setLeader should install proxy")
 	}
-	mux := newMux(map[string]route{"api.example": {tracker: tr}})
+	mux := newMux(map[string]route{"api.example": {tracker: tr}}, "")
 	edge := httptest.NewServer(mux)
 	defer edge.Close()
 	req, err := http.NewRequest(http.MethodGet, edge.URL+"/api/query", nil)
@@ -951,5 +952,117 @@ func TestServeHTTP_RejectsChunkedOversizedBody(t *testing.T) {
 	case <-tr.resolveCh:
 		t.Fatal("an oversize body must not nudge leader resolution")
 	default:
+	}
+}
+
+func TestValidateConfig_Mono(t *testing.T) {
+	t.Parallel()
+	one := config{Deployments: []deploymentCfg{{Host: "api.example"}}}
+	if err := validateConfig(one, "http://bigbrain:8081", true); err != nil {
+		t.Fatalf("mono with exactly one deployment must pass: %v", err)
+	}
+	two := config{Deployments: []deploymentCfg{{Host: "a.example"}, {Host: "b.example"}}}
+	if err := validateConfig(two, "http://bigbrain:8081", true); err == nil {
+		t.Fatal("mono with two deployments must be rejected")
+	}
+	if err := validateConfig(two, "http://bigbrain:8081", false); err != nil {
+		t.Fatalf("non-mono with two deployments must still pass: %v", err)
+	}
+}
+
+func TestNewMux_MonoRoutesUnknownHostToTheDeployment(t *testing.T) {
+	t.Parallel()
+	var paths []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "upstream-reached")
+	}))
+	defer upstream.Close()
+	tr := &tracker{host: "api.example", resolveCh: make(chan struct{}, 1), proxyTransport: newProxyTransport()}
+	if !tr.setLeader(upstream.URL) {
+		t.Fatal("setLeader should install proxy")
+	}
+	mux := newMux(map[string]route{"api.example": {tracker: tr}}, "api.example")
+	edge := httptest.NewServer(mux)
+	defer edge.Close()
+	do := func(method, path, host string) (int, string) {
+		req, err := http.NewRequest(method, edge.URL+path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Host = host
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		return resp.StatusCode, string(body)
+	}
+	if code, body := do(http.MethodGet, "/api/query", "anything.bogus.invalid"); code != http.StatusOK ||
+		!strings.Contains(body, "upstream-reached") {
+		t.Fatalf("mono: an unconfigured Host must reach the sole deployment, got status=%d body=%q", code, body)
+	}
+	if code, _ := do(http.MethodPost, "/instance/promote", "anything.bogus.invalid"); code != http.StatusNotFound {
+		t.Fatalf("mono: /instance/* must stay blocked on the catch-all (api surface), got %d", code)
+	}
+	if code, _ := do(http.MethodGet, readyzPath, "10.0.0.1:8080"); code != http.StatusServiceUnavailable {
+		t.Fatalf("mono: readyz before first resolve must 503 (not proxy), got %d", code)
+	}
+	tr.resolved.Store(true)
+	for _, p := range []string{healthzPath, readyzPath} {
+		if code, body := do(http.MethodGet, p, "10.0.0.1:8080"); code != http.StatusOK || body != "ok" {
+			t.Fatalf("mono: probe %s must be served by usher, not proxied: status=%d body=%q", p, code, body)
+		}
+	}
+	for _, p := range paths {
+		if p == healthzPath || p == readyzPath {
+			t.Fatalf("mono: probe path %q must never be proxied to the backend", p)
+		}
+	}
+}
+
+func TestNewMux_MonoExactSiteHostStillRoutesToSiteProxy(t *testing.T) {
+	t.Parallel()
+	var gotPath atomic.Value
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath.Store(r.URL.Path)
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "site-reached")
+	}))
+	defer upstream.Close()
+	tr := &tracker{
+		host:           "api.example",
+		siteHost:       "site.example",
+		resolveCh:      make(chan struct{}, 1),
+		proxyTransport: newProxyTransport(),
+	}
+	if !tr.setLeader(upstream.URL) {
+		t.Fatal("setLeader should install proxies")
+	}
+	routes := map[string]route{
+		"api.example":  {tracker: tr},
+		"site.example": {tracker: tr, site: true},
+	}
+	mux := newMux(routes, "api.example")
+	edge := httptest.NewServer(mux)
+	defer edge.Close()
+	req, err := http.NewRequest(http.MethodGet, edge.URL+"/myaction", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Host = "site.example"
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "site-reached") {
+		t.Fatalf("mono: an exact siteHost match must take the site route, got status=%d body=%q", resp.StatusCode, body)
+	}
+	if got, _ := gotPath.Load().(string); got != "/http/myaction" {
+		t.Fatalf("mono: site proxy must prefix /http, upstream path=%q", got)
 	}
 }

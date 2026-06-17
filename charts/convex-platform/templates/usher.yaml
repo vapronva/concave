@@ -4,6 +4,9 @@
 {{- if eq (len $deployments) 0 -}}
 {{- fail "deployments must contain at least one entry when usher.enabled" -}}
 {{- end -}}
+{{- if and $u.mono (ne (len $deployments) 1) -}}
+{{- fail "usher.mono requires exactly one deployments entry" -}}
+{{- end -}}
 {{- if and (not $u.bigbrainUrl) (not .Values.bigbrain.enabled) -}}
 {{- fail "usher.bigbrainUrl is required when bigbrain.enabled=false: usher refuses to start without an absolute bigbrain URL and crash-loops" -}}
 {{- end -}}
@@ -96,6 +99,9 @@ spec:
           args:
             - --config=/etc/usher/config.json
             - --addr={{ $u.listen }}
+            {{- if $u.mono }}
+            - --mono
+            {{- end }}
           {{- $bbUrl := $u.bigbrainUrl }}
           {{- if and (not $bbUrl) .Values.bigbrain.enabled }}
           {{- $bbUrl = printf "http://%s.%s.svc.cluster.local:%s" (include "convex.bigbrainName" .) .Values.namespace.system (include "convex.listenPort" .Values.bigbrain.listen) }}

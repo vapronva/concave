@@ -502,7 +502,7 @@ func newStreamTransport() *http.Transport {
 	return tr
 }
 
-func newMux(routes map[string]route) http.Handler {
+func newMux(routes map[string]route, monoHost string) http.Handler {
 	seen := make(map[*tracker]struct{}, len(routes))
 	trackers := make([]*tracker, 0, len(routes))
 	for _, rt := range routes {
@@ -515,6 +515,9 @@ func newMux(routes map[string]route) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		host := strings.ToLower(stripPort(r.Host))
 		rt, ok := routes[host]
+		if !ok && monoHost != "" && !isProbePath(r.URL.Path) {
+			rt, ok = routes[monoHost]
+		}
 		if !ok {
 			serveProbe(w, r, trackers)
 			return
@@ -523,8 +526,12 @@ func newMux(routes map[string]route) http.Handler {
 	})
 }
 
+func isProbePath(p string) bool {
+	return p == healthzPath || p == readyzPath
+}
+
 func serveProbe(w http.ResponseWriter, r *http.Request, trackers []*tracker) {
-	if r.URL.Path != healthzPath && r.URL.Path != readyzPath {
+	if !isProbePath(r.URL.Path) {
 		http.Error(w, "unknown deployment host", http.StatusNotFound)
 		return
 	}
@@ -552,6 +559,11 @@ func main() {
 		env("USHER_BIGBRAIN_URL", ""),
 		"bigbrain base URL (e.g. http://bigbrain.convex-system.svc.cluster.local:8081)",
 	)
+	mono := flag.Bool(
+		"mono",
+		envBool("USHER_MONO"),
+		"route every request to the single configured deployment regardless of Host (requires exactly one deployment)",
+	)
 	flag.Parse()
 	data, err := os.ReadFile(*cfgPath)
 	if err != nil {
@@ -561,7 +573,7 @@ func main() {
 	if err = json.Unmarshal(data, &cfg); err != nil {
 		log.Fatalf("parse config: %v", err)
 	}
-	if err = validateConfig(cfg, *bigbrainURL); err != nil {
+	if err = validateConfig(cfg, *bigbrainURL, *mono); err != nil {
 		log.Fatalf("invalid config: %v", err)
 	}
 	connIdle, err := parseConnIdle(os.Getenv("USHER_CONN_IDLE_TIMEOUT"))
@@ -587,7 +599,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("usher: listen %s: %v", *addr, err)
 	}
-	os.Exit(run(cfg, *addr, *bigbrainURL, connIdle, streamIdle, maxBody, rawLn))
+	os.Exit(run(cfg, *addr, *bigbrainURL, connIdle, streamIdle, maxBody, *mono, rawLn))
 }
 
 func run(
@@ -595,23 +607,28 @@ func run(
 	addr, bigbrainURL string,
 	connIdle, streamIdle time.Duration,
 	maxBody int64,
+	mono bool,
 	rawLn net.Listener,
 ) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	client := &http.Client{Timeout: httpClientTimeout}
 	routes := make(map[string]route, len(cfg.Deployments)*routesPerDeployment)
+	var monoHost string
 	for _, d := range cfg.Deployments {
 		t := startTracker(ctx, client, bigbrainURL, maxBody, streamIdle, d)
 		routes[strings.ToLower(d.Host)] = route{tracker: t}
 		if d.SiteHost != "" {
 			routes[strings.ToLower(d.SiteHost)] = route{tracker: t, site: true}
 		}
+		if mono {
+			monoHost = strings.ToLower(d.Host)
+		}
 	}
 	log.Printf("usher listening on %s, %d deployment(s), bigbrain=%q", addr, len(cfg.Deployments), bigbrainURL)
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           newMux(routes),
+		Handler:           newMux(routes, monoHost),
 		ReadHeaderTimeout: readHeaderTimeout,
 		IdleTimeout:       idleTimeout,
 		MaxHeaderBytes:    maxHeaderBytes,
@@ -722,16 +739,23 @@ func (c *activityConn) watch(ctx context.Context, idle time.Duration) {
 	}
 }
 
-func validateConfig(cfg config, bigbrainURL string) error {
+func validateConfig(cfg config, bigbrainURL string, mono bool) error {
 	if len(cfg.Deployments) == 0 {
 		return errors.New("at least one deployment must be configured")
+	}
+	if mono && len(cfg.Deployments) != 1 {
+		return errors.New("mono mode requires exactly one deployment")
 	}
 	u, err := url.ParseRequestURI(bigbrainURL)
 	if err != nil || u.Scheme == "" || u.Host == "" {
 		return errors.New("USHER_BIGBRAIN_URL must be an absolute URL")
 	}
-	hosts := make(map[string]struct{}, len(cfg.Deployments)*routesPerDeployment)
-	for _, d := range cfg.Deployments {
+	return validateDeployments(cfg.Deployments)
+}
+
+func validateDeployments(deployments []deploymentCfg) error {
+	hosts := make(map[string]struct{}, len(deployments)*routesPerDeployment)
+	for _, d := range deployments {
 		if d.Host == "" {
 			return errors.New("deployment host must not be empty")
 		}
@@ -803,6 +827,11 @@ func env(k, d string) string {
 		return v
 	}
 	return d
+}
+
+func envBool(k string) bool {
+	b, _ := strconv.ParseBool(os.Getenv(k))
+	return b
 }
 
 func stripPort(host string) string {
