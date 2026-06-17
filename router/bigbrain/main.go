@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -84,8 +85,8 @@ func run() int {
 		return 1
 	}
 	cfg := electionCfg()
-	actuation := resolvedActuation(cfg)
 	ctrl := election.New(cfg, k8s, backend.New(controlPlaneTokens), reg, log)
+	actuation := ctrl.ActuationTimeout()
 	ins := insights.New(*insightsRingCap)
 	srv := server.New(reg, ins, usageTokens, log)
 	if len(usageTokens) == 0 {
@@ -104,7 +105,7 @@ func run() int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	ctrlDone := runController(ctx, ctrl)
-	startMetricsAPIServer(ctx, stop, k8s, reg, *labelPrefix, log)
+	metricsDone := startMetricsAPIServer(ctx, stop, k8s, reg, *labelPrefix, log)
 	var listenFailed atomic.Bool
 	go func() {
 		log.Info("bigbrain: listening", "addr", *addr)
@@ -115,7 +116,7 @@ func run() int {
 		}
 	}()
 	<-ctx.Done()
-	shutdown(httpSrv, srv, ctrlDone, actuation+actuationDrainSlack, log)
+	shutdown(httpSrv, srv, ctrlDone, metricsDone, actuation+actuationDrainSlack, log)
 	if listenFailed.Load() {
 		return 1
 	}
@@ -161,13 +162,6 @@ func electionFlags(fs *flag.FlagSet) func() election.Config {
 	}
 }
 
-func resolvedActuation(cfg election.Config) time.Duration {
-	if cfg.ActuationTimeout != nil && *cfg.ActuationTimeout > 0 {
-		return *cfg.ActuationTimeout
-	}
-	return election.DefaultActuationTimeout
-}
-
 func knob[T any](envSet bool, name string, passed map[string]bool, v *T) *T {
 	if envSet || passed[name] {
 		return v
@@ -178,7 +172,7 @@ func knob[T any](envSet bool, name string, passed map[string]bool, v *T) *T {
 func shutdown(
 	httpSrv *http.Server,
 	srv *server.Server,
-	ctrlDone <-chan struct{},
+	ctrlDone, metricsDone <-chan struct{},
 	actuationDrain time.Duration,
 	log *slog.Logger,
 ) {
@@ -195,6 +189,12 @@ func shutdown(
 	case <-ctrlDone:
 	case <-drainCtx.Done():
 		log.Error("bigbrain: election shutdown timed out", "err", drainCtx.Err())
+	}
+	if metricsDone != nil {
+		select {
+		case <-metricsDone:
+		case <-drainCtx.Done():
+		}
 	}
 }
 
@@ -214,9 +214,9 @@ func startMetricsAPIServer(
 	reg *registry.Registry,
 	labelPrefix string,
 	log *slog.Logger,
-) {
+) <-chan struct{} {
 	if enabled, _ := envBool("BIGBRAIN_METRICS_APISERVER_ENABLED", false); !enabled {
-		return
+		return nil
 	}
 	prov := apiserver.NewProvider()
 	seen := make(map[string]struct{}, len(reg.Names()))
@@ -230,20 +230,29 @@ func startMetricsAPIServer(
 		}
 	}
 	scrapeInterval, _ := envDuration("BIGBRAIN_METRICS_SCRAPE_INTERVAL", defaultMetricsScrapeInterval)
-	go apiserver.NewScraper(k8s.Clientset(), labelPrefix, namespaces, prov, scrapeInterval, log).Run(ctx)
 	securePort, _ := envInt("BIGBRAIN_METRICS_APISERVER_PORT", defaultMetricsAPIServerPort)
 	cfg := apiserver.Config{
 		SecurePort: securePort,
 		CertDir:    env("BIGBRAIN_METRICS_APISERVER_CERT_DIR", defaultMetricsAPIServerCertDir),
 	}
-	go func() {
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		apiserver.NewScraper(k8s.Clientset(), labelPrefix, namespaces, prov, scrapeInterval, log).Run(ctx)
+	})
+	wg.Go(func() {
 		if aerr := apiserver.Run(ctx, cfg, prov, log); aerr != nil {
 			log.ErrorContext(ctx, "bigbrain: custom-metrics apiserver exited", "err", aerr)
 			stop()
 		}
+	})
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
 	}()
 	log.InfoContext(ctx, "bigbrain: custom-metrics apiserver enabled",
 		"port", cfg.SecurePort, "scrapeInterval", scrapeInterval.String())
+	return done
 }
 
 func loadDeploymentTokens(

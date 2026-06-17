@@ -17,7 +17,7 @@ import (
 )
 
 func (t *tracker) setLeader(leaderURL string) bool {
-	return t.applyLeader(leaderURL, 0)
+	return t.applyLeader(leaderURL, 0, 0)
 }
 
 func TestIsBlockedControlPath(t *testing.T) {
@@ -672,7 +672,7 @@ func TestLeaderSeqOrdering_StalePollAfterNewerStream(t *testing.T) {
 func TestApplyLeader_SeqZeroAlwaysApplies(t *testing.T) {
 	t.Parallel()
 	tr := &tracker{host: "api.example", proxyTransport: newProxyTransport()}
-	if !tr.applyLeader("http://10.0.0.1:3210", 10) {
+	if !tr.applyLeader("http://10.0.0.1:3210", 10, 0) {
 		t.Fatal("seq 10 should install the leader")
 	}
 	if !tr.setLeader("http://10.0.0.2:3210") {
@@ -686,14 +686,34 @@ func TestApplyLeader_SeqZeroAlwaysApplies(t *testing.T) {
 func TestApplyLeader_BadURLDoesNotConsumeSeq(t *testing.T) {
 	t.Parallel()
 	tr := &tracker{host: "api.example", proxyTransport: newProxyTransport()}
-	if tr.applyLeader("http://[::1]:namedport", 7) {
+	if tr.applyLeader("http://[::1]:namedport", 7, 0) {
 		t.Fatal("an unparseable leader URL must not apply")
 	}
-	if !tr.applyLeader("http://10.0.0.1:3210", 7) {
+	if !tr.applyLeader("http://10.0.0.1:3210", 7, 0) {
 		t.Fatal("the rejected event must not consume seq 7; a follow-up with the same seq must apply")
 	}
 	if got := leaderSnapshot(tr); got != "http://10.0.0.1:3210" {
 		t.Fatalf("leader=%q want the seq-7 applied URL", got)
+	}
+}
+
+func TestApplyLeader_EpochChangeResetsSeqHighWater(t *testing.T) {
+	t.Parallel()
+	tr := &tracker{host: "api.example", proxyTransport: newProxyTransport()}
+	if !tr.applyLeader("http://10.0.0.1:3210", 5, 100) {
+		t.Fatal("epoch 100 seq 5 should install the leader")
+	}
+	if tr.applyLeader("http://10.0.0.2:3210", 3, 100) {
+		t.Fatal("a lower seq within the same epoch must be rejected")
+	}
+	if got := leaderSnapshot(tr); got != "http://10.0.0.1:3210" {
+		t.Fatalf("leader=%q want the epoch-100 seq-5 URL after a rejected same-epoch event", got)
+	}
+	if !tr.applyLeader("http://10.0.0.2:3210", 3, 200) {
+		t.Fatal("a new epoch (bigbrain restart) must reset the seq high-water and adopt even a lower seq")
+	}
+	if got := leaderSnapshot(tr); got != "http://10.0.0.2:3210" {
+		t.Fatalf("leader=%q want the epoch-200 URL after the epoch change", got)
 	}
 }
 
@@ -806,6 +826,29 @@ func TestNewMux_HealthzOnlyOnUnknownHosts(t *testing.T) {
 	}
 	if len(paths) != 1 || paths[0] != "/usher/healthz" {
 		t.Fatalf("upstream paths=%v want exactly [/usher/healthz]", paths)
+	}
+}
+
+func TestNewMux_ReadyzGatesOnFirstResolve(t *testing.T) {
+	t.Parallel()
+	tr := &tracker{host: "api.example", resolveCh: make(chan struct{}, 1), proxyTransport: newProxyTransport()}
+	mux := newMux(map[string]route{"api.example": {tracker: tr}})
+	probe := func(path string) int {
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Host = "probe.invalid"
+		mux.ServeHTTP(rr, req)
+		return rr.Code
+	}
+	if got := probe(readyzPath); got != http.StatusServiceUnavailable {
+		t.Fatalf("readyz before first resolve: want 503, got %d", got)
+	}
+	if got := probe(healthzPath); got != http.StatusOK {
+		t.Fatalf("healthz must stay 200 for liveness regardless of resolve state, got %d", got)
+	}
+	tr.resolved.Store(true)
+	if got := probe(readyzPath); got != http.StatusOK {
+		t.Fatalf("readyz after first resolve completes: want 200, got %d", got)
 	}
 }
 

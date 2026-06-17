@@ -35,12 +35,12 @@ func (c *Controller) actFailback(
 	incumbent string,
 	target observation,
 ) {
-	if !c.tryAcquire(st) {
+	if !c.tryAcquire(&st.promoting) {
 		return
 	}
 	base := context.WithoutCancel(ctx)
-	c.actWG.Go(func() {
-		defer c.release(st)
+	c.actGo(name, func() {
+		defer c.release(&st.promoting)
 		c.log.InfoContext(base, "election: failback: promoting higher-priority pod over incumbent",
 			"deployment", name, "promoting", target.be.Pod, "over", incumbent,
 			"candidatePriority", target.be.Priority, "candidateLatestTs", target.status.LatestTS)
@@ -91,14 +91,14 @@ func (c *Controller) actLeaderless(
 			"deployment", name, "streak", streak)
 		return
 	}
-	if !c.tryAcquire(st) {
+	if !c.tryAcquire(&st.promoting) {
 		return
 	}
 	c.setLeader(name, st, "", "")
 	target := *d.promoteTarget
 	base := context.WithoutCancel(ctx)
-	c.actWG.Go(func() {
-		defer c.release(st)
+	c.actGo(name, func() {
+		defer c.release(&st.promoting)
 		c.log.InfoContext(base, "election: promoting preferred warm standby",
 			"deployment", name, "pod", target.be.Pod,
 			"priority", target.be.Priority, "latestTs", target.status.LatestTS)
@@ -134,12 +134,12 @@ func (c *Controller) runActions(ctx context.Context, name string, st *deployment
 	if len(actions) == 0 {
 		return
 	}
-	if !c.tryAcquire(st) {
+	if !c.tryAcquire(&st.demoting) {
 		return
 	}
 	base := context.WithoutCancel(ctx)
-	c.actWG.Go(func() {
-		defer c.release(st)
+	c.actGo(name, func() {
+		defer c.release(&st.demoting)
 		actx, cancel := context.WithTimeout(base, c.cfg.actuationTimeout)
 		defer cancel()
 		for _, a := range actions {
@@ -182,18 +182,29 @@ func (c *Controller) setLeader(name string, st *deploymentState, pod, url string
 	c.reg.Update(name, pod, url)
 }
 
-func (c *Controller) tryAcquire(st *deploymentState) bool {
+func (c *Controller) tryAcquire(flag *bool) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if st.inflight {
+	if *flag {
 		return false
 	}
-	st.inflight = true
+	*flag = true
 	return true
 }
 
-func (c *Controller) release(st *deploymentState) {
+func (c *Controller) release(flag *bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	st.inflight = false
+	*flag = false
+}
+
+func (c *Controller) actGo(name string, fn func()) {
+	c.actWG.Go(func() {
+		defer func() {
+			if r := recover(); r != nil {
+				c.log.Error("election: actuation panicked; recovered", "deployment", name, "panic", r)
+			}
+		}()
+		fn()
+	})
 }

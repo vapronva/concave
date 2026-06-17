@@ -30,11 +30,10 @@ func TestRegistry_SeqMonotonicPerDistinctLeaderState(t *testing.T) {
 	t.Parallel()
 	r := registry.New()
 	r.EnsureDeployment("dev", "convex-dev")
-	floor := uint64(time.Now().UnixNano())
 	r.Update("dev", "backend-0", "http://a:3210")
 	_, _, seq1, _ := r.Leader("dev")
-	if seq1 < floor {
-		t.Fatalf("seq must be clock-seeded for cross-restart monotonicity: %d < %d", seq1, floor)
+	if seq1 == 0 {
+		t.Fatalf("a published leader must carry a non-zero seq, got %d", seq1)
 	}
 	r.Update("dev", "backend-0", "http://a:3210")
 	if _, _, seq2, _ := r.Leader("dev"); seq2 != seq1 {
@@ -80,6 +79,32 @@ func TestRegistry_EventsCarrySeq(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("expected a leader-change event")
+	}
+}
+
+func TestRegistry_EventsCarryEpoch(t *testing.T) {
+	t.Parallel()
+	r := registry.New()
+	r.EnsureDeployment("dev", "convex-dev")
+	if r.Epoch() == 0 {
+		t.Fatal("registry epoch must be a non-zero per-process nonce")
+	}
+	ch, cancel, ok := r.Subscribe("dev")
+	if !ok {
+		t.Fatal("subscribe failed")
+	}
+	defer cancel()
+	r.Update("dev", "backend-0", "http://a:3210")
+	select {
+	case ev := <-ch:
+		if ev.Epoch != r.Epoch() {
+			t.Fatalf("event epoch %d must match registry epoch %d", ev.Epoch, r.Epoch())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected a leader event")
+	}
+	if registry.New().Epoch() == r.Epoch() {
+		t.Fatal("a fresh registry (a bigbrain restart) must carry a distinct epoch")
 	}
 }
 

@@ -115,7 +115,7 @@ spec:
           volumeMounts:
             - { name: config, mountPath: /etc/usher }
           readinessProbe:
-            httpGet: { path: /usher/healthz, port: http }
+            httpGet: { path: /usher/readyz, port: http }
             initialDelaySeconds: 2
             periodSeconds: 10
           livenessProbe:

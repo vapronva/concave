@@ -74,6 +74,23 @@ func TestCommitState_UnreachableIncumbentGraceExpiry(t *testing.T) {
 	}
 }
 
+func TestCommitState_EmptyDiscoveryDoesNotRestartUnreachableGrace(t *testing.T) {
+	t.Parallel()
+	c := New(Config{UnreachableLeaderGrace: new(60 * time.Second)}, nil, nil, registry.New(), quietLogger())
+	st := c.deploymentState("dev")
+	base := time.Now()
+	unreachable := decision{liveLeaderCount: 0, incumbentUnreachable: true}
+	if _, _, retain := c.commitState(st, unreachable, false, base); !retain {
+		t.Fatal("grace must start on the first unreachable observation")
+	}
+	c.commitState(st, decision{liveLeaderCount: 0}, true, base.Add(10*time.Second))
+	if _, _, retain := c.commitState(st, unreachable, false, base.Add(61*time.Second)); retain {
+		t.Fatal(
+			"an empty-discovery blip must not restart the grace anchor; grace must still expire 60s after the first unreachable observation",
+		)
+	}
+}
+
 func TestActLeaderless_EmptyListDoesNotAdvanceStreak(t *testing.T) {
 	t.Parallel()
 	reg := registry.New()
@@ -121,7 +138,7 @@ func TestActLeaderless_RetainsLeaderWhenPromotionBlockedByInflight(t *testing.T)
 	c := New(Config{PromoteDebounce: new(debounce)}, nil, nil, reg, quietLogger())
 	st := c.deploymentState("prod")
 	c.setLeader("prod", st, "backend-0", "http://10.0.0.1:3210")
-	st.inflight = true
+	st.promoting = true
 	d := decision{liveLeaderCount: 0, promoteTarget: &observation{}}
 	c.actLeaderless(context.Background(), "prod", st, d, debounce, false)
 	if pod, ok := leaderOf(t, reg, "prod"); !ok || pod != "backend-0" {

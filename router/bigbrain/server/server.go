@@ -168,10 +168,14 @@ func (s *Server) handleGetLeader(w http.ResponseWriter, r *http.Request) {
 	}
 	pod, url, seq, ok := s.reg.Leader(name)
 	if !ok {
-		writeJSON(w, http.StatusServiceUnavailable, registry.LeaderEvent{Name: name, Seq: seq})
+		writeJSON(w, http.StatusServiceUnavailable, registry.LeaderEvent{Name: name, Seq: seq, Epoch: s.reg.Epoch()})
 		return
 	}
-	writeJSON(w, http.StatusOK, registry.LeaderEvent{Name: name, LeaderPod: pod, LeaderURL: url, Seq: seq})
+	writeJSON(
+		w,
+		http.StatusOK,
+		registry.LeaderEvent{Name: name, LeaderPod: pod, LeaderURL: url, Seq: seq, Epoch: s.reg.Epoch()},
+	)
 }
 
 func (s *Server) handleLeaderStream(w http.ResponseWriter, r *http.Request) {
@@ -192,7 +196,13 @@ func (s *Server) handleLeaderStream(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	if s.reg.Published(name) {
 		pod, url, seq, _ := s.reg.Leader(name)
-		if !emitFrame(w, rc, leaderFrame(registry.LeaderEvent{Name: name, LeaderPod: pod, LeaderURL: url, Seq: seq})) {
+		if !emitFrame(
+			w,
+			rc,
+			leaderFrame(
+				registry.LeaderEvent{Name: name, LeaderPod: pod, LeaderURL: url, Seq: seq, Epoch: s.reg.Epoch()},
+			),
+		) {
 			return
 		}
 	}
@@ -242,15 +252,16 @@ func emitFrame(w http.ResponseWriter, rc *http.ResponseController, frame []byte)
 	return rc.Flush() == nil
 }
 
-func quietPath(path string) bool {
-	if path == "/healthz" || path == "/readyz" {
+func quietPattern(pattern string) bool {
+	switch pattern {
+	case "GET /healthz",
+		"GET /readyz",
+		"GET /registry/deployments/{name}/leader",
+		"GET /registry/deployments/{name}/leader-stream":
 		return true
-	}
-	rest, ok := strings.CutPrefix(path, "/registry/deployments/")
-	if !ok {
+	default:
 		return false
 	}
-	return strings.HasSuffix(rest, "/leader") || strings.HasSuffix(rest, "/leader-stream")
 }
 
 func logging(log *slog.Logger, next http.Handler) http.Handler {
@@ -259,7 +270,7 @@ func logging(log *slog.Logger, next http.Handler) http.Handler {
 		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(sw, r)
 		level := slog.LevelInfo
-		if quietPath(r.URL.Path) {
+		if quietPattern(r.Pattern) {
 			level = slog.LevelDebug
 		}
 		log.Log(

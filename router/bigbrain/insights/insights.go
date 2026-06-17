@@ -74,7 +74,6 @@ type Insights struct {
 type deploymentRows struct {
 	rows  []Row
 	start int
-	size  int
 }
 
 func New(ringCap int) *Insights {
@@ -111,7 +110,6 @@ func (i *Insights) store(r Row) {
 	}
 	if len(dep.rows) < i.cap {
 		dep.rows = append(dep.rows, r)
-		dep.size++
 		return
 	}
 	dep.rows[dep.start] = r
@@ -126,7 +124,7 @@ func (i *Insights) rows(deployment string, fromMs, toMs int64) []Row {
 	if dep == nil {
 		return nil
 	}
-	for n := range dep.size {
+	for n := range len(dep.rows) {
 		r := dep.rows[(dep.start+n)%len(dep.rows)]
 		ms := r.TS.UnixMilli()
 		if ms >= fromMs && ms < toMs {

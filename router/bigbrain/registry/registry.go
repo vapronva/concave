@@ -1,8 +1,9 @@
 package registry
 
 import (
+	"crypto/rand"
+	"encoding/binary"
 	"sync"
-	"time"
 )
 
 type Deployment struct {
@@ -14,9 +15,10 @@ type Deployment struct {
 }
 
 type Registry struct {
-	mu   sync.RWMutex
-	deps map[string]*Deployment
-	subs map[string]map[chan LeaderEvent]struct{}
+	mu    sync.RWMutex
+	epoch uint64
+	deps  map[string]*Deployment
+	subs  map[string]map[chan LeaderEvent]struct{}
 }
 
 type LeaderEvent struct {
@@ -24,6 +26,7 @@ type LeaderEvent struct {
 	LeaderPod string `json:"leaderPod"`
 	LeaderURL string `json:"leaderUrl"`
 	Seq       uint64 `json:"seq"`
+	Epoch     uint64 `json:"epoch"`
 }
 
 const (
@@ -33,9 +36,23 @@ const (
 
 func New() *Registry {
 	return &Registry{
-		deps: make(map[string]*Deployment),
-		subs: make(map[string]map[chan LeaderEvent]struct{}),
+		epoch: newEpoch(),
+		deps:  make(map[string]*Deployment),
+		subs:  make(map[string]map[chan LeaderEvent]struct{}),
 	}
+}
+
+func newEpoch() uint64 {
+	var b [8]byte
+	_, _ = rand.Read(b[:])
+	if e := binary.LittleEndian.Uint64(b[:]); e != 0 {
+		return e
+	}
+	return 1
+}
+
+func (r *Registry) Epoch() uint64 {
+	return r.epoch
 }
 
 func (r *Registry) EnsureDeployment(name, ns string) {
@@ -80,8 +97,8 @@ func (r *Registry) Update(name, leaderPod, leaderURL string) {
 	if !changed {
 		return
 	}
-	d.seq = max(d.seq+1, uint64(time.Now().UnixNano()))
-	ev := LeaderEvent{Name: name, LeaderPod: leaderPod, LeaderURL: leaderURL, Seq: d.seq}
+	d.seq++
+	ev := LeaderEvent{Name: name, LeaderPod: leaderPod, LeaderURL: leaderURL, Seq: d.seq, Epoch: r.epoch}
 	for ch := range r.subs[name] {
 		select {
 		case ch <- ev:

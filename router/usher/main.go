@@ -33,6 +33,7 @@ const (
 	resolveTimeout        = 3 * time.Second
 	resolveInterval       = 60 * time.Second
 	forcedResolveInterval = 1 * time.Second
+	fastResolveInterval   = 5 * time.Second
 	readHeaderTimeout     = 10 * time.Second
 	idleTimeout           = 120 * time.Second
 	shutdownTimeout       = 10 * time.Second
@@ -42,6 +43,7 @@ const (
 	streamIdleTimeout     = 75 * time.Second
 	instancePrefix        = "/instance"
 	healthzPath           = "/usher/healthz"
+	readyzPath            = "/usher/readyz"
 	routesPerDeployment   = 2
 	maxHeaderBytes        = 64 * 1024
 	defaultConnIdle       = time.Hour
@@ -63,6 +65,7 @@ type config struct {
 type leaderResponse struct {
 	LeaderURL string `json:"leaderUrl"`
 	Seq       uint64 `json:"seq"`
+	Epoch     uint64 `json:"epoch"`
 }
 
 type route struct {
@@ -86,8 +89,10 @@ type tracker struct {
 	pollGate       stateGate
 	streamGate     stateGate
 	eventGate      stateGate
+	resolved       atomic.Bool
 	mu             sync.RWMutex
 	lastAppliedSeq uint64
+	lastEpoch      uint64
 	leaderURL      string
 	proxy          *httputil.ReverseProxy
 	siteProxy      *httputil.ReverseProxy
@@ -169,7 +174,7 @@ func newReverseProxy(u *url.URL, nudge func(), tr *http.Transport) *httputil.Rev
 	return rp
 }
 
-func (t *tracker) applyLeader(leaderURL string, seq uint64) bool {
+func (t *tracker) applyLeader(leaderURL string, seq, epoch uint64) bool {
 	var u *url.URL
 	var err error
 	if leaderURL != "" {
@@ -181,6 +186,10 @@ func (t *tracker) applyLeader(leaderURL string, seq uint64) bool {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if epoch != 0 && epoch != t.lastEpoch {
+		t.lastEpoch = epoch
+		t.lastAppliedSeq = 0
+	}
 	if seq != 0 {
 		if seq <= t.lastAppliedSeq {
 			return false
@@ -218,6 +227,7 @@ func (t *tracker) currentLeader(site bool) *httputil.ReverseProxy {
 }
 
 func (t *tracker) resolveOnce(ctx context.Context) {
+	defer t.resolved.Store(true)
 	lr, hasLeader, err := t.queryBigbrain(ctx)
 	if err != nil {
 		if !errors.Is(ctx.Err(), context.Canceled) && t.pollGate.fail() {
@@ -229,10 +239,10 @@ func (t *tracker) resolveOnce(ctx context.Context) {
 		log.Printf("usher: %s leader poll recovered", t.host)
 	}
 	if !hasLeader {
-		t.applyLeader("", lr.Seq)
+		t.applyLeader("", lr.Seq, lr.Epoch)
 		return
 	}
-	t.applyLeader(lr.LeaderURL, lr.Seq)
+	t.applyLeader(lr.LeaderURL, lr.Seq, lr.Epoch)
 }
 
 func (t *tracker) queryBigbrain(ctx context.Context) (leaderResponse, bool, error) {
@@ -349,7 +359,7 @@ func (t *tracker) handleStreamLine(line string) {
 		return
 	}
 	t.eventGate.ok()
-	t.applyLeader(ev.LeaderURL, ev.Seq)
+	t.applyLeader(ev.LeaderURL, ev.Seq, ev.Epoch)
 }
 
 func (t *tracker) logStreamEnd(ctx, sctx context.Context, scanErr error, idle time.Duration) {
@@ -439,7 +449,7 @@ func startTracker(
 }
 
 func (t *tracker) resolveLoop(ctx context.Context) {
-	tick := time.NewTicker(resolveInterval)
+	tick := time.NewTicker(t.pollInterval())
 	defer tick.Stop()
 	t.resolveWithTimeout(ctx)
 	for {
@@ -451,7 +461,15 @@ func (t *tracker) resolveLoop(ctx context.Context) {
 		case <-tick.C:
 			t.resolveWithTimeout(ctx)
 		}
+		tick.Reset(t.pollInterval())
 	}
+}
+
+func (t *tracker) pollInterval() time.Duration {
+	if t.streamGate.down.Load() {
+		return fastResolveInterval
+	}
+	return resolveInterval
 }
 
 func (t *tracker) resolveWithTimeout(ctx context.Context) {
@@ -485,24 +503,45 @@ func newStreamTransport() *http.Transport {
 }
 
 func newMux(routes map[string]route) http.Handler {
+	seen := make(map[*tracker]struct{}, len(routes))
+	trackers := make([]*tracker, 0, len(routes))
+	for _, rt := range routes {
+		if _, dup := seen[rt.tracker]; dup {
+			continue
+		}
+		seen[rt.tracker] = struct{}{}
+		trackers = append(trackers, rt.tracker)
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		host := strings.ToLower(stripPort(r.Host))
 		rt, ok := routes[host]
 		if !ok {
-			if r.URL.Path == healthzPath {
-				if r.Method != http.MethodGet && r.Method != http.MethodHead {
-					http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-					return
-				}
-				w.WriteHeader(http.StatusOK)
-				_, _ = io.WriteString(w, "ok")
-				return
-			}
-			http.Error(w, "unknown deployment host", http.StatusNotFound)
+			serveProbe(w, r, trackers)
 			return
 		}
 		rt.tracker.serveHTTP(w, r, rt.site)
 	})
+}
+
+func serveProbe(w http.ResponseWriter, r *http.Request, trackers []*tracker) {
+	if r.URL.Path != healthzPath && r.URL.Path != readyzPath {
+		http.Error(w, "unknown deployment host", http.StatusNotFound)
+		return
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if r.URL.Path == readyzPath {
+		for _, t := range trackers {
+			if !t.resolved.Load() {
+				http.Error(w, "resolving leader", http.StatusServiceUnavailable)
+				return
+			}
+		}
+	}
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.WriteString(w, "ok")
 }
 
 func main() {

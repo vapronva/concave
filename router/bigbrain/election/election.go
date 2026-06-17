@@ -99,7 +99,8 @@ type deploymentState struct {
 	emptyStreak               int
 	incumbentPod              string
 	incumbentUnreachableSince time.Time
-	inflight                  bool
+	promoting                 bool
+	demoting                  bool
 	failback                  failbackState
 }
 
@@ -115,6 +116,10 @@ func New(cfg Config, k8s *k8sclient.Client, b *backend.Client, reg *registry.Reg
 		log:     log,
 		state:   make(map[string]*deploymentState),
 	}
+}
+
+func (c *Controller) ActuationTimeout() time.Duration {
+	return c.cfg.actuationTimeout
 }
 
 func (c *Controller) Run(ctx context.Context) {
@@ -208,17 +213,18 @@ func (c *Controller) reconcile(ctx context.Context, name string) {
 	}
 	snap := c.snapshotState(st)
 	obs := c.pollAll(ctx, name, pods)
+	now := time.Now()
 	dec := decide(obs, decideParams{
 		incumbent: snap.incumbentPod,
 		failback: failbackParams{
 			enabled:         c.cfg.failbackEnabled,
 			stabilityWindow: c.cfg.failbackStability,
 			warmthLagNs:     c.cfg.failbackWarmthLagNs,
-			now:             time.Now(),
+			now:             now,
 			prior:           snap.failback,
 		},
 	})
-	streak, emptyStreak, retain := c.commitState(st, dec, len(pods) == 0, time.Now())
+	streak, emptyStreak, retain := c.commitState(st, dec, len(pods) == 0, now)
 	if len(pods) == 0 {
 		c.actEmptyDiscovery(ctx, name, ns, st, emptyStreak)
 		return
@@ -248,7 +254,7 @@ func (c *Controller) commitState(st *deploymentState, dec decision, emptyList bo
 			st.incumbentUnreachableSince = now
 		}
 		retain = now.Sub(st.incumbentUnreachableSince) < c.cfg.unreachableLeaderGrace
-	} else {
+	} else if !emptyList {
 		st.incumbentUnreachableSince = time.Time{}
 	}
 	return st.leaderlessStreak, st.emptyStreak, retain
