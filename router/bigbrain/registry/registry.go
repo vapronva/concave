@@ -6,10 +6,10 @@ import (
 	"sync"
 )
 
-type Deployment struct {
-	Namespace string
-	LeaderPod string
-	LeaderURL string
+type deployment struct {
+	namespace string
+	leaderPod string
+	leaderURL string
 	seq       uint64
 	published bool
 }
@@ -17,7 +17,7 @@ type Deployment struct {
 type Registry struct {
 	mu    sync.RWMutex
 	epoch uint64
-	deps  map[string]*Deployment
+	deps  map[string]*deployment
 	subs  map[string]map[chan LeaderEvent]struct{}
 }
 
@@ -37,7 +37,7 @@ const (
 func New() *Registry {
 	return &Registry{
 		epoch: newEpoch(),
-		deps:  make(map[string]*Deployment),
+		deps:  make(map[string]*deployment),
 		subs:  make(map[string]map[chan LeaderEvent]struct{}),
 	}
 }
@@ -59,7 +59,7 @@ func (r *Registry) EnsureDeployment(name, ns string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, ok := r.deps[name]; !ok {
-		r.deps[name] = &Deployment{Namespace: ns}
+		r.deps[name] = &deployment{namespace: ns}
 	}
 }
 
@@ -80,7 +80,7 @@ func (r *Registry) Namespace(name string) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	return d.Namespace, true
+	return d.namespace, true
 }
 
 func (r *Registry) Update(name, leaderPod, leaderURL string) {
@@ -90,9 +90,9 @@ func (r *Registry) Update(name, leaderPod, leaderURL string) {
 	if !ok {
 		return
 	}
-	changed := d.LeaderPod != leaderPod || d.LeaderURL != leaderURL || !d.published
-	d.LeaderPod = leaderPod
-	d.LeaderURL = leaderURL
+	changed := d.leaderPod != leaderPod || d.leaderURL != leaderURL || !d.published
+	d.leaderPod = leaderPod
+	d.leaderURL = leaderURL
 	d.published = true
 	if !changed {
 		return
@@ -122,7 +122,7 @@ func (r *Registry) Leader(name string) (string, string, uint64, bool) {
 	if !present {
 		return "", "", 0, false
 	}
-	return d.LeaderPod, d.LeaderURL, d.seq, d.LeaderURL != ""
+	return d.leaderPod, d.leaderURL, d.seq, d.leaderURL != ""
 }
 
 func (r *Registry) Published(name string) bool {

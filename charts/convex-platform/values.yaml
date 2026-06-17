@@ -38,6 +38,7 @@ bigbrain:
   enabled: true
   extraEnv: []
   replicas: 1
+  terminationGracePeriodSeconds: 50
   listen: :8081
   image:
     repository: vapronva/concave/bigbrain

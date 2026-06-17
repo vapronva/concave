@@ -87,14 +87,12 @@ func (s *Scraper) scrapeAll(ctx context.Context) {
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	for _, ns := range s.namespaces {
-		wg.Add(1)
-		go func(ns string) {
-			defer wg.Done()
+		wg.Go(func() {
 			samples := s.scrapeNamespace(ctx, ns)
 			mu.Lock()
 			maps.Copy(fresh, samples)
 			mu.Unlock()
-		}(ns)
+		})
 	}
 	wg.Wait()
 	s.prov.replace(fresh)
@@ -118,9 +116,7 @@ func (s *Scraper) scrapeNamespace(ctx context.Context, ns string) map[types.Name
 		if p.DeletionTimestamp != nil || p.Status.PodIP == "" || !k8sclient.PodReady(p) {
 			continue
 		}
-		wg.Add(1)
-		go func(p *corev1.Pod) {
-			defer wg.Done()
+		wg.Go(func() {
 			busy, total, perr := s.scrapePod(ctx, p.Status.PodIP, healthPort(p))
 			if perr != nil {
 				s.log.DebugContext(ctx, "scraper: pod scrape failed",
@@ -137,7 +133,7 @@ func (s *Scraper) scrapeNamespace(ctx context.Context, ns string) map[types.Name
 				ts:     now,
 			}
 			mu.Unlock()
-		}(p)
+		})
 	}
 	wg.Wait()
 	return out

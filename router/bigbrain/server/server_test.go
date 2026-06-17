@@ -113,7 +113,7 @@ func TestServer_LeaderStreamInitialEvent(t *testing.T) {
 	reg, h := newTestServer(t)
 	reg.EnsureDeployment("dev", "convex-dev")
 	reg.Update("dev", "backend-0", "http://10.0.0.1:3210")
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	req := httptest.NewRequest(http.MethodGet, "/registry/deployments/dev/leader-stream", nil).WithContext(ctx)
 	rr := &flushRecorder{ResponseRecorder: httptest.NewRecorder(), onFlush: cancel}
@@ -131,7 +131,7 @@ func TestServer_LeaderStreamSkipsUnpublishedSnapshot(t *testing.T) {
 	t.Parallel()
 	reg, h := newTestServer(t)
 	reg.EnsureDeployment("dev", "convex-dev")
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	go func() {
 		time.Sleep(50 * time.Millisecond)

@@ -108,11 +108,12 @@ func TestController_SnapshotCommitConcurrent(t *testing.T) {
 	}
 	var wg sync.WaitGroup
 	const iterations = 2000
+	var finalStreak int
 	wg.Go(func() {
 		for range iterations {
 			_ = c.snapshotState(st)
 			dec := decide(in, decideParams{incumbent: "backend-0"})
-			c.commitState(st, dec, false, time.Now())
+			finalStreak, _, _ = c.commitState(st, dec, false, time.Now())
 		}
 	})
 	wg.Go(func() {
@@ -121,4 +122,7 @@ func TestController_SnapshotCommitConcurrent(t *testing.T) {
 		}
 	})
 	wg.Wait()
+	if finalStreak != iterations {
+		t.Fatalf("leaderlessStreak=%d after %d leaderless commits, want %d", finalStreak, iterations, iterations)
+	}
 }

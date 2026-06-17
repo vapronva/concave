@@ -429,6 +429,16 @@ func TestValidateConfig(t *testing.T) {
 	if err := validateConfig(emptyDerived, "http://bigbrain:8081", false); err == nil {
 		t.Fatal("host yielding an empty derived name must be rejected")
 	}
+	for _, h := range []string{"api.example:8443", "api.example.com:443"} {
+		ported := config{Deployments: []deploymentCfg{{Host: h}}}
+		if err := validateConfig(ported, "http://bigbrain:8081", false); err == nil {
+			t.Errorf("ported host %q must be rejected at boot", h)
+		}
+	}
+	portedSite := config{Deployments: []deploymentCfg{{Host: "api.example", SiteHost: "site.example:8443"}}}
+	if err := validateConfig(portedSite, "http://bigbrain:8081", false); err == nil {
+		t.Fatal("ported siteHost must be rejected at boot")
+	}
 	derived := config{Deployments: []deploymentCfg{{Host: "team-app.example.com"}}}
 	if err := validateConfig(derived, "http://bigbrain:8081", false); err != nil {
 		t.Fatalf("derived name rejected: %v", err)

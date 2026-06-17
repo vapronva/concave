@@ -1,11 +1,16 @@
 {{- if .Values.bigbrain.enabled }}
 {{- $b := .Values.bigbrain -}}
+{{- $apiserverCertDir := "/var/run/bigbrain-apiserver" -}}
 {{- $deployments := required "deployments is required when bigbrain.enabled" .Values.deployments -}}
 {{- if eq (len $deployments) 0 -}}
 {{- fail "deployments must contain at least one entry when bigbrain.enabled" -}}
 {{- end -}}
 {{- if ne (int $b.replicas) 1 -}}
 {{- fail "bigbrain.replicas must equal 1 because controller leader election is not implemented" -}}
+{{- end -}}
+{{- $bbShutdownNeed := add 10 30 5 -}}
+{{- if gt $bbShutdownNeed (int $b.terminationGracePeriodSeconds) -}}
+{{- fail (printf "bigbrain.terminationGracePeriodSeconds=%d is below the %d seconds a clean shutdown needs: 10 (http drain) + 30 (default actuation budget, BIGBRAIN_ACTUATION_TIMEOUT) + 5 (slack); raise bigbrain.terminationGracePeriodSeconds (and raise it further if you raise BIGBRAIN_ACTUATION_TIMEOUT via extraEnv)" (int $b.terminationGracePeriodSeconds) $bbShutdownNeed) -}}
 {{- end -}}
 ---
 apiVersion: v1
@@ -80,7 +85,7 @@ spec:
         {{- include "convex.componentLabels" (dict "ctx" . "component" "bigbrain") | nindent 8 }}
     spec:
       {{- with include "convex.imagePullSecrets" . }}{{- . | nindent 6 }}{{- end }}
-      terminationGracePeriodSeconds: 50
+      terminationGracePeriodSeconds: {{ $b.terminationGracePeriodSeconds }}
       serviceAccountName: {{ include "convex.bigbrainName" . }}
       securityContext:
         runAsNonRoot: true
@@ -160,6 +165,8 @@ spec:
               value: "true"
             - name: BIGBRAIN_METRICS_APISERVER_PORT
               value: {{ int64 $b.metricsApiserver.port | quote }}
+            - name: BIGBRAIN_METRICS_APISERVER_CERT_DIR
+              value: {{ $apiserverCertDir | quote }}
             {{- end }}
             {{- with $b.extraEnv }}
             {{- toYaml . | nindent 12 }}
@@ -183,7 +190,7 @@ spec:
           {{- end }}
           {{- if $b.metricsApiserver.enabled }}
           volumeMounts:
-            - { name: apiserver-certs, mountPath: /var/run/bigbrain-apiserver }
+            - { name: apiserver-certs, mountPath: {{ $apiserverCertDir }} }
           {{- end }}
           securityContext:
             runAsNonRoot: true

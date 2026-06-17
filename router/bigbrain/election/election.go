@@ -131,11 +131,9 @@ func (c *Controller) Run(ctx context.Context) {
 		"unreachableLeaderGrace", c.cfg.unreachableLeaderGrace.String())
 	var wg sync.WaitGroup
 	for _, name := range c.reg.Names() {
-		wg.Add(1)
-		go func(name string) {
-			defer wg.Done()
+		wg.Go(func() {
 			c.runDeployment(ctx, name)
-		}(name)
+		})
 	}
 	wg.Wait()
 	c.actWG.Wait()
@@ -264,9 +262,7 @@ func (c *Controller) pollAll(ctx context.Context, name string, pods []k8sclient.
 	obs := make([]observation, len(pods))
 	var wg sync.WaitGroup
 	for i := range pods {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
+		wg.Go(func() {
 			pctx, cancel := context.WithTimeout(ctx, pollTimeout)
 			defer cancel()
 			l, err := c.backend.Leadership(pctx, name, pods[i].URL)
@@ -275,7 +271,7 @@ func (c *Controller) pollAll(ctx context.Context, name string, pods []k8sclient.
 					"deployment", name, "pod", pods[i].Pod, "url", pods[i].URL, "err", err)
 			}
 			obs[i] = observation{be: pods[i], status: l, reach: err == nil}
-		}(i)
+		})
 	}
 	wg.Wait()
 	return obs

@@ -771,6 +771,9 @@ func validateDeployments(deployments []deploymentCfg) error {
 				continue
 			}
 			host = strings.ToLower(host)
+			if _, _, err := net.SplitHostPort(host); err == nil {
+				return fmt.Errorf("deployment host %q must not include a port", host)
+			}
 			if _, exists := hosts[host]; exists {
 				return fmt.Errorf("duplicate deployment host %q", host)
 			}

@@ -185,17 +185,23 @@ func shutdown(
 	}
 	drainCtx, drainCancel := context.WithTimeout(context.Background(), actuationDrain)
 	defer drainCancel()
-	select {
-	case <-ctrlDone:
-	case <-drainCtx.Done():
-		log.Error("bigbrain: election shutdown timed out", "err", drainCtx.Err())
-	}
-	if metricsDone != nil {
+	var wg sync.WaitGroup
+	wg.Go(func() {
 		select {
-		case <-metricsDone:
+		case <-ctrlDone:
 		case <-drainCtx.Done():
+			log.Error("bigbrain: election shutdown timed out", "err", drainCtx.Err())
 		}
+	})
+	if metricsDone != nil {
+		wg.Go(func() {
+			select {
+			case <-metricsDone:
+			case <-drainCtx.Done():
+			}
+		})
 	}
+	wg.Wait()
 }
 
 func runController(ctx context.Context, ctrl *election.Controller) <-chan struct{} {

@@ -41,11 +41,10 @@ func funrunPod(ns, name string, port int) *corev1.Pod {
 	}
 }
 
-func gaugesServerPort(t *testing.T) int {
+func metricsServerPort(t *testing.T, body string) int {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = io.WriteString(w,
-			"convex_funrun_isolate_busy_threads 12\nconvex_funrun_isolate_total_threads 24\n")
+		_, _ = io.WriteString(w, body)
 	}))
 	t.Cleanup(srv.Close)
 	_, portStr, err := net.SplitHostPort(srv.Listener.Addr().String())
@@ -57,6 +56,11 @@ func gaugesServerPort(t *testing.T) int {
 		t.Fatalf("parse port: %v", err)
 	}
 	return port
+}
+
+func gaugesServerPort(t *testing.T) int {
+	t.Helper()
+	return metricsServerPort(t, "convex_funrun_isolate_busy_threads 12\nconvex_funrun_isolate_total_threads 24\n")
 }
 
 func cachedPods(prov *FunrunProvider, names ...types.NamespacedName) map[types.NamespacedName]bool {
@@ -114,5 +118,18 @@ func TestScrapeAll_ListFailureDropsNamespaceFromCache(t *testing.T) {
 	}
 	if got[b] {
 		t.Fatal("failed-list namespace must be absent from the replaced cache, never kept stale")
+	}
+}
+
+func TestScrapeAll_ZeroTotalThreadsDropsPodFromCache(t *testing.T) {
+	t.Parallel()
+	port := metricsServerPort(t, "convex_funrun_isolate_busy_threads 0\nconvex_funrun_isolate_total_threads 0\n")
+	cs := fake.NewClientset(funrunPod("ns1", "funrun-cold", port))
+	prov := NewProvider()
+	s := NewScraper(cs, "convex", []string{"ns1"}, prov, time.Hour, slog.New(slog.DiscardHandler))
+	s.scrapeAll(context.Background())
+	cold := types.NamespacedName{Namespace: "ns1", Name: "funrun-cold"}
+	if got := cachedPods(prov, cold); got[cold] {
+		t.Fatal("a pod reporting total_threads=0 must be dropped from the cache (div-by-zero guard), not published")
 	}
 }
