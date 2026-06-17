@@ -18,18 +18,17 @@ EOF
 
 WORKDIR /convex
 
-ARG CONVEX_REF=3073c2b496241c9f2477d0b484b716aa9eadf59f
+COPY UPSTREAM /tmp/patches/UPSTREAM
 
 RUN <<EOF
 set -o errexit -o nounset -o xtrace
 git init --quiet .
 git remote add origin https://github.com/get-convex/convex-backend.git
-git fetch --quiet --depth 1 origin "${CONVEX_REF}"
+git fetch --quiet --depth 1 origin "$(head -1 /tmp/patches/UPSTREAM)"
 git checkout --quiet FETCH_HEAD
 EOF
 
 COPY patches/backend /tmp/patches/backend
-COPY UPSTREAM /tmp/patches/UPSTREAM
 COPY apply-patches.sh /tmp/apply-patches.sh
 
 RUN PATCHES_DIR=/tmp/patches/backend bash /tmp/apply-patches.sh /convex

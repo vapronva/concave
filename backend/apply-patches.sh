@@ -10,7 +10,7 @@ if [ -f "$PIN_FILE" ]; then
   head_sha="$(git -C "$TARGET" rev-parse HEAD)"
   if [ "$head_sha" != "$pin" ]; then
     echo "FATAL: checkout $head_sha != patch-series base $pin (backend/UPSTREAM)"
-    echo "  the patches were generated against $pin; bump ARG CONVEX_REF (or rebase the patches)"
+    echo "  the patches were generated against $pin; fix backend/UPSTREAM or rebase the patches"
     exit 1
   fi
 fi
