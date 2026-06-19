@@ -68,7 +68,7 @@ index 48a574cf1..c7f888e86 100644
  /// convenience) from allowing browsers to make these requests.
  pub fn platform_api_cors() -> CorsLayer {
 diff --git a/crates/common/src/knobs.rs b/crates/common/src/knobs.rs
-index 52e6dd510..42df291c1 100644
+index 350b52195..f2a063514 100644
 --- a/crates/common/src/knobs.rs
 +++ b/crates/common/src/knobs.rs
 @@ -424,6 +424,17 @@ pub static MAX_REPEATABLE_TIMESTAMP_IDLE_FREQUENCY: LazyLock<Duration> = LazyLoc
@@ -1331,7 +1331,7 @@ index 000000000..e185560ba
 +    fn set_action_callbacks(&self, _action_callbacks: Arc<dyn ActionCallbacks>) {}
 +}
 diff --git a/crates/function_runner/src/server.rs b/crates/function_runner/src/server.rs
-index 3ed5f6694..8cbd37aae 100644
+index c489a0ac7..18c54d317 100644
 --- a/crates/function_runner/src/server.rs
 +++ b/crates/function_runner/src/server.rs
 @@ -188,6 +188,51 @@ pub struct FunctionRunnerCore<RT: Runtime, S: StorageForDeployment<RT>> {

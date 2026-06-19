@@ -1921,7 +1921,7 @@ index 000000000..786709af2
 +}
 diff --git a/crates/funrun_server/src/snapshot.rs b/crates/funrun_server/src/snapshot.rs
 new file mode 100644
-index 000000000..1d5de2481
+index 000000000..ea9789cba
 --- /dev/null
 +++ b/crates/funrun_server/src/snapshot.rs
 @@ -0,0 +1,807 @@
@@ -1970,8 +1970,8 @@ index 000000000..1d5de2481
 +    SharedIsolateResources,
 +};
 +use indexing::{
-+    backend_in_memory_indexes::IndexReader,
 +    index_cache::IndexCache,
++    index_reader::IndexReader,
 +};
 +use keybroker::FunctionRunnerKeyBroker;
 +use metrics::{

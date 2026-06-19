@@ -29,7 +29,7 @@ index 6c018be51..0b891fcc1 100644
      >
        {children}
 diff --git a/npm-packages/common/config/rush/pnpm-lock.yaml b/npm-packages/common/config/rush/pnpm-lock.yaml
-index 7f8f8e463..fafafd6c3 100644
+index 21b6293a6..85e79d8e1 100644
 --- a/npm-packages/common/config/rush/pnpm-lock.yaml
 +++ b/npm-packages/common/config/rush/pnpm-lock.yaml
 @@ -1194,6 +1194,9 @@ importers:
@@ -52,17 +52,6 @@ index 7f8f8e463..fafafd6c3 100644
        '@types/react-table':
          specifier: ^7.7.2
          version: 7.7.20
-diff --git a/npm-packages/common/config/rush/repo-state.json b/npm-packages/common/config/rush/repo-state.json
-index 4f1fdb24f..5b55b22cd 100644
---- a/npm-packages/common/config/rush/repo-state.json
-+++ b/npm-packages/common/config/rush/repo-state.json
-@@ -1,5 +1,5 @@
- // DO NOT MODIFY THIS FILE MANUALLY BUT DO COMMIT IT. It is generated and used by Rush.
- {
-   "preferredVersionsHash": "ddfe6c8b90159b81dbcfa41446efd1a25968dcc6",
--  "packageJsonInjectedDependenciesHash": "61dedc14596b97059436b83e463487ebc498a5c1"
-+  "packageJsonInjectedDependenciesHash": "3e7571a46f43deae03b4b4510392150aebe34849"
- }
 diff --git a/npm-packages/dashboard-common/package.json b/npm-packages/dashboard-common/package.json
 index 715c4eed5..c3701fe9c 100644
 --- a/npm-packages/dashboard-common/package.json

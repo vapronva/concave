@@ -14,7 +14,7 @@ update-ca-certificates
 sed --in-place 's!http://mirror.selectel.ru/debian!https://mirror.selectel.ru/debian!g' /etc/apt/sources.list.d/debian.sources
 apt-get update
 apt-get upgrade --assume-yes
-apt-get install --assume-yes cmake libclang-dev clang curl pkg-config git
+apt-get install --assume-yes cmake libclang-dev clang curl pkg-config git protobuf-compiler
 EOF
 
 WORKDIR /convex
@@ -39,7 +39,7 @@ ARG NODE_SHA256=d804845d34eddc21dc1092b519d643ef40b1f58ec5dec5c22b1f4bd8fabde6c9
 RUN <<EOF
 set -o errexit -o nounset -o xtrace
 NODE_VERSION=$(tr --delete 'v\n' <.nvmrc)
-curl --fail --silent --show-error --location --output /tmp/node.tar.xz "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz"
+curl --fail --silent --show-error --location --retry 5 --retry-all-errors --retry-delay 3 --connect-timeout 30 --output /tmp/node.tar.xz "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz"
 echo "${NODE_SHA256}  /tmp/node.tar.xz" | sha256sum --check -
 tar --extract --xz --strip-components=1 --no-same-owner --directory=/usr --file=/tmp/node.tar.xz "node-v${NODE_VERSION}-linux-x64/bin" "node-v${NODE_VERSION}-linux-x64/lib"
 rm /tmp/node.tar.xz
@@ -52,7 +52,7 @@ ARG JUST_SHA256=7fedeb22c7e14d9ef1551e8b793700866d80f409f9884b0e80ebb65c11d4874d
 
 RUN <<EOF
 set -o errexit -o nounset -o xtrace
-curl --fail --silent --show-error --location --output /tmp/just.tar.gz "https://github.com/casey/just/releases/download/${JUST_VERSION}/just-${JUST_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+curl --fail --silent --show-error --location --retry 5 --retry-all-errors --retry-delay 3 --connect-timeout 30 --output /tmp/just.tar.gz "https://github.com/casey/just/releases/download/${JUST_VERSION}/just-${JUST_VERSION}-x86_64-unknown-linux-musl.tar.gz"
 echo "${JUST_SHA256}  /tmp/just.tar.gz" | sha256sum --check -
 tar --extract --gzip --directory=/usr/local/bin --file=/tmp/just.tar.gz just
 rm /tmp/just.tar.gz
