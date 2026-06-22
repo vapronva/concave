@@ -397,6 +397,7 @@ func (t *tracker) serveHTTP(w http.ResponseWriter, r *http.Request, site bool) {
 	p := t.currentLeader(site)
 	if p == nil {
 		log.Printf("usher: %s no leader available", t.host)
+		w.Header().Set("Retry-After", "1")
 		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 		return
 	}

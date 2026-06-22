@@ -205,6 +205,22 @@ func TestServeHTTP_DeadLeaderReturns503AndNudges(t *testing.T) {
 	}
 }
 
+func TestServeHTTP_NoLeaderReturns503WithRetryAfter(t *testing.T) {
+	t.Parallel()
+	tr := &tracker{host: "api.example", resolveCh: make(chan struct{}, 1), proxyTransport: newProxyTransport()}
+	rr := httptest.NewRecorder()
+	tr.serveHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/query", nil), false)
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d want 503 with no leader", rr.Code)
+	}
+	if rr.Header().Get("Retry-After") != "1" {
+		t.Fatalf(
+			"Retry-After=%q want 1 (leaderless 503 must carry the same backoff hint as the proxy paths)",
+			rr.Header().Get("Retry-After"),
+		)
+	}
+}
+
 func TestServeHTTP_ForwardsPublicRequestMetadata(t *testing.T) {
 	t.Parallel()
 	var gotProto, gotHost, gotXFF string
