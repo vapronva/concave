@@ -124,7 +124,7 @@ index f280d1494..9208b0c0a 100644
 +    }
 +}
 diff --git a/crates/local_backend/src/lib.rs b/crates/local_backend/src/lib.rs
-index 4633f83f5..1c5dd565c 100644
+index afd3a8d5d..d7c9b01c9 100644
 --- a/crates/local_backend/src/lib.rs
 +++ b/crates/local_backend/src/lib.rs
 @@ -33,7 +33,10 @@ use common::{
@@ -150,7 +150,7 @@ index 4633f83f5..1c5dd565c 100644
  use events::usage::NoOpUsageEventLogger;
  use exports::interface::InProcessExportProvider;
  use file_storage::{
-@@ -94,6 +101,7 @@ pub mod deployment_info;
+@@ -95,6 +102,7 @@ pub mod deployment_info;
  pub mod deployment_state;
  pub mod environment_variables;
  pub mod http_actions;
@@ -158,7 +158,7 @@ index 4633f83f5..1c5dd565c 100644
  pub mod log_sinks;
  pub mod logs;
  pub mod node_action_callbacks;
-@@ -109,7 +117,7 @@ pub mod storage;
+@@ -110,7 +118,7 @@ pub mod storage;
  pub mod streaming_export;
  pub mod streaming_import;
  pub mod subs;
@@ -167,7 +167,7 @@ index 4633f83f5..1c5dd565c 100644
  
  #[derive(Clone)]
  pub struct LocalAppState {
-@@ -119,6 +127,12 @@ pub struct LocalAppState {
+@@ -120,6 +128,12 @@ pub struct LocalAppState {
      pub site_origin: ConvexSite,
      // Name of the instance. (e.g. crazy-giraffe-123)
      pub instance_name: String,
@@ -180,7 +180,7 @@ index 4633f83f5..1c5dd565c 100644
      pub application: Application<ProdRuntime>,
      pub zombify_rx: async_broadcast::Receiver<()>,
  }
-@@ -143,10 +157,31 @@ pub struct RouterState {
+@@ -144,10 +158,31 @@ pub struct RouterState {
  #[derive(Serialize)]
  pub struct EmptyResponse {}
  
@@ -213,7 +213,7 @@ index 4633f83f5..1c5dd565c 100644
      zombify_rx: async_broadcast::Receiver<()>,
      preempt_tx: ShutdownSignal,
  ) -> anyhow::Result<LocalAppState> {
-@@ -156,29 +191,70 @@ pub async fn make_app(
+@@ -157,29 +192,70 @@ pub async fn make_app(
      // TODO(CX-6572) Separate `SegmentMetadataFetcher` from `SearcherImpl`
      let segment_metadata_fetcher: Arc<dyn SegmentTermMetadataFetcher> = in_process_searcher;
      let (deleted_tablet_sender, deleted_tablet_receiver) = tokio::sync::mpsc::channel(100);
@@ -306,7 +306,7 @@ index 4633f83f5..1c5dd565c 100644
  
      let file_storage = FileStorage {
          transactional_file_storage: TransactionalFileStorage::new(
-@@ -221,21 +297,41 @@ pub async fn make_app(
+@@ -222,21 +298,41 @@ pub async fn make_app(
          reqwest::redirect::Policy::default(),
      );
      let function_runner: Arc<dyn FunctionRunner<ProdRuntime>> =
@@ -360,7 +360,7 @@ index 4633f83f5..1c5dd565c 100644
          runtime.clone(),
          database.clone(),
          file_storage.clone(),
-@@ -252,7 +348,7 @@ pub async fn make_app(
+@@ -253,7 +349,7 @@ pub async fn make_app(
          config.convex_site_url()?,
          searcher.clone(),
          segment_metadata_fetcher,
@@ -369,7 +369,7 @@ index 4633f83f5..1c5dd565c 100644
          actions,
          Arc::new(RedactLogsToClient::new(config.redact_logs_to_client)),
          Arc::new(ApplicationAuth::new(
-@@ -273,7 +369,7 @@ pub async fn make_app(
+@@ -274,7 +370,7 @@ pub async fn make_app(
      let origin = config.convex_origin_url()?;
      let instance_name = config.name();
  
@@ -378,7 +378,7 @@ index 4633f83f5..1c5dd565c 100644
          let beacon_future = beacon::start_beacon(
              runtime.clone(),
              database.clone(),
-@@ -283,14 +379,100 @@ pub async fn make_app(
+@@ -284,14 +380,100 @@ pub async fn make_app(
          runtime.spawn_background("beacon_worker", beacon_future);
      }
  

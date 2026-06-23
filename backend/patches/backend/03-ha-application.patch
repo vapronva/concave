@@ -11,7 +11,7 @@ index add0ec6e6..462b775c5 100644
                          outcome.result.is_ok(),
                          usage_stats,
 diff --git a/crates/application/src/lib.rs b/crates/application/src/lib.rs
-index f97a081df..ac5b40f46 100644
+index 6371f8dc4..8985b588e 100644
 --- a/crates/application/src/lib.rs
 +++ b/crates/application/src/lib.rs
 @@ -133,6 +133,7 @@ use common::{
@@ -22,7 +22,7 @@ index f97a081df..ac5b40f46 100644
          ConvexOrigin,
          ConvexSite,
          DeploymentMetadata,
-@@ -592,7 +593,7 @@ pub struct Application<RT: Runtime> {
+@@ -595,7 +596,7 @@ pub struct Application<RT: Runtime> {
      usage_event_logger: Arc<dyn UsageEventLogger>,
      key_broker: KeyBroker,
      deployment: DeploymentMetadata,
@@ -31,7 +31,7 @@ index f97a081df..ac5b40f46 100644
      log_visibility: Arc<dyn LogVisibility<RT>>,
      module_cache: ModuleCache<RT>,
      system_env_var_names: HashSet<EnvVarName>,
-@@ -600,6 +601,10 @@ pub struct Application<RT: Runtime> {
+@@ -603,6 +604,10 @@ pub struct Application<RT: Runtime> {
      log_manager_client: LogManagerClient,
      audit_log_client: AuditLogClient,
      oidc_http_client: CachedHttpClient,
@@ -42,7 +42,7 @@ index f97a081df..ac5b40f46 100644
  }
  
  /// Create storage based on the storage type configuration
-@@ -639,29 +644,31 @@ impl<RT: Runtime> Application<RT> {
+@@ -645,29 +650,31 @@ impl<RT: Runtime> Application<RT> {
              storage_type
          };
  
@@ -88,7 +88,7 @@ index f97a081df..ac5b40f46 100644
          Ok(ApplicationStorage {
              files_storage,
              modules_storage,
-@@ -671,7 +678,34 @@ impl<RT: Runtime> Application<RT> {
+@@ -677,7 +684,34 @@ impl<RT: Runtime> Application<RT> {
          })
      }
  
@@ -123,7 +123,7 @@ index f97a081df..ac5b40f46 100644
          runtime: RT,
          database: Database<RT>,
          file_storage: FileStorage<RT>,
-@@ -684,7 +718,7 @@ impl<RT: Runtime> Application<RT> {
+@@ -690,7 +724,7 @@ impl<RT: Runtime> Application<RT> {
          convex_site: ConvexSite,
          searcher: Arc<dyn Searcher>,
          segment_term_metadata_fetcher: Arc<dyn SegmentTermMetadataFetcher>,
@@ -132,7 +132,7 @@ index f97a081df..ac5b40f46 100644
          node_actions: Actions<RT>,
          log_visibility: Arc<dyn LogVisibility<RT>>,
          app_auth: Arc<ApplicationAuth<RT>>,
-@@ -707,6 +741,142 @@ impl<RT: Runtime> Application<RT> {
+@@ -713,6 +747,142 @@ impl<RT: Runtime> Application<RT> {
              CONVEX_SITE.clone() => convex_site.parse()?
          };
  
@@ -275,7 +275,7 @@ index f97a081df..ac5b40f46 100644
          let mut index_worker = Arc::new(Mutex::new(None));
          if *ENABLE_INDEX_BACKFILL {
              let index_worker_fut = IndexWorker::new(
-@@ -731,12 +901,12 @@ impl<RT: Runtime> Application<RT> {
+@@ -737,12 +907,12 @@ impl<RT: Runtime> Application<RT> {
              database.clone(),
              persistence.reader(),
              application_storage.search_storage.clone(),
@@ -291,7 +291,7 @@ index f97a081df..ac5b40f46 100644
          let table_summary_worker = TableSummaryWorker::start(
              runtime.clone(),
              database.clone(),
-@@ -758,68 +928,6 @@ impl<RT: Runtime> Application<RT> {
+@@ -764,68 +934,6 @@ impl<RT: Runtime> Application<RT> {
              runtime.spawn("system_table_cleanup_worker", system_table_cleanup_worker),
          ));
  
@@ -360,7 +360,7 @@ index f97a081df..ac5b40f46 100644
          let scheduled_job_runner = ScheduledJobRunner::start(
              runtime.clone(),
              deployment_name.clone(),
-@@ -844,7 +952,7 @@ impl<RT: Runtime> Application<RT> {
+@@ -850,7 +958,7 @@ impl<RT: Runtime> Application<RT> {
              database.clone(),
              application_storage.exports_storage.clone(),
              application_storage.files_storage.clone(),
@@ -369,7 +369,7 @@ index f97a081df..ac5b40f46 100644
              usage_counter.clone(),
              deployment_name.clone(),
          );
-@@ -881,7 +989,7 @@ impl<RT: Runtime> Application<RT> {
+@@ -887,7 +995,7 @@ impl<RT: Runtime> Application<RT> {
              deployment_name.clone(),
          );
  
@@ -378,7 +378,7 @@ index f97a081df..ac5b40f46 100644
              usage_gauges_tracking_worker,
              scheduled_job_runner,
              cron_job_executor,
-@@ -896,33 +1004,82 @@ impl<RT: Runtime> Application<RT> {
+@@ -902,33 +1010,82 @@ impl<RT: Runtime> Application<RT> {
              system_table_cleanup_worker,
              migration_worker,
          };
@@ -481,7 +481,7 @@ index f97a081df..ac5b40f46 100644
      pub fn modules_storage(&self) -> &Arc<dyn Storage> {
          &self.application_storage.modules_storage
      }
-@@ -3732,7 +3889,10 @@ impl<RT: Runtime> Application<RT> {
+@@ -3791,7 +3948,10 @@ impl<RT: Runtime> Application<RT> {
      }
  
      pub async fn shutdown(&self) -> anyhow::Result<()> {
