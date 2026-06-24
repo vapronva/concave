@@ -100,7 +100,7 @@ require (
 	k8s.io/apiserver v0.36.2 // indirect
 	k8s.io/klog/v2 v2.140.0 // indirect
 	k8s.io/kms v0.36.2 // indirect
-	k8s.io/kube-openapi v0.0.0-20260618221249-bc653b64f974 // indirect
+	k8s.io/kube-openapi v0.0.0-20260624041617-8f3fa4921821 // indirect
 	k8s.io/streaming v0.36.2 // indirect
 	k8s.io/utils v0.0.0-20260617174310-a95e086a2553 // indirect
 	sigs.k8s.io/apiserver-network-proxy/konnectivity-client v0.36.0 // indirect
