@@ -169,7 +169,7 @@ index fc4a16678..9acb169c8 100644
  
  // Within a single transaction that writes multiple documents, this is the order
 diff --git a/crates/database/src/database.rs b/crates/database/src/database.rs
-index 32a53b2ad..fccea25f6 100644
+index f3fab3e73..4f3e8804b 100644
 --- a/crates/database/src/database.rs
 +++ b/crates/database/src/database.rs
 @@ -54,12 +54,15 @@ use common::{
@@ -248,7 +248,7 @@ index 32a53b2ad..fccea25f6 100644
  }
  
  struct ListSnapshotTableIteratorCacheEntry<RT: Runtime> {
-@@ -1054,18 +1071,20 @@ impl<RT: Runtime> Database<RT> {
+@@ -1053,18 +1070,20 @@ impl<RT: Runtime> Database<RT> {
              AsyncLru::new(runtime.clone(), 20, 2, 200, "component_paths_snapshot");
          let list_snapshot_table_iterator_cache = Arc::new(tokio::sync::Mutex::new(None));
          let database = Self {
@@ -275,7 +275,7 @@ index 32a53b2ad..fccea25f6 100644
              virtual_system_mapping,
              bootstrap_metadata,
              invalidation_callback,
-@@ -1073,11 +1092,391 @@ impl<RT: Runtime> Database<RT> {
+@@ -1072,11 +1091,391 @@ impl<RT: Runtime> Database<RT> {
              by_id_indexes_snapshot_cache,
              component_paths_snapshot_cache,
              list_snapshot_table_iterator_cache,
@@ -667,7 +667,7 @@ index 32a53b2ad..fccea25f6 100644
      /// Sets the invalidation callback for tracking which mutations invalidate
      /// subscriptions. Must be called after `load` and before any subscriptions
      /// are invalidated.
-@@ -1095,45 +1494,71 @@ impl<RT: Runtime> Database<RT> {
+@@ -1094,45 +1493,71 @@ impl<RT: Runtime> Database<RT> {
          tracing::info!("Set search storage to {search_storage:?}");
      }
  
@@ -753,7 +753,7 @@ index 32a53b2ad..fccea25f6 100644
      }
  
      /// Load the set of documents and tombstones in the given table between
-@@ -1563,7 +1988,7 @@ impl<RT: Runtime> Database<RT> {
+@@ -1562,7 +1987,7 @@ impl<RT: Runtime> Database<RT> {
              Arc::new(snapshot.in_memory_indexes),
              snapshot.table_registry.table_mapping().clone(),
              Arc::new(persistence_snapshot),
@@ -762,7 +762,7 @@ index 32a53b2ad..fccea25f6 100644
              None,
          );
          let (results, cursor) = db_index_snapshot
-@@ -1818,11 +2243,11 @@ impl<RT: Runtime> Database<RT> {
+@@ -1817,11 +2242,11 @@ impl<RT: Runtime> Database<RT> {
                      RepeatablePersistence::new(
                          self.reader.clone(),
                          repeatable_ts,
@@ -776,7 +776,7 @@ index 32a53b2ad..fccea25f6 100644
                  index_cache,
              ),
              Arc::new(TextIndexManagerSnapshot::new(
-@@ -1886,7 +2311,7 @@ impl<RT: Runtime> Database<RT> {
+@@ -1885,7 +2310,7 @@ impl<RT: Runtime> Database<RT> {
              bootstrap_metadata: self.bootstrap_metadata.clone(),
              snapshot,
              persistence_snapshot: repeatable_persistence.read_snapshot(ts)?,
@@ -785,7 +785,7 @@ index 32a53b2ad..fccea25f6 100644
              persistence_reader: self.reader.clone(),
              retention_validator: self.retention_validator(),
          })
-@@ -1908,7 +2333,7 @@ impl<RT: Runtime> Database<RT> {
+@@ -1907,7 +2332,7 @@ impl<RT: Runtime> Database<RT> {
          task::consume_budget().await;
          let readonly = transaction.is_readonly();
          let result = self
@@ -794,7 +794,7 @@ index 32a53b2ad..fccea25f6 100644
              .commit(transaction, write_source.into())
              .await?;
          if !readonly {
-@@ -1922,7 +2347,7 @@ impl<RT: Runtime> Database<RT> {
+@@ -1921,7 +2346,7 @@ impl<RT: Runtime> Database<RT> {
          &self,
          tables: BTreeSet<TableName>,
      ) -> anyhow::Result<()> {
@@ -803,7 +803,7 @@ index 32a53b2ad..fccea25f6 100644
      }
  
      pub fn write_commits_since_load(&self) -> usize {
-@@ -1933,14 +2358,14 @@ impl<RT: Runtime> Database<RT> {
+@@ -1932,14 +2357,14 @@ impl<RT: Runtime> Database<RT> {
      /// N.B. Only use this function for user subscriptions. System subscriptions
      /// should use `subscribe_and_wait_for_invalidation`.
      pub async fn subscribe(&self, token: Token) -> anyhow::Result<Subscription> {
@@ -820,7 +820,7 @@ index 32a53b2ad..fccea25f6 100644
          let invalid_ts = subscription.wait_for_invalidation().await;
          let current_ts = self.now_ts_for_reads();
          metrics::log_subscription_invalidation_lag(invalid_ts, *current_ts);
-@@ -2409,11 +2834,19 @@ impl<RT: Runtime> Database<RT> {
+@@ -2408,11 +2833,19 @@ impl<RT: Runtime> Database<RT> {
          ts: Timestamp,
      ) -> anyhow::Result<Result<Token, Option<Timestamp>>> {
          let _timer = metrics::refresh_token_timer();
@@ -1286,7 +1286,7 @@ index 000000000..b4eb0e753
 +    }
 +}
 diff --git a/crates/database/src/lib.rs b/crates/database/src/lib.rs
-index 9e18a3efb..f5247826c 100644
+index cfd05d7da..065fbf4be 100644
 --- a/crates/database/src/lib.rs
 +++ b/crates/database/src/lib.rs
 @@ -15,6 +15,7 @@ mod committer;
@@ -1297,7 +1297,7 @@ index 9e18a3efb..f5247826c 100644
  mod metrics;
  pub mod patch;
  pub mod persistence_helpers;
-@@ -169,6 +170,7 @@ pub use self::{
+@@ -173,6 +174,7 @@ pub use self::{
          Database,
          DatabaseSnapshot,
          DocumentDeltas,

@@ -1437,7 +1437,7 @@ index c489a0ac7..18c54d317 100644
  
      pub fn concurrency_limiter(&self) -> &isolate::ConcurrencyLimiter {
 diff --git a/crates/isolate/src/client.rs b/crates/isolate/src/client.rs
-index 737ae305a..302182d4c 100644
+index 0b8b436a1..9cdde0381 100644
 --- a/crates/isolate/src/client.rs
 +++ b/crates/isolate/src/client.rs
 @@ -9,6 +9,7 @@ use std::{
@@ -1448,7 +1448,7 @@ index 737ae305a..302182d4c 100644
              AtomicUsize,
              Ordering,
          },
-@@ -58,6 +59,7 @@ use common::{
+@@ -59,6 +60,7 @@ use common::{
          ISOLATE_IDLE_TIMEOUT,
          ISOLATE_MAX_LIFETIME,
          ISOLATE_MAX_USER_HEAP_SIZE,
@@ -1456,7 +1456,7 @@ index 737ae305a..302182d4c 100644
          ISOLATE_QUEUE_SIZE,
          REUSE_ISOLATES,
          V8_THREADS,
-@@ -194,7 +196,6 @@ impl IsolateConfig {
+@@ -203,7 +205,6 @@ impl IsolateConfig {
              limiter,
          }
      }
@@ -1464,7 +1464,7 @@ index 737ae305a..302182d4c 100644
  }
  
  pub struct UdfRequest<RT: Runtime> {
-@@ -454,6 +455,7 @@ impl<RT: Runtime> Clone for IsolateClient<RT> {
+@@ -480,6 +481,7 @@ impl<RT: Runtime> Clone for IsolateClient<RT> {
              concurrency_logger: self.concurrency_logger.clone(),
              concurrency_limiter: self.concurrency_limiter.clone(),
              active_workers: self.active_workers.clone(),
@@ -1472,7 +1472,7 @@ index 737ae305a..302182d4c 100644
              max_workers: self.max_workers,
          }
      }
-@@ -542,6 +544,7 @@ pub struct IsolateClient<RT: Runtime> {
+@@ -568,6 +570,7 @@ pub struct IsolateClient<RT: Runtime> {
      /// Shared with the scheduler. Tracks the total number of in-progress
      /// workers across all clients.
      active_workers: Arc<AtomicUsize>,
@@ -1480,7 +1480,7 @@ index 737ae305a..302182d4c 100644
      max_workers: usize,
  }
  
-@@ -575,6 +578,9 @@ impl<RT: Runtime> IsolateClient<RT> {
+@@ -601,6 +604,9 @@ impl<RT: Runtime> IsolateClient<RT> {
          let active_workers = Arc::new(AtomicUsize::new(0));
          let _active_workers = active_workers.clone();
          let rt_clone = rt.clone();
@@ -1490,7 +1490,7 @@ index 737ae305a..302182d4c 100644
          let scheduler = rt.spawn("shared_isolate_scheduler", async move {
              // The scheduler thread pops a worker from available_workers and
              // pops a request from the CoDelQueueReceiver. Then it sends the request
-@@ -588,7 +594,9 @@ impl<RT: Runtime> IsolateClient<RT> {
+@@ -614,7 +620,9 @@ impl<RT: Runtime> IsolateClient<RT> {
                  max_percent_per_client,
                  _active_workers,
              );
@@ -1501,7 +1501,7 @@ index 737ae305a..302182d4c 100644
          });
          Ok(Self {
              rt,
-@@ -598,6 +606,7 @@ impl<RT: Runtime> IsolateClient<RT> {
+@@ -624,6 +632,7 @@ impl<RT: Runtime> IsolateClient<RT> {
              handles,
              concurrency_limiter,
              active_workers,
@@ -1509,7 +1509,7 @@ index 737ae305a..302182d4c 100644
              max_workers: max_isolate_workers,
          })
      }
-@@ -618,6 +627,10 @@ impl<RT: Runtime> IsolateClient<RT> {
+@@ -644,6 +653,10 @@ impl<RT: Runtime> IsolateClient<RT> {
          self.max_workers
      }
  
@@ -1520,23 +1520,23 @@ index 737ae305a..302182d4c 100644
      pub fn aggregate_heap_stats(&self) -> IsolateHeapStats {
          let mut total = IsolateHeapStats::default();
          for handle in self.handles.lock().iter() {
-@@ -1168,6 +1181,7 @@ pub struct SharedIsolateScheduler<RT: Runtime, W: IsolateWorker<RT>> {
+@@ -1188,6 +1201,7 @@ pub struct SharedIsolateScheduler<RT: Runtime, W: IsolateWorker<RT>> {
      /// recreated and there will be no penalty for reassigning this worker to a
      /// new client.
      available_workers: HashMap<String, VecDeque<IdleWorkerState>>,
 +    preloaded_workers: VecDeque<usize>,
      /// Set of futures awaiting a response from an active worker.
-     in_progress_workers: FuturesUnordered<oneshot::Receiver<ActiveWorkerState>>,
-     /// Counts the number of active workers per client. Should only contain a
-@@ -1207,6 +1221,7 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
+     in_progress_workers:
+         FuturesUnordered<Join<oneshot::Receiver<IdleWorkerInfo>, Ready<ActiveWorkerState>>>,
+@@ -1234,6 +1248,7 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
              in_progress_count: HashMap::new(),
              active_workers,
              available_workers: HashMap::new(),
 +            preloaded_workers: VecDeque::new(),
              max_workers,
              handles,
-             max_percent_per_client,
-@@ -1250,6 +1265,10 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
+             max_active_workers_per_client: (max_workers * max_percent_per_client)
+@@ -1284,6 +1299,10 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
  
      pub async fn run(mut self, mut receiver: CoDelQueueReceiver<RT, Request<RT>>) {
          log_pool_max(self.worker.config().name, self.max_workers);
@@ -1547,7 +1547,7 @@ index 737ae305a..302182d4c 100644
          let mut report_stats = self.rt.wait(*HEAP_WORKER_REPORT_INTERVAL_SECONDS);
          loop {
              let all_workers_busy = self.active_workers.load(Ordering::Relaxed) >= self.max_workers;
-@@ -1367,26 +1386,13 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
+@@ -1410,26 +1429,13 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
              }
              return Some(worker.worker_id);
          }
@@ -1578,8 +1578,8 @@ index 737ae305a..302182d4c 100644
          }
          // No existing worker for this client and we've already started the max number
          // of workers -- just grab the least recently used worker. This worker is least
-@@ -1429,6 +1435,26 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
-         Some(worker_id.worker_id)
+@@ -1460,6 +1466,26 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
+         Some(worker.worker_id)
      }
  
 +    fn spawn_worker(&mut self) -> usize {
