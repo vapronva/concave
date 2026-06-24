@@ -1921,7 +1921,7 @@ index 000000000..786709af2
 +}
 diff --git a/crates/funrun_server/src/snapshot.rs b/crates/funrun_server/src/snapshot.rs
 new file mode 100644
-index 000000000..ea9789cba
+index 000000000..b0765cb54
 --- /dev/null
 +++ b/crates/funrun_server/src/snapshot.rs
 @@ -0,0 +1,807 @@
@@ -2391,7 +2391,7 @@ index 000000000..ea9789cba
 +            rt.clone(),
 +            searcher.clone(),
 +            virtual_system_mapping().clone(),
-+            IndexCache::new(*common::knobs::FUNRUN_INDEX_CACHE_SIZE).new_handle(),
++            IndexCache::new(*common::knobs::FUNRUN_FOLLOWER_INDEX_CACHE_SIZE).new_handle(),
 +        )
 +        .await?;
 +        let storage_type = Self::read_storage_type(&database).await?;

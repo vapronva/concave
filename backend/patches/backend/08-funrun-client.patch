@@ -68,7 +68,7 @@ index 70dab35cd..c7fc714d4 100644
  /// convenience) from allowing browsers to make these requests.
  pub fn platform_api_cors() -> CorsLayer {
 diff --git a/crates/common/src/knobs.rs b/crates/common/src/knobs.rs
-index 350b52195..f2a063514 100644
+index 350b52195..b43be901d 100644
 --- a/crates/common/src/knobs.rs
 +++ b/crates/common/src/knobs.rs
 @@ -424,6 +424,17 @@ pub static MAX_REPEATABLE_TIMESTAMP_IDLE_FREQUENCY: LazyLock<Duration> = LazyLoc
@@ -101,7 +101,20 @@ index 350b52195..f2a063514 100644
  /// The size of the pending commits in the committer queue. This is a FIFO
  /// queue, so if the queue is too large, we run into a risk of all requests
  /// waiting too long and no requests going through during overload. The size of
-@@ -1085,28 +1101,46 @@ pub static FUNRUN_MODULE_QUEUE_SIZE: LazyLock<usize> =
+@@ -1061,6 +1077,12 @@ pub static MODULE_CACHE_MAX_CONCURRENCY: LazyLock<usize> =
+ pub static FUNRUN_INDEX_CACHE_SIZE: LazyLock<u64> =
+     LazyLock::new(|| env_config("FUNRUN_INDEX_CACHE_SIZE", 50_000_000)); // 50 MB
+ 
++/// The maximum size in bytes of funrun's warm-follower `IndexCache` (startup
++/// storage-type reads + follower-side `Database` reads), distinct from the
++/// per-execution `FUNRUN_INDEX_CACHE_SIZE`. Must be non-zero.
++pub static FUNRUN_FOLLOWER_INDEX_CACHE_SIZE: LazyLock<u64> =
++    LazyLock::new(|| env_config("FUNRUN_FOLLOWER_INDEX_CACHE_SIZE", 64_000_000));
++
+ /// The maximum number of concurrent index cache requests in Funrun.
+ pub static FUNRUN_INDEX_CACHE_CONCURRENCY: LazyLock<usize> =
+     LazyLock::new(|| env_config("FUNRUN_INDEX_CACHE_CONCURRENCY", 200));
+@@ -1085,28 +1107,46 @@ pub static FUNRUN_MODULE_QUEUE_SIZE: LazyLock<usize> =
  pub static FUNRUN_CODE_CACHE_SIZE: LazyLock<u64> =
      LazyLock::new(|| env_config("FUNRUN_CODE_CACHE_SIZE", 500_000_000));
  
