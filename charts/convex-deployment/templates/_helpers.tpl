@@ -228,6 +228,8 @@ seccompProfile:
     {{- if $ctx.Values.insights.enabled }}
     {{- include "convex.usageSinkEnv" $ctx | nindent 4 }}
     {{- end }}
+    {{- with include "convex.sharedTunableEnv" $ctx | trim }}{{ . | nindent 4 }}{{- end }}
+    {{- with include "convex.backendTunableEnv" $ctx | trim }}{{ . | nindent 4 }}{{- end }}
     {{- with $ctx.Values.backend.extraEnv }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
@@ -265,4 +267,97 @@ seccompProfile:
       key: {{ default "usage-token" .Values.insights.tokenRef.key }}
 - name: CONVEX_INSIGHTS_QUERY_URL
   value: {{ required "insights.queryUrl is required when insights.enabled" .Values.insights.queryUrl | quote }}
+{{- end -}}
+
+{{- define "convex.sharedTunableEnv" -}}
+{{- with .Values.sizeLimits.writeBytes }}
+- name: TRANSACTION_MAX_USER_WRITE_SIZE_BYTES
+  value: {{ int64 . | quote }}
+{{- end }}
+{{- with .Values.sizeLimits.readBytes }}
+- name: TRANSACTION_MAX_READ_SIZE_BYTES
+  value: {{ int64 . | quote }}
+{{- end }}
+{{- with .Values.allocator.arenaMax }}
+- name: MALLOC_ARENA_MAX
+  value: {{ int64 . | quote }}
+{{- end }}
+{{- end -}}
+
+{{- define "convex.backendTunableEnv" -}}
+{{- with .Values.backend.concurrency.queries }}
+- name: APPLICATION_MAX_CONCURRENT_QUERIES
+  value: {{ int64 . | quote }}
+{{- end }}
+{{- with .Values.backend.concurrency.mutations }}
+- name: APPLICATION_MAX_CONCURRENT_MUTATIONS
+  value: {{ int64 . | quote }}
+{{- end }}
+{{- with .Values.backend.concurrency.v8Actions }}
+- name: APPLICATION_MAX_CONCURRENT_V8_ACTIONS
+  value: {{ int64 . | quote }}
+{{- end }}
+{{- with .Values.backend.httpTimeoutSeconds }}
+- name: HTTP_SERVER_TIMEOUT_SECONDS
+  value: {{ int64 . | quote }}
+{{- end }}
+{{- with .Values.backend.maxConcurrentRequests }}
+- name: HTTP_SERVER_MAX_CONCURRENT_REQUESTS
+  value: {{ int64 . | quote }}
+{{- end }}
+{{- with .Values.backend.committerQueueSize }}
+- name: COMMITTER_QUEUE_SIZE
+  value: {{ int64 . | quote }}
+{{- end }}
+{{- end -}}
+
+{{- define "convex.funrunTunableEnv" -}}
+{{- with .Values.funrun.isolate.maxWorkers }}
+- name: MAX_ISOLATE_WORKERS
+  value: {{ int64 . | quote }}
+{{- end }}
+{{- with .Values.funrun.isolate.preloadWorkers }}
+- name: ISOLATE_PRELOAD_WORKERS
+  value: {{ int64 . | quote }}
+{{- end }}
+{{- with .Values.funrun.isolate.heapUserMiB }}
+- name: ISOLATE_MAX_USER_HEAP_SIZE
+  value: {{ mul (int64 .) 1048576 | quote }}
+{{- end }}
+{{- with .Values.funrun.isolate.heapExtraMiB }}
+- name: ISOLATE_MAX_HEAP_EXTRA_SIZE
+  value: {{ mul (int64 .) 1048576 | quote }}
+{{- end }}
+{{- with .Values.funrun.isolate.arrayBufferMiB }}
+- name: ISOLATE_MAX_ARRAY_BUFFER_TOTAL_SIZE
+  value: {{ mul (int64 .) 1048576 | quote }}
+{{- end }}
+{{- with .Values.funrun.isolate.queueSize }}
+- name: ISOLATE_QUEUE_SIZE
+  value: {{ int64 . | quote }}
+{{- end }}
+{{- with .Values.funrun.isolate.activeThreads }}
+- name: FUNRUN_ISOLATE_ACTIVE_THREADS
+  value: {{ int64 . | quote }}
+{{- end }}
+{{- with .Values.funrun.isolate.initialPermitTimeoutMs }}
+- name: FUNRUN_INITIAL_PERMIT_TIMEOUT_MS
+  value: {{ int64 . | quote }}
+{{- end }}
+{{- with .Values.funrun.cache.indexBytes }}
+- name: FUNRUN_INDEX_CACHE_SIZE
+  value: {{ int64 . | quote }}
+{{- end }}
+{{- with .Values.funrun.cache.followerIndexBytes }}
+- name: FUNRUN_FOLLOWER_INDEX_CACHE_SIZE
+  value: {{ int64 . | quote }}
+{{- end }}
+{{- with .Values.funrun.cache.codeBytes }}
+- name: FUNRUN_CODE_CACHE_SIZE
+  value: {{ int64 . | quote }}
+{{- end }}
+{{- with .Values.funrun.cache.moduleBytes }}
+- name: FUNRUN_MODULE_CACHE_SIZE
+  value: {{ int64 . | quote }}
+{{- end }}
 {{- end -}}

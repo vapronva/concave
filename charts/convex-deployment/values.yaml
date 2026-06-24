@@ -75,6 +75,13 @@ controlPlane:
 
 backend:
   extraEnv: []
+  concurrency:
+    queries: ""
+    mutations: ""
+    v8Actions: ""
+  httpTimeoutSeconds: ""
+  maxConcurrentRequests: ""
+  committerQueueSize: ""
 
 funrun:
   enabled: true
@@ -90,6 +97,20 @@ funrun:
   affinity: {}
   topologySpreadConstraints: []
   extraEnv: []
+  isolate:
+    maxWorkers: ""
+    preloadWorkers: ""
+    heapUserMiB: ""
+    heapExtraMiB: ""
+    arrayBufferMiB: ""
+    queueSize: ""
+    activeThreads: ""
+    initialPermitTimeoutMs: ""
+  cache:
+    indexBytes: ""
+    followerIndexBytes: ""
+    codeBytes: ""
+    moduleBytes: ""
   podDeletionCost:
     enabled: true
   hpa:
@@ -102,6 +123,13 @@ funrun:
     cpuAverageUtilization: ""
     memoryAverageUtilization: ""
     scaleDownStabilizationSeconds: 300
+
+sizeLimits:
+  writeBytes: ""
+  readBytes: ""
+
+allocator:
+  arenaMax: 2
 
 dashboard:
   enabled: true

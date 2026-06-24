@@ -122,6 +122,8 @@ spec:
                 fieldRef:
                   fieldPath: metadata.namespace
             {{- end }}
+            {{- with include "convex.sharedTunableEnv" . | trim }}{{ . | nindent 12 }}{{- end }}
+            {{- with include "convex.funrunTunableEnv" . | trim }}{{ . | nindent 12 }}{{- end }}
             {{- with .Values.funrun.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
