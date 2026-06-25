@@ -19,6 +19,11 @@ usher:
   mono: false
   extraEnv: []
   replicas: 2
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   listen: :8080
   image:
     repository: vapronva/concave/usher

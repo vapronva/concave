@@ -92,6 +92,22 @@ imagePullSecrets:
 {{- join "\n" $out -}}
 {{- end -}}
 
+{{- define "convex.updateStrategy" -}}
+{{- $s := .strategy | default dict -}}
+{{- $type := $s.type | default .type -}}
+{{- if not (has $type (list "RollingUpdate" "Recreate")) -}}
+{{- fail (printf "updateStrategy.type=%q is invalid; use RollingUpdate or Recreate" $type) -}}
+{{- end -}}
+strategy:
+  type: {{ $type }}
+  {{- if eq $type "RollingUpdate" }}
+  {{- $ru := $s.rollingUpdate | default dict }}
+  rollingUpdate:
+    maxUnavailable: {{ dig "maxUnavailable" .maxUnavailable $ru }}
+    maxSurge: {{ dig "maxSurge" .maxSurge $ru }}
+  {{- end }}
+{{- end -}}
+
 {{- define "convex.backendDiscoveryLabels" -}}
 {{- $ctx := .ctx -}}
 {{- $prefix := include "convex.labelPrefix" $ctx -}}

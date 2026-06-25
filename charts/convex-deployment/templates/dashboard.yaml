@@ -10,6 +10,7 @@ metadata:
 
 spec:
   replicas: 1
+  {{- include "convex.updateStrategy" (dict "strategy" .Values.dashboard.updateStrategy "type" "RollingUpdate" "maxUnavailable" 0 "maxSurge" 1) | nindent 2 }}
   selector:
     matchLabels:
       {{- include "convex.componentSelectorLabels" (dict "ctx" . "component" "dashboard") | nindent 6 }}

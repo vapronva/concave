@@ -17,11 +17,7 @@ spec:
   {{- if not .Values.funrun.hpa.enabled }}
   replicas: {{ .Values.funrun.replicas }}
   {{- end }}
-  strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxUnavailable: 0
-      maxSurge: 1
+  {{- include "convex.updateStrategy" (dict "strategy" .Values.funrun.updateStrategy "type" "RollingUpdate" "maxUnavailable" 0 "maxSurge" 1) | nindent 2 }}
   selector:
     matchLabels:
       {{- include "convex.componentSelectorLabels" (dict "ctx" . "component" "funrun") | nindent 6 }}

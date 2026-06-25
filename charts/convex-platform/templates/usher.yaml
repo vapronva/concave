@@ -41,6 +41,7 @@ metadata:
 
 spec:
   replicas: {{ $u.replicas }}
+  {{- include "convex.updateStrategy" (dict "strategy" $u.updateStrategy "type" "RollingUpdate" "maxUnavailable" 0 "maxSurge" 1) | nindent 2 }}
   selector:
     matchLabels:
       {{- include "convex.componentSelectorLabels" (dict "ctx" . "component" "usher") | nindent 6 }}
