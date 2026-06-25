@@ -6,7 +6,7 @@ index db49bb14d..ca5c35005 100644
 -22.22.2
 +24.18.0
 diff --git a/Cargo.lock b/Cargo.lock
-index 59dccfb28..e3c372ee6 100644
+index fc2325a48..49f74e4f3 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
 @@ -356,7 +356,7 @@ dependencies = [
@@ -458,15 +458,6 @@ index 59dccfb28..e3c372ee6 100644
   "http-body 1.0.1",
   "hyper",
   "ipnet",
-@@ -5084,7 +5130,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
- checksum = "4b0f83760fb341a774ed326568e19f5a863af4a952def8c39f9ab92fd95b88e5"
- dependencies = [
-  "equivalent",
-- "hashbrown 0.15.2",
-+ "hashbrown 0.16.1",
-  "serde",
-  "serde_core",
- ]
 @@ -5224,7 +5270,7 @@ dependencies = [
   "file_storage",
   "futures",
@@ -873,11 +864,11 @@ index 13d8d9a69..6d919d75d 100644
  roles = { workspace = true }
  runtime = { workspace = true }
 diff --git a/rust-toolchain b/rust-toolchain
-index 2a8b1190d..cce8d42f9 100644
+index 2a8b1190d..171adf7b5 100644
 --- a/rust-toolchain
 +++ b/rust-toolchain
 @@ -1,2 +1,3 @@
  [toolchain]
 -channel = "nightly-2026-02-18"
-+channel = "nightly-2026-06-24"
++channel = "nightly-2026-06-25"
 +components = ["rustfmt"]
