@@ -494,10 +494,10 @@ index 6371f8dc4..8985b588e 100644
          self.runner.shutdown().await?;
          self.database.shutdown().await?;
 diff --git a/crates/log_streaming/src/lib.rs b/crates/log_streaming/src/lib.rs
-index 6ff4d3f66..bfb53ffcb 100644
+index 57b19abe3..80d3faa8f 100644
 --- a/crates/log_streaming/src/lib.rs
 +++ b/crates/log_streaming/src/lib.rs
-@@ -94,6 +94,11 @@ use crate::sinks::{
+@@ -95,6 +95,11 @@ use crate::sinks::{
  /// See `log_streaming/README.md` for more info.
  #[derive(Clone)]
  pub struct LogManagerClient {
@@ -509,7 +509,7 @@ index 6ff4d3f66..bfb53ffcb 100644
      handle: Arc<Mutex<Option<Box<dyn SpawnHandle>>>>,
      event_sender: mpsc::Sender<LogEvent>,
      active_sinks_count: Arc<AtomicUsize>,
-@@ -101,12 +106,36 @@ pub struct LogManagerClient {
+@@ -102,12 +107,36 @@ pub struct LogManagerClient {
  }
  
  impl LogManagerClient {
@@ -547,7 +547,7 @@ index 6ff4d3f66..bfb53ffcb 100644
                  Err(mpsc::error::TrySendError::Full(_)) => {
                      dropped += 1;
                  },
-@@ -133,15 +162,21 @@ impl LogManagerClient {
+@@ -134,15 +163,21 @@ impl LogManagerClient {
      }
  
      pub fn set_entitlement_enabled(&self, enabled: bool) {
@@ -572,7 +572,7 @@ index 6ff4d3f66..bfb53ffcb 100644
      }
  
      fn is_active(&self) -> bool {
-@@ -152,7 +187,7 @@ impl LogManagerClient {
+@@ -153,7 +188,7 @@ impl LogManagerClient {
  #[async_trait]
  impl LogSender for LogManagerClient {
      async fn shutdown(&self) -> anyhow::Result<()> {
@@ -581,7 +581,7 @@ index 6ff4d3f66..bfb53ffcb 100644
          if let Some(handle) = handle {
              shutdown_and_join(handle).await?;
          }
-@@ -276,12 +311,12 @@ impl<RT: Runtime> LogManager<RT> {
+@@ -277,12 +312,12 @@ impl<RT: Runtime> LogManager<RT> {
  
          let handle = Arc::new(Mutex::new(Some(runtime.spawn("log_manager", worker.go()))));
          let entitlement_enabled = Arc::new(AtomicBool::new(entitlement_enabled));

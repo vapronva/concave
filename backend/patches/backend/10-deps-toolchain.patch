@@ -6,7 +6,7 @@ index db49bb14d..ca5c35005 100644
 -22.22.2
 +24.18.0
 diff --git a/Cargo.lock b/Cargo.lock
-index fc2325a48..49f74e4f3 100644
+index 41eb446ea..f9b131143 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
 @@ -356,7 +356,7 @@ dependencies = [
@@ -185,7 +185,7 @@ index fc2325a48..49f74e4f3 100644
   "cexpr",
   "clang-sys",
 - "itertools 0.13.0",
-+ "itertools 0.10.5",
++ "itertools 0.12.1",
   "log",
   "prettyplease",
   "proc-macro2",
@@ -216,15 +216,6 @@ index fc2325a48..49f74e4f3 100644
   "http-body-util",
   "humansize",
   "hyper",
-@@ -3391,7 +3391,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
- checksum = "33d852cb9b869c2a9b3df2f71a3074817f01e1844f839a144f5fcef059a4eb5d"
- dependencies = [
-  "libc",
-- "windows-sys 0.59.0",
-+ "windows-sys 0.52.0",
- ]
- 
- [[package]]
 @@ -3400,7 +3400,7 @@ version = "0.1.0"
  dependencies = [
   "anyhow",
@@ -596,7 +587,7 @@ index fc2325a48..49f74e4f3 100644
  dependencies = [
   "heck",
 - "itertools 0.14.0",
-+ "itertools 0.10.5",
++ "itertools 0.12.1",
   "log",
   "multimap",
   "petgraph 0.8.3",
@@ -611,7 +602,7 @@ index fc2325a48..49f74e4f3 100644
  dependencies = [
   "anyhow",
 - "itertools 0.13.0",
-+ "itertools 0.10.5",
++ "itertools 0.12.1",
   "proc-macro2",
   "quote",
   "syn 2.0.108",
@@ -627,7 +618,7 @@ index fc2325a48..49f74e4f3 100644
  dependencies = [
   "anyhow",
 - "itertools 0.14.0",
-+ "itertools 0.10.5",
++ "itertools 0.12.1",
   "proc-macro2",
   "quote",
   "syn 2.0.108",
@@ -671,24 +662,6 @@ index fc2325a48..49f74e4f3 100644
   "reqwest",
   "serde",
   "thiserror 1.0.59",
-@@ -8277,7 +8326,7 @@ dependencies = [
-  "errno",
-  "libc",
-  "linux-raw-sys 0.4.15",
-- "windows-sys 0.59.0",
-+ "windows-sys 0.52.0",
- ]
- 
- [[package]]
-@@ -8290,7 +8339,7 @@ dependencies = [
-  "errno",
-  "libc",
-  "linux-raw-sys 0.12.1",
-- "windows-sys 0.61.2",
-+ "windows-sys 0.52.0",
- ]
- 
- [[package]]
 @@ -8830,7 +8879,7 @@ version = "0.46.0"
  source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "7eec9885bceb8ba374858d015bb6fa39dbb341d94ca088bc8f13bee2e64e2c68"
@@ -698,19 +671,6 @@ index fc2325a48..49f74e4f3 100644
   "pin-project",
   "sentry-core",
   "tower-layer",
-@@ -9929,10 +9978,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
- checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
- dependencies = [
-  "fastrand",
-- "getrandom 0.4.2",
-+ "getrandom 0.3.1",
-  "once_cell",
-  "rustix 1.1.4",
-- "windows-sys 0.61.2",
-+ "windows-sys 0.52.0",
- ]
- 
- [[package]]
 @@ -10437,9 +10486,9 @@ dependencies = [
  
  [[package]]
@@ -864,11 +824,11 @@ index 13d8d9a69..6d919d75d 100644
  roles = { workspace = true }
  runtime = { workspace = true }
 diff --git a/rust-toolchain b/rust-toolchain
-index 2a8b1190d..171adf7b5 100644
+index 2a8b1190d..12e509d90 100644
 --- a/rust-toolchain
 +++ b/rust-toolchain
 @@ -1,2 +1,3 @@
  [toolchain]
 -channel = "nightly-2026-02-18"
-+channel = "nightly-2026-06-25"
++channel = "nightly-2026-06-29"
 +components = ["rustfmt"]
