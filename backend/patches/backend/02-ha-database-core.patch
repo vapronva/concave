@@ -1,5 +1,5 @@
 diff --git a/crates/database/src/committer.rs b/crates/database/src/committer.rs
-index 53ffc9e49..e8751995a 100644
+index 53ffc9e49..ced2d4354 100644
 --- a/crates/database/src/committer.rs
 +++ b/crates/database/src/committer.rs
 @@ -41,6 +41,7 @@ use common::{
@@ -134,7 +134,7 @@ index 53ffc9e49..e8751995a 100644
              },
              _ = rt.wait(*SEND_COMMIT_MESSAGE_TIMEOUT_MILLIS) => {
                  anyhow::bail!(metrics::committer_full_error());
-@@ -1316,6 +1412,23 @@ impl CommitterClient {
+@@ -1316,6 +1412,20 @@ impl CommitterClient {
          self.handle.lock().shutdown();
      }
  
@@ -148,17 +148,14 @@ index 53ffc9e49..e8751995a 100644
 +        let writer = rx
 +            .await
 +            .map_err(|_| anyhow::anyhow!("committer dropped during writer-recovery handshake"))??;
-+        {
-+            let mut handle = self.handle.lock();
-+            handle.shutdown();
-+        }
++        self.handle.lock().shutdown();
 +        Ok(writer)
 +    }
 +
      async fn check_generated_ids<RT: Runtime>(
          &self,
          transaction: &Transaction<RT>,
-@@ -1396,6 +1509,9 @@ enum CommitterMessage {
+@@ -1396,6 +1506,9 @@ enum CommitterMessage {
      FinishTableSummaryBootstrap {
          result: oneshot::Sender<anyhow::Result<()>>,
      },
@@ -845,7 +842,7 @@ index f3fab3e73..4f3e8804b 100644
      pub fn memory_consistency_check(&self) -> anyhow::Result<()> {
 diff --git a/crates/database/src/follower_tailer.rs b/crates/database/src/follower_tailer.rs
 new file mode 100644
-index 000000000..b4eb0e753
+index 000000000..62a79ba9c
 --- /dev/null
 +++ b/crates/database/src/follower_tailer.rs
 @@ -0,0 +1,436 @@
@@ -1251,7 +1248,7 @@ index 000000000..b4eb0e753
 +            let tablet_id = rp.id.table();
 +            let table_number = new_snapshot.table_mapping().tablet_number(tablet_id)?;
 +            let id = rp.id.to_resolved(table_number);
-+            write_bytes += rp.document().map(|d| d.size() as u64).unwrap_or(0);
++            write_bytes += rp.document().map_or(0, |d| d.size() as u64);
 +            let update = DocumentUpdate {
 +                id,
 +                old_document: rp.prev_document().cloned(),

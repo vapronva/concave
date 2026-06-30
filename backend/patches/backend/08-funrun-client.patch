@@ -444,10 +444,10 @@ index 000000000..17e83f819
 +}
 diff --git a/crates/function_runner/src/remote.rs b/crates/function_runner/src/remote.rs
 new file mode 100644
-index 000000000..e185560ba
+index 000000000..bba9a0cd1
 --- /dev/null
 +++ b/crates/function_runner/src/remote.rs
-@@ -0,0 +1,895 @@
+@@ -0,0 +1,896 @@
 +use std::{
 +    collections::{
 +        BTreeMap,
@@ -832,16 +832,17 @@ index 000000000..e185560ba
 +        let mut client = pb::funrun::funrun_client::FunrunClient::new(self.channel.clone())
 +            .max_decoding_message_size(*MAX_GRPC_MESSAGE_BYTES)
 +            .max_encoding_message_size(*MAX_GRPC_MESSAGE_BYTES);
-+        let mut stream = match client.run_function(req).await {
-+            Ok(response) => response.into_inner(),
-+            Err(status) => return Err(RunFunctionAttemptError::Rpc(status)),
-+        };
++        let mut stream = client
++            .run_function(req)
++            .await
++            .map_err(RunFunctionAttemptError::Rpc)?
++            .into_inner();
 +        let mut result = None;
 +        loop {
-+            let part = match stream.message().await {
-+                Ok(part) => part,
-+                Err(status) => return Err(RunFunctionAttemptError::Rpc(status)),
-+            };
++            let part = stream
++                .message()
++                .await
++                .map_err(RunFunctionAttemptError::Rpc)?;
 +            let Some(part) = part else {
 +                break;
 +            };
@@ -1046,7 +1047,7 @@ index 000000000..e185560ba
 +            http_request,
 +        } = http_action_metadata;
 +        let inert_identity: InertIdentity = identity.clone().into();
-+        let request_head = http_request.head.clone();
++        let request_head = http_request.head;
 +        let http_path_for_outcome = http_module_path.clone();
 +        let component = http_module_path.path().component;
 +        let auth_header = token_to_authorization_header(identity.clone().into())?;

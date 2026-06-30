@@ -17,8 +17,7 @@ type Config struct {
 func Run(ctx context.Context, cfg Config, prov *FunrunProvider, log *slog.Logger) error {
 	logs.InitLogs()
 	defer logs.FlushLogs()
-	base := &cmd.AdapterBase{}
-	base.Name = "bigbrain-custom-metrics"
+	base := &cmd.AdapterBase{Name: "bigbrain-custom-metrics"}
 	base.WithCustomMetrics(prov)
 	args := []string{
 		fmt.Sprintf("--secure-port=%d", cfg.SecurePort),

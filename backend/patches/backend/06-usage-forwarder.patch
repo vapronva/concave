@@ -38,10 +38,10 @@ index d8ef7d6f1..81bb043dd 100644
 +}
 diff --git a/crates/local_backend/src/usage_forwarder.rs b/crates/local_backend/src/usage_forwarder.rs
 new file mode 100644
-index 000000000..9d0749048
+index 000000000..3e2a53e57
 --- /dev/null
 +++ b/crates/local_backend/src/usage_forwarder.rs
-@@ -0,0 +1,343 @@
+@@ -0,0 +1,341 @@
 +use async_trait::async_trait;
 +use axum::{
 +    extract::RawQuery,
@@ -107,13 +107,11 @@ index 000000000..9d0749048
 +) -> (Vec<UsageEvent>, u64) {
 +    let mut batches: u64 = 1;
 +    while batches < USAGE_FORWARDER_MAX_BATCHES_PER_POST as u64 {
-+        match rx.try_recv() {
-+            Ok(more) => {
-+                events.extend(more);
-+                batches += 1;
-+            },
-+            Err(_) => break,
-+        }
++        let Ok(more) = rx.try_recv() else {
++            break;
++        };
++        events.extend(more);
++        batches += 1;
 +    }
 +    (events, batches)
 +}

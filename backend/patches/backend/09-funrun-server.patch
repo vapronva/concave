@@ -672,10 +672,10 @@ index 000000000..b3b253642
 +}
 diff --git a/crates/funrun_server/src/config.rs b/crates/funrun_server/src/config.rs
 new file mode 100644
-index 000000000..7713e0faa
+index 000000000..6eaebb1e2
 --- /dev/null
 +++ b/crates/funrun_server/src/config.rs
-@@ -0,0 +1,282 @@
+@@ -0,0 +1,280 @@
 +use std::net::SocketAddr;
 +
 +use clusters::DbDriverTag;
@@ -742,24 +742,22 @@ index 000000000..7713e0faa
 +            .unwrap_or_else(|_| "0.0.0.0:8091".to_string())
 +            .parse()
 +            .map_err(|e| anyhow::anyhow!("Invalid FUNRUN_HEALTH_LISTEN: {e}"))?;
-+        let max_snapshot_lag = std::env::var("FUNRUN_MAX_SNAPSHOT_LAG_SECS")
-+            .ok()
-+            .map(|v| {
-+                v.parse::<u64>()
-+                    .map(std::time::Duration::from_secs)
-+                    .map_err(|e| anyhow::anyhow!("Invalid FUNRUN_MAX_SNAPSHOT_LAG_SECS: {e}"))
-+            })
-+            .transpose()?
-+            .unwrap_or(std::time::Duration::from_secs(30));
-+        let drain_delay = std::env::var("CONVEX_FUNRUN_DRAIN_DELAY_SECS")
-+            .ok()
-+            .map(|v| {
-+                v.parse::<u64>()
-+                    .map(std::time::Duration::from_secs)
-+                    .map_err(|e| anyhow::anyhow!("Invalid CONVEX_FUNRUN_DRAIN_DELAY_SECS: {e}"))
-+            })
-+            .transpose()?
-+            .unwrap_or(std::time::Duration::from_secs(8));
++        fn duration_secs_from_env(
++            key: &str,
++            default_secs: u64,
++        ) -> anyhow::Result<std::time::Duration> {
++            Ok(std::env::var(key)
++                .ok()
++                .map(|v| {
++                    v.parse::<u64>()
++                        .map(std::time::Duration::from_secs)
++                        .map_err(|e| anyhow::anyhow!("Invalid {key}: {e}"))
++                })
++                .transpose()?
++                .unwrap_or(std::time::Duration::from_secs(default_secs)))
++        }
++        let max_snapshot_lag = duration_secs_from_env("FUNRUN_MAX_SNAPSHOT_LAG_SECS", 30)?;
++        let drain_delay = duration_secs_from_env("CONVEX_FUNRUN_DRAIN_DELAY_SECS", 8)?;
 +        let db = match std::env::var("FUNRUN_DB").ok() {
 +            Some(s) => s
 +                .parse::<DbDriverTag>()
@@ -1241,10 +1239,10 @@ index 000000000..e4b6bae91
 +}
 diff --git a/crates/funrun_server/src/service.rs b/crates/funrun_server/src/service.rs
 new file mode 100644
-index 000000000..786709af2
+index 000000000..cf5736f65
 --- /dev/null
 +++ b/crates/funrun_server/src/service.rs
-@@ -0,0 +1,674 @@
+@@ -0,0 +1,673 @@
 +use std::{
 +    collections::BTreeMap,
 +    pin::Pin,
@@ -1752,8 +1750,7 @@ index 000000000..786709af2
 +            None,
 +        ))
 +        .fuse();
-+        let mut log_lines =
-+            tokio_stream::wrappers::UnboundedReceiverStream::new(log_line_receiver).fuse();
++        let mut log_lines = UnboundedReceiverStream::new(log_line_receiver).fuse();
 +        loop {
 +            select_biased! {
 +                result = &mut run_fut => {

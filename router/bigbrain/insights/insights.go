@@ -413,16 +413,14 @@ func getGroupableStringPtr(m map[string]any, k string) *string {
 
 func getStringPtr(m map[string]any, k string) *string {
 	if v, ok := m[k].(string); ok && v != "" {
-		s := v
-		return &s
+		return &v
 	}
 	return nil
 }
 
 func getBoolPtr(m map[string]any, k string) *bool {
 	if v, ok := m[k].(bool); ok {
-		b := v
-		return &b
+		return &v
 	}
 	return nil
 }
