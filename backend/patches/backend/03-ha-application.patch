@@ -1,8 +1,8 @@
 diff --git a/crates/application/src/function_log.rs b/crates/application/src/function_log.rs
-index add0ec6e6..462b775c5 100644
+index e234c8bb1..7c4c72d30 100644
 --- a/crates/application/src/function_log.rs
 +++ b/crates/application/src/function_log.rs
-@@ -921,6 +921,7 @@ impl<RT: Runtime> FunctionExecutionLog<RT> {
+@@ -922,6 +922,7 @@ impl<RT: Runtime> FunctionExecutionLog<RT> {
                              user_execution_time: outcome.user_execution_time,
                              memory_in_mb: outcome.memory_in_mb,
                              occ_info: occ_info.clone(),

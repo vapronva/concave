@@ -664,7 +664,7 @@ index 4217d331d..b508e24e8 100644
                  tracing::warn!("Forcibly shutting down!");
                  break;
 diff --git a/crates/local_backend/src/node_action_callbacks.rs b/crates/local_backend/src/node_action_callbacks.rs
-index 22d9c58bb..a81c608ac 100644
+index 5942e04ad..6f8349dcb 100644
 --- a/crates/local_backend/src/node_action_callbacks.rs
 +++ b/crates/local_backend/src/node_action_callbacks.rs
 @@ -10,10 +10,14 @@ use axum::{
@@ -694,16 +694,20 @@ index 22d9c58bb..a81c608ac 100644
      },
      knobs::ACTION_USER_TIMEOUT,
      runtime::UnixTimestamp,
-@@ -49,6 +58,8 @@ use fastrace::future::FutureExt;
+@@ -51,7 +60,11 @@ use fastrace::future::FutureExt;
  use http::HeaderMap;
  use isolate::UdfArgsJson;
  use keybroker::Identity;
-+use model::file_storage::types::FileStorageEntry;
+-use model::session_requests::types::SessionRequestIdentifier;
++use model::{
++    file_storage::types::FileStorageEntry,
++    session_requests::types::SessionRequestIdentifier,
++};
 +use prost::Message;
  use serde::{
      Deserialize,
      Serialize,
-@@ -85,6 +96,7 @@ use crate::{
+@@ -88,6 +101,7 @@ use crate::{
  #[serde(rename_all = "camelCase")]
  pub struct NodeCallbackUdfPostRequest {
      pub path: Option<String>,
@@ -711,8 +715,8 @@ index 22d9c58bb..a81c608ac 100644
      pub reference: Option<String>,
      pub function_handle: Option<String>,
      pub args: UdfArgsJson,
-@@ -92,6 +104,38 @@ pub struct NodeCallbackUdfPostRequest {
-     pub format: Option<String>,
+@@ -118,6 +132,38 @@ impl TryFrom<MutationIdentifierJson> for SessionRequestIdentifier {
+     }
  }
  
 +async fn callback_function_path(
@@ -750,7 +754,7 @@ index 22d9c58bb..a81c608ac 100644
  /// This is like `public_query_post`, except it allows calling internal
  /// functions as well. This should not be used for any publicly accessible
  /// endpoints, and should only be used to support Convex functions calling into
-@@ -107,16 +151,16 @@ pub async fn internal_query_post(
+@@ -133,16 +179,16 @@ pub async fn internal_query_post(
      ExtractExecutionContext(context): ExtractExecutionContext,
      Json(req): Json<NodeCallbackUdfPostRequest>,
  ) -> Result<impl IntoResponse, HttpResponseError> {
@@ -777,10 +781,10 @@ index 22d9c58bb..a81c608ac 100644
      let udf_return = st
          .application
          .read_only_udf(
-@@ -161,16 +205,16 @@ pub async fn internal_mutation_post(
-     ExtractExecutionContext(context): ExtractExecutionContext,
-     Json(req): Json<NodeCallbackUdfPostRequest>,
- ) -> Result<impl IntoResponse, HttpResponseError> {
+@@ -191,16 +237,16 @@ pub async fn internal_mutation_post(
+         .mutation_identifier
+         .map(SessionRequestIdentifier::try_from)
+         .transpose()?;
 -    let path = st
 -        .application
 -        .canonicalized_function_path(
@@ -804,7 +808,7 @@ index 22d9c58bb..a81c608ac 100644
      let udf_result = st
          .application
          .mutation_udf(
-@@ -220,16 +264,16 @@ pub async fn internal_action_post(
+@@ -250,16 +296,16 @@ pub async fn internal_action_post(
      ExtractExecutionContext(context): ExtractExecutionContext,
      Json(req): Json<NodeCallbackUdfPostRequest>,
  ) -> Result<impl IntoResponse, HttpResponseError> {
@@ -831,7 +835,7 @@ index 22d9c58bb..a81c608ac 100644
      let udf_result = st
          .application
          .action_udf(
-@@ -268,6 +312,7 @@ pub struct ScheduleJobRequest {
+@@ -298,6 +344,7 @@ pub struct ScheduleJobRequest {
      reference: Option<String>,
      function_handle: Option<String>,
      udf_path: Option<String>,
@@ -839,7 +843,7 @@ index 22d9c58bb..a81c608ac 100644
      udf_args: UdfArgsJson,
      scheduled_ts: f64,
  }
-@@ -291,19 +336,17 @@ pub async fn schedule_job(
+@@ -321,19 +368,17 @@ pub async fn schedule_job(
          ErrorMetadata::bad_request("InvalidTimestamp", "Requested scheduled_ts is invalid")
      })?;
      // User might have entered an invalid path, so this is a developer error.
@@ -870,7 +874,7 @@ index 22d9c58bb..a81c608ac 100644
      let udf_args = req.udf_args.into_serialized_args()?;
      let job_id = st
          .application
-@@ -351,6 +394,7 @@ pub async fn cancel_developer_job(
+@@ -381,6 +426,7 @@ pub async fn cancel_developer_job(
  #[serde(rename_all = "camelCase")]
  pub struct CreateFunctionHandleRequest {
      udf_path: Option<String>,
@@ -878,7 +882,7 @@ index 22d9c58bb..a81c608ac 100644
      reference: Option<String>,
  }
  
-@@ -368,19 +412,17 @@ pub async fn create_function_handle(
+@@ -398,19 +444,17 @@ pub async fn create_function_handle(
      }: ExtractActionIdentity,
      Json(req): Json<CreateFunctionHandleRequest>,
  ) -> Result<impl IntoResponse, HttpResponseError> {
@@ -909,7 +913,7 @@ index 22d9c58bb..a81c608ac 100644
      let handle = st
          .application
          .runner()
-@@ -538,6 +580,95 @@ pub async fn storage_delete(
+@@ -568,6 +612,95 @@ pub async fn storage_delete(
      Ok(Json(json!(null)))
  }
  
@@ -1005,7 +1009,7 @@ index 22d9c58bb..a81c608ac 100644
  #[derive(Deserialize)]
  pub struct AuditLogParams {
      #[allow(dead_code)]
-@@ -555,14 +686,12 @@ pub async fn audit_log(
+@@ -585,14 +718,12 @@ pub async fn audit_log(
      .into())
  }
  
@@ -1021,7 +1025,7 @@ index 22d9c58bb..a81c608ac 100644
          .context("Missing callback token - is the call from actions?")?;
  
      let token = value
-@@ -654,7 +783,7 @@ impl<S: Sync> FromRequestParts<S> for ExtractActionName {
+@@ -684,7 +815,7 @@ impl<S: Sync> FromRequestParts<S> for ExtractActionName {
      ) -> Result<Self, Self::Rejection> {
          let action_name = parts
              .headers
@@ -1030,7 +1034,7 @@ index 22d9c58bb..a81c608ac 100644
              .map(|value| value.to_str())
              .transpose()
              .context("Convex-Action-Function-Name must be a string")?
-@@ -675,7 +804,7 @@ impl<T: Sync> FromRequestParts<T> for ExtractExecutionContext {
+@@ -705,7 +836,7 @@ impl<T: Sync> FromRequestParts<T> for ExtractExecutionContext {
      ) -> Result<Self, Self::Rejection> {
          let request_id: RequestId = parts
              .headers
@@ -1039,7 +1043,7 @@ index 22d9c58bb..a81c608ac 100644
              .map(|v| v.to_str())
              .transpose()
              .context("Request id must be a string")?
-@@ -685,7 +814,7 @@ impl<T: Sync> FromRequestParts<T> for ExtractExecutionContext {
+@@ -715,7 +846,7 @@ impl<T: Sync> FromRequestParts<T> for ExtractExecutionContext {
              .unwrap_or(RequestId::new());
          let execution_id: ExecutionId = parts
              .headers
@@ -1048,7 +1052,7 @@ index 22d9c58bb..a81c608ac 100644
              .map(|v| v.to_str())
              .transpose()
              .context("Execution id must be a string")?
-@@ -694,7 +823,7 @@ impl<T: Sync> FromRequestParts<T> for ExtractExecutionContext {
+@@ -724,7 +855,7 @@ impl<T: Sync> FromRequestParts<T> for ExtractExecutionContext {
              // For backwards compatibility
              .unwrap_or(ExecutionId::new());
  
