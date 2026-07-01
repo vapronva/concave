@@ -57,10 +57,10 @@ index 9da2989bb..9af453d36 100644
      persistence
          .write_persistence_global(PersistenceGlobalKey::MaxRepeatableTimestamp, now.into())
 diff --git a/crates/postgres/src/lib.rs b/crates/postgres/src/lib.rs
-index cce12606d..0fb0a358c 100644
+index 9f598b5b6..a53a478f1 100644
 --- a/crates/postgres/src/lib.rs
 +++ b/crates/postgres/src/lib.rs
-@@ -463,6 +463,34 @@ impl PostgresPersistence {
+@@ -462,6 +462,34 @@ impl PostgresPersistence {
              .await?
              .is_none())
      }
@@ -95,7 +95,7 @@ index cce12606d..0fb0a358c 100644
  }
  
  #[async_trait]
-@@ -481,6 +509,22 @@ impl Persistence for PostgresPersistence {
+@@ -480,6 +508,22 @@ impl Persistence for PostgresPersistence {
          })
      }
  
@@ -118,7 +118,7 @@ index cce12606d..0fb0a358c 100644
      #[fastrace::trace]
      async fn write<'a>(
          &self,
-@@ -746,6 +790,10 @@ impl Persistence for PostgresPersistence {
+@@ -745,6 +789,10 @@ impl Persistence for PostgresPersistence {
          &self,
          mut documents: BoxStream<'_, Vec<DocumentLogEntry>>,
      ) -> anyhow::Result<()> {
@@ -129,7 +129,7 @@ index cce12606d..0fb0a358c 100644
          let conn = self
              .lease
              .pool
-@@ -807,7 +855,10 @@ impl Persistence for PostgresPersistence {
+@@ -806,7 +854,10 @@ impl Persistence for PostgresPersistence {
              writer.finish().await?;
              break;
          }
@@ -141,7 +141,7 @@ index cce12606d..0fb0a358c 100644
          Ok(())
      }
  
-@@ -815,6 +866,10 @@ impl Persistence for PostgresPersistence {
+@@ -814,6 +865,10 @@ impl Persistence for PostgresPersistence {
          &self,
          mut indexes: BoxStream<'_, Vec<PersistenceIndexEntry>>,
      ) -> anyhow::Result<()> {
@@ -152,7 +152,7 @@ index cce12606d..0fb0a358c 100644
          let conn = self
              .lease
              .pool
-@@ -873,7 +928,10 @@ impl Persistence for PostgresPersistence {
+@@ -872,7 +927,10 @@ impl Persistence for PostgresPersistence {
              writer.finish().await?;
              break;
          }
@@ -164,7 +164,7 @@ index cce12606d..0fb0a358c 100644
          Ok(())
      }
  
-@@ -1758,8 +1816,6 @@ struct Lease {
+@@ -1757,8 +1815,6 @@ struct Lease {
  }
  
  impl Lease {
@@ -173,7 +173,7 @@ index cce12606d..0fb0a358c 100644
      async fn acquire(
          pool: Arc<ConvexPgPool>,
          schema: &SchemaName,
-@@ -1777,27 +1833,27 @@ impl Lease {
+@@ -1776,27 +1832,27 @@ impl Lease {
              .as_nanos() as i64;
  
          tracing::info!("attempting to acquire lease");
@@ -215,7 +215,7 @@ index cce12606d..0fb0a358c 100644
              schema: schema.clone(),
              instance_name,
              multitenant,
-@@ -1805,6 +1861,61 @@ impl Lease {
+@@ -1804,6 +1860,61 @@ impl Lease {
          })
      }
  
@@ -371,10 +371,10 @@ index 5fc5d0a2e..906cc0767 100644
 +    }
 +}
 diff --git a/crates/sqlite/src/lib.rs b/crates/sqlite/src/lib.rs
-index 59a5c5c8d..f9b1deb87 100644
+index 2dcd0bc93..b4bc163ca 100644
 --- a/crates/sqlite/src/lib.rs
 +++ b/crates/sqlite/src/lib.rs
-@@ -726,3 +726,21 @@ WHERE
+@@ -725,3 +725,21 @@ WHERE
      ts = $3
  ORDER BY ts ASC, table_id ASC, id ASC
  "#;

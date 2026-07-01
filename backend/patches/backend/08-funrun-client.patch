@@ -1438,7 +1438,7 @@ index c489a0ac7..18c54d317 100644
  
      pub fn concurrency_limiter(&self) -> &isolate::ConcurrencyLimiter {
 diff --git a/crates/isolate/src/client.rs b/crates/isolate/src/client.rs
-index c77b196b2..04e7e2f95 100644
+index a8c990b9e..674162f1b 100644
 --- a/crates/isolate/src/client.rs
 +++ b/crates/isolate/src/client.rs
 @@ -9,6 +9,7 @@ use std::{
@@ -1772,10 +1772,10 @@ index 000000000..d76e4928d
 +    }
 +}
 diff --git a/crates/keybroker/src/lib.rs b/crates/keybroker/src/lib.rs
-index eeeab09e9..3ba65085d 100644
+index 801f70273..e734870fc 100644
 --- a/crates/keybroker/src/lib.rs
 +++ b/crates/keybroker/src/lib.rs
-@@ -4,6 +4,7 @@
+@@ -2,6 +2,7 @@
  
  mod broker;
  mod encryptor;
@@ -1783,7 +1783,7 @@ index eeeab09e9..3ba65085d 100644
  mod legacy_encryptor;
  mod metrics;
  mod operations;
-@@ -27,6 +28,12 @@ pub use self::{
+@@ -25,6 +26,12 @@ pub use self::{
          UserIdentity,
      },
      encryptor::Encryptor,
