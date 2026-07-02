@@ -831,7 +831,7 @@ index 000000000..dc8b81e60
 +    }
 +}
 diff --git a/crates/local_backend/src/router.rs b/crates/local_backend/src/router.rs
-index 444fd930c..c9c1ae629 100644
+index 2f27d85a0..c1eaba016 100644
 --- a/crates/local_backend/src/router.rs
 +++ b/crates/local_backend/src/router.rs
 @@ -1,6 +1,9 @@
@@ -876,7 +876,7 @@ index 444fd930c..c9c1ae629 100644
          vector_search,
      },
      public_api::public_api_router,
-@@ -337,8 +340,7 @@ pub fn router(st: LocalAppState) -> Router {
+@@ -336,8 +339,7 @@ pub fn router(st: LocalAppState) -> Router {
          .route("/schema_state/{schema_id}", get(schema_state))
          .route("/stream_udf_execution", get(stream_udf_execution))
          .route("/stream_function_logs", get(stream_function_logs))
@@ -886,7 +886,7 @@ index 444fd930c..c9c1ae629 100644
  
      let snapshot_export_routes = Router::new()
          .route("/request/zip", post(request_zip_export))
-@@ -368,6 +370,10 @@ pub fn router(st: LocalAppState) -> Router {
+@@ -367,6 +369,10 @@ pub fn router(st: LocalAppState) -> Router {
          .nest("/actions", action_callback_routes(st.clone()))
          .nest("/export", snapshot_export_routes)
          .nest("/streaming_import", streaming_import_routes())
@@ -897,7 +897,7 @@ index 444fd930c..c9c1ae629 100644
          .nest("/v1", platform_routes);
  
      // Endpoints migrated to use the RouterState trait instead of application.
-@@ -405,6 +411,9 @@ pub fn router(st: LocalAppState) -> Router {
+@@ -404,6 +410,9 @@ pub fn router(st: LocalAppState) -> Router {
      Router::new()
          .nest("/api", api_routes)
          .merge(health_check_routes(version))
@@ -907,7 +907,7 @@ index 444fd930c..c9c1ae629 100644
          .layer(cors())
          .with_state(st)
          .merge(migrated)
-@@ -448,6 +457,9 @@ where
+@@ -447,6 +456,9 @@ where
          .route("/storage_get_url", post(storage_get_url))
          .route("/storage_get_metadata", post(storage_get_metadata))
          .route("/storage_delete", post(storage_delete))
@@ -917,7 +917,7 @@ index 444fd930c..c9c1ae629 100644
          .route("/audit_log", post(audit_log))
          // All routes above this line get the increased limit
          .layer(DefaultBodyLimit::max(*MAX_BACKEND_RPC_REQUEST_SIZE))
-@@ -528,6 +540,7 @@ where
+@@ -527,6 +539,7 @@ where
              get(|MtState(st): MtState<LocalAppState>| async move { st.instance_name.clone() }),
          )
          .route("/instance_version", get(|| async move { version }))
@@ -925,7 +925,7 @@ index 444fd930c..c9c1ae629 100644
          .route(
              "/",
              get(|| async { "This Convex deployment is running. See https://docs.convex.dev/." }),
-@@ -591,10 +604,15 @@ where
+@@ -589,10 +602,15 @@ where
          .route("/get_table_column_names", get(get_table_column_names))
  }
  
@@ -943,7 +943,7 @@ index 444fd930c..c9c1ae629 100644
          .allow_methods(vec![
              Method::GET,
              Method::POST,
-@@ -603,6 +621,51 @@ pub fn cors() -> CorsLayer {
+@@ -601,6 +619,51 @@ pub fn cors() -> CorsLayer {
              Method::DELETE,
              Method::PUT,
          ])

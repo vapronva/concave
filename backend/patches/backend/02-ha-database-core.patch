@@ -1279,7 +1279,7 @@ index 000000000..62a79ba9c
 +    }
 +}
 diff --git a/crates/database/src/lib.rs b/crates/database/src/lib.rs
-index cfd05d7da..065fbf4be 100644
+index 1a7edffd2..312162ef6 100644
 --- a/crates/database/src/lib.rs
 +++ b/crates/database/src/lib.rs
 @@ -15,6 +15,7 @@ mod committer;
@@ -1290,7 +1290,7 @@ index cfd05d7da..065fbf4be 100644
  mod metrics;
  pub mod patch;
  pub mod persistence_helpers;
-@@ -173,6 +174,7 @@ pub use self::{
+@@ -174,6 +175,7 @@ pub use self::{
          Database,
          DatabaseSnapshot,
          DocumentDeltas,
