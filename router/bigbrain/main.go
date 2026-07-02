@@ -64,19 +64,8 @@ func run() int {
 	flag.Parse()
 	log := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(log)
-	reg := registry.New()
-	deployments, err := parseDeployments(*bootstrap)
+	reg, controlPlaneTokens, usageTokens, err := buildRegistry(*bootstrap, log)
 	if err != nil {
-		log.Error("bigbrain: invalid --deployments/BIGBRAIN_DEPLOYMENTS", "err", err)
-		return 1
-	}
-	controlPlaneTokens, usageTokens, err := loadDeploymentTokens(reg, deployments, log)
-	if err != nil {
-		log.Error("bigbrain: missing deployment control-plane token", "err", err)
-		return 1
-	}
-	if len(reg.Names()) == 0 {
-		log.Error("bigbrain: refusing to start without registered deployments")
 		return 1
 	}
 	k8s, err := k8sclient.New(*kubeconfig, *labelPrefix)
@@ -85,6 +74,9 @@ func run() int {
 		return 1
 	}
 	cfg := electionCfg()
+	if err = validateRuntimeConfig(cfg, *insightsRingCap, log); err != nil {
+		return 1
+	}
 	ctrl := election.New(cfg, k8s, backend.New(controlPlaneTokens), reg, log)
 	actuation := ctrl.ActuationTimeout()
 	ins := insights.New(*insightsRingCap)
@@ -143,6 +135,11 @@ func electionFlags(fs *flag.FlagSet) func() election.Config {
 	graceDefault, graceSet := envDuration("BIGBRAIN_UNREACHABLE_LEADER_GRACE", election.DefaultUnreachableLeaderGrace)
 	unreachableGrace := fs.Duration("unreachable-leader-grace", graceDefault,
 		"how long an unreachable incumbent keeps its lease before being treated as gone")
+	leaseGraceDefault, leaseGraceSet := envDuration(
+		"BIGBRAIN_LEASE_UNVERIFIED_GRACE", election.DefaultLeaseUnverifiedGrace,
+	)
+	leaseUnverifiedGrace := fs.Duration("lease-unverified-grace", leaseGraceDefault,
+		"how long a reachable leader may fail to verify its own lease before losing its claim (0 disables)")
 	actuationDefault, actuationSet := envDuration("BIGBRAIN_ACTUATION_TIMEOUT", election.DefaultActuationTimeout)
 	actuationTimeout := fs.Duration("actuation-timeout", actuationDefault,
 		"budget for one promote/demote actuation batch per deployment")
@@ -157,6 +154,7 @@ func electionFlags(fs *flag.FlagSet) func() election.Config {
 			FailbackStability:      knob(fbStabilitySet, "failback-stability", passed, failbackStability),
 			FailbackWarmthLagNs:    knob(fbWarmthSet, "failback-warmth-lag", passed, failbackWarmthLag),
 			UnreachableLeaderGrace: knob(graceSet, "unreachable-leader-grace", passed, unreachableGrace),
+			LeaseUnverifiedGrace:   knob(leaseGraceSet, "lease-unverified-grace", passed, leaseUnverifiedGrace),
 			ActuationTimeout:       knob(actuationSet, "actuation-timeout", passed, actuationTimeout),
 		}
 	}
@@ -165,6 +163,41 @@ func electionFlags(fs *flag.FlagSet) func() election.Config {
 func knob[T any](envSet bool, name string, passed map[string]bool, v *T) *T {
 	if envSet || passed[name] {
 		return v
+	}
+	return nil
+}
+
+func buildRegistry(
+	bootstrap string,
+	log *slog.Logger,
+) (*registry.Registry, map[string]string, map[string]string, error) {
+	reg := registry.New()
+	deployments, err := parseDeployments(bootstrap)
+	if err != nil {
+		log.Error("bigbrain: invalid --deployments/BIGBRAIN_DEPLOYMENTS", "err", err)
+		return nil, nil, nil, err
+	}
+	controlPlaneTokens, usageTokens, err := loadDeploymentTokens(reg, deployments, log)
+	if err != nil {
+		log.Error("bigbrain: missing deployment control-plane token", "err", err)
+		return nil, nil, nil, err
+	}
+	if len(reg.Names()) == 0 {
+		log.Error("bigbrain: refusing to start without registered deployments")
+		return nil, nil, nil, errors.New("no registered deployments")
+	}
+	return reg, controlPlaneTokens, usageTokens, nil
+}
+
+func validateRuntimeConfig(cfg election.Config, insightsRingCap int, log *slog.Logger) error {
+	if insightsRingCap <= 0 {
+		err := fmt.Errorf("insights ring cap must be > 0, got %d", insightsRingCap)
+		log.Error("bigbrain: invalid --insights-ring-cap/INSIGHTS_RING_CAP", "err", err)
+		return err
+	}
+	if err := cfg.Validate(); err != nil {
+		log.Error("bigbrain: invalid election config", "err", err)
+		return err
 	}
 	return nil
 }
@@ -228,15 +261,24 @@ func startMetricsAPIServer(
 	seen := make(map[string]struct{}, len(reg.Names()))
 	namespaces := make([]string, 0, len(reg.Names()))
 	for _, name := range reg.Names() {
-		if ns, ok := reg.Namespace(name); ok {
-			if _, dup := seen[ns]; !dup {
-				seen[ns] = struct{}{}
-				namespaces = append(namespaces, ns)
-			}
+		ns, ok := reg.Namespace(name)
+		if !ok {
+			continue
 		}
+		if _, dup := seen[ns]; dup {
+			continue
+		}
+		seen[ns] = struct{}{}
+		namespaces = append(namespaces, ns)
 	}
 	scrapeInterval, _ := envDuration("BIGBRAIN_METRICS_SCRAPE_INTERVAL", defaultMetricsScrapeInterval)
+	if scrapeInterval <= 0 {
+		badEnv("BIGBRAIN_METRICS_SCRAPE_INTERVAL", scrapeInterval.String(), errors.New("must be > 0"))
+	}
 	securePort, _ := envInt("BIGBRAIN_METRICS_APISERVER_PORT", defaultMetricsAPIServerPort)
+	if securePort < 1 || securePort > 65535 {
+		badEnv("BIGBRAIN_METRICS_APISERVER_PORT", strconv.Itoa(securePort), errors.New("must be in 1..65535"))
+	}
 	cfg := apiserver.Config{
 		SecurePort: securePort,
 		CertDir:    env("BIGBRAIN_METRICS_APISERVER_CERT_DIR", defaultMetricsAPIServerCertDir),

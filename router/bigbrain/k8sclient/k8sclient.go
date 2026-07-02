@@ -3,9 +3,11 @@ package k8sclient
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net"
 	"sort"
 	"strconv"
+	"sync"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -49,8 +51,10 @@ func newLabelKeys(prefix string) labelKeys {
 }
 
 type Client struct {
-	cs     kubernetes.Interface
-	labels labelKeys
+	cs             kubernetes.Interface
+	labels         labelKeys
+	log            *slog.Logger
+	warnedPriority sync.Map
 }
 
 func New(kubeconfigPath, labelPrefix string) (*Client, error) {
@@ -62,11 +66,11 @@ func New(kubeconfigPath, labelPrefix string) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("build clientset: %w", err)
 	}
-	return &Client{cs: cs, labels: newLabelKeys(labelPrefix)}, nil
+	return &Client{cs: cs, labels: newLabelKeys(labelPrefix), log: slog.Default()}, nil
 }
 
 func NewFromInterface(cs kubernetes.Interface, labelPrefix string) *Client {
-	return &Client{cs: cs, labels: newLabelKeys(labelPrefix)}
+	return &Client{cs: cs, labels: newLabelKeys(labelPrefix), log: slog.Default()}
 }
 
 func (c *Client) Clientset() kubernetes.Interface {
@@ -108,17 +112,21 @@ func (c *Client) DiscoverBackends(ctx context.Context, ns, name string) ([]Backe
 		out = append(out, Backend{
 			Pod:      p.Name,
 			URL:      fmt.Sprintf("http://%s", net.JoinHostPort(p.Status.PodIP, strconv.Itoa(BackendPort))),
-			Priority: priorityFor(p.Labels[c.labels.leaderPriority], role),
+			Priority: c.priorityFor(p.Name, p.Labels[c.labels.leaderPriority], role),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Pod < out[j].Pod })
 	return out, nil
 }
 
-func priorityFor(label, role string) int {
+func (c *Client) priorityFor(pod, label, role string) int {
 	if label != "" {
 		if n, err := strconv.Atoi(label); err == nil {
 			return n
+		}
+		if _, seen := c.warnedPriority.LoadOrStore(pod+"\x00"+label, struct{}{}); !seen {
+			c.log.Warn("k8s: malformed leader-priority label; using role default",
+				"pod", pod, "value", label, "role", role)
 		}
 	}
 	if role == "leader" {

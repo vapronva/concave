@@ -11,9 +11,11 @@ import (
 )
 
 type Leadership struct {
-	IsLeader bool    `json:"is_leader"`
-	LatestTS uint64  `json:"latest_ts"`
-	LeaseTS  *uint64 `json:"lease_ts"`
+	Role                string  `json:"role"`
+	IsLeader            bool    `json:"is_leader"`
+	LatestTS            uint64  `json:"latest_ts"`
+	LeaseTS             *uint64 `json:"lease_ts"`
+	LeaseUnverifiedSecs *uint64 `json:"lease_unverified_secs"`
 }
 
 const (

@@ -2,6 +2,9 @@ package k8sclient_test
 
 import (
 	"context"
+	"log/slog"
+	"strings"
+	"sync"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -45,6 +48,7 @@ func TestDiscoverBackends_CustomPrefix(t *testing.T) {
 		pod(prefix, "dashboard-0", "", "", "", "10.0.0.3", true),
 		pod(prefix, "funrun-0", "follower", "funrun", "", "10.0.0.4", true),
 		pod(prefix, "unlabeled-0", "follower", "", "", "10.0.0.6", true),
+		pod(prefix, "pending-0", "follower", "backend", "", "", true),
 		pod("convex", "other-0", "leader", "backend", "100", "10.0.0.5", true),
 	)
 	c := k8sclient.NewFromInterface(cs, prefix)
@@ -53,7 +57,7 @@ func TestDiscoverBackends_CustomPrefix(t *testing.T) {
 		t.Fatalf("DiscoverBackends: %v", err)
 	}
 	if len(out) != 2 {
-		t.Fatalf("want 2 backends (role-labelled with component=backend), got %d: %+v", len(out), out)
+		t.Fatalf("want 2 backends (role-labelled, component=backend, with an IP), got %d: %+v", len(out), out)
 	}
 	if out[0].Pod != "backend-0" || out[1].Pod != "backend-1" {
 		t.Fatalf("want backend-0,backend-1 sorted, got %q,%q", out[0].Pod, out[1].Pod)
@@ -106,21 +110,51 @@ func TestDiscoverBackends_SkipsTerminalPods(t *testing.T) {
 	}
 }
 
-func TestDiscoverBackends_SkipsNonBackendComponentAndNoIP(t *testing.T) {
-	t.Parallel()
+//nolint:paralleltest // mutates the process-global slog default
+func TestDiscoverBackends_MalformedPriorityUsesRoleDefault(t *testing.T) {
 	const prefix = "convex"
+	var mu sync.Mutex
+	var warns int
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	slog.SetDefault(slog.New(countingHandler{count: &warns, mu: &mu}))
 	cs := fake.NewClientset(
-		pod(prefix, "backend-0", "leader", "backend", "100", "10.0.0.1", true),
-		pod(prefix, "sidecar-0", "follower", "router", "", "10.0.0.2", true),
-		pod(prefix, "funrun-0", "", "funrun", "", "10.0.0.3", true),
-		pod(prefix, "pending-0", "follower", "backend", "", "", true),
+		pod(prefix, "backend-0", "leader", "backend", "banana", "10.0.0.1", true),
+		pod(prefix, "backend-1", "follower", "backend", "banana", "10.0.0.2", true),
 	)
 	c := k8sclient.NewFromInterface(cs, prefix)
-	out, err := c.DiscoverBackends(context.Background(), "acme", "acme")
-	if err != nil {
-		t.Fatalf("DiscoverBackends: %v", err)
+	for range 2 {
+		out, err := c.DiscoverBackends(context.Background(), "acme", "acme")
+		if err != nil {
+			t.Fatalf("DiscoverBackends: %v", err)
+		}
+		if out[0].Priority != 100 || out[1].Priority != 0 {
+			t.Fatalf("malformed priority must fall back to role defaults, got %+v", out)
+		}
 	}
-	if len(out) != 1 || out[0].Pod != "backend-0" {
-		t.Fatalf("want only backend-0 (skip non-backend component and no-IP), got %+v", out)
+	mu.Lock()
+	defer mu.Unlock()
+	if warns != 2 {
+		t.Fatalf("want one warn per (pod, value) across repeated discovers, got %d", warns)
 	}
 }
+
+type countingHandler struct {
+	count *int
+	mu    *sync.Mutex
+}
+
+func (h countingHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h countingHandler) Handle(_ context.Context, r slog.Record) error {
+	if r.Level == slog.LevelWarn && strings.Contains(r.Message, "malformed leader-priority") {
+		h.mu.Lock()
+		*h.count++
+		h.mu.Unlock()
+	}
+	return nil
+}
+
+func (h countingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+
+func (h countingHandler) WithGroup(string) slog.Handler { return h }

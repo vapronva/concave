@@ -91,7 +91,7 @@ func TestCommitState_EmptyDiscoveryDoesNotRestartUnreachableGrace(t *testing.T) 
 	}
 }
 
-func TestActLeaderless_EmptyListDoesNotAdvanceStreak(t *testing.T) {
+func TestCommitState_EmptyListDoesNotAdvanceStreak(t *testing.T) {
 	t.Parallel()
 	reg := registry.New()
 	reg.EnsureDeployment("dev", "convex-dev")

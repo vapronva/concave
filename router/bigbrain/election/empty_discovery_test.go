@@ -53,9 +53,14 @@ func TestReconcile_EmptyDiscoveryDebounceClearsRetainedLeader(t *testing.T) {
 	c, reg, st := emptyDiscoveryController(t, debounce)
 	ctx := context.Background()
 	c.setLeader("dev", st, "backend-0", "http://10.0.0.1:3210")
-	for range debounce {
+	for i := 1; i < debounce; i++ {
 		c.reconcile(ctx, "dev")
+		if pod, ok := leaderOf(t, reg, "dev"); !ok || pod != "backend-0" {
+			t.Fatalf("tick %d < debounce %d: last-known leader must be retained, got %q ok=%v",
+				i, debounce, pod, ok)
+		}
 	}
+	c.reconcile(ctx, "dev")
 	if pod, ok := leaderOf(t, reg, "dev"); ok {
 		t.Fatalf("stale leader %q must be cleared after the empty-discovery debounce", pod)
 	}
@@ -70,21 +75,6 @@ func TestReconcile_EmptyDiscoveryDebounceClearsRetainedLeader(t *testing.T) {
 	}
 	if _, empty, _ := c.commitState(st, decision{liveLeaderCount: 1}, false, time.Now()); empty != 0 {
 		t.Fatalf("non-empty discovery must reset the empty streak, got %d", empty)
-	}
-}
-
-func TestReconcile_EmptyDiscoveryBlipKeepsLastKnownLeader(t *testing.T) {
-	t.Parallel()
-	const debounce = 5
-	c, reg, st := emptyDiscoveryController(t, debounce)
-	ctx := context.Background()
-	c.setLeader("dev", st, "backend-0", "http://10.0.0.1:3210")
-	for i := 1; i < debounce; i++ {
-		c.reconcile(ctx, "dev")
-		if pod, ok := leaderOf(t, reg, "dev"); !ok || pod != "backend-0" {
-			t.Fatalf("tick %d < debounce %d: last-known leader must be retained, got %q ok=%v",
-				i, debounce, pod, ok)
-		}
 	}
 }
 

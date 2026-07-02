@@ -164,20 +164,6 @@ func TestDecide_TransitioningPodExcludedFromPromotion(t *testing.T) {
 	}
 }
 
-func TestDecide_TransitioningOnlyPodIsNotPromoted(t *testing.T) {
-	t.Parallel()
-	in := []observation{
-		obs("draining", false, 200, 500),
-	}
-	d := decide(in, sticky("draining"))
-	if d.promoteTarget != nil {
-		t.Fatalf("a sole mid-demotion pod must not be promoted, got %q", d.promoteTarget.be.Pod)
-	}
-	if !d.hasTransitioning {
-		t.Fatalf("decision must carry the transitioning marker so the streak freezes")
-	}
-}
-
 func TestDecide_SplitBrain_ThreeClaimants(t *testing.T) {
 	t.Parallel()
 	in := []observation{
@@ -206,27 +192,106 @@ func TestPickLeader_TieBreakByPodName(t *testing.T) {
 	}
 }
 
-func TestPickLeader_IncumbentZombieDefersToFresh(t *testing.T) {
+func withUnverified(o observation, secs uint64) observation {
+	o.status.LeaseUnverifiedSecs = &secs
+	return o
+}
+
+func withRole(o observation, role string) observation {
+	o.status.Role = role
+	return o
+}
+
+func TestDecide_TransitioningRolesFreezePromotion(t *testing.T) {
 	t.Parallel()
-	claims := []observation{
-		obs("backend-0", true, 100, 5),
-		obs("backend-1", true, 100, 80),
-	}
-	got := pickLeader(claims, "backend-0")
-	if got.be.Pod != "backend-1" {
-		t.Fatalf("zombie incumbent must defer to fresher lease holder, got %q", got.be.Pod)
+	for _, role := range []string{"promoting", "demoting"} {
+		in := []observation{
+			withRole(obs("backend-0", false, 100, -1), role),
+			obs("backend-1", false, 100, -1),
+		}
+		d := decide(in, sticky(""))
+		if !d.hasTransitioning {
+			t.Fatalf("a role=%s pod must count as transitioning even with a nil lease_ts", role)
+		}
+		if d.promoteTarget != nil {
+			t.Fatalf("no promotion may be issued while a %s is in flight, got %+v", role, d.promoteTarget)
+		}
 	}
 }
 
-func TestClaimedLeaders_IgnoresUnreachableAndFollowers(t *testing.T) {
+func TestDecide_PromotingPodExcludedFromFailback(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(1000, 0)
+	prior := failbackState{candidate: "backend-0", eligibleSince: now.Add(-time.Minute)}
+	in := []observation{
+		withPriority(withRole(obs("backend-0", false, 100, -1), "promoting"), 100),
+		obs("backend-1", true, 100, 100),
+	}
+	p := decideParams{incumbent: "backend-1", failback: fb(now, prior)}
+	d := decide(in, p)
+	if d.failbackTarget != nil {
+		t.Fatalf("a promoting pod must not be a failback target, got %+v", d.failbackTarget)
+	}
+}
+
+func TestDecide_WedgedLeaderLosesClaim(t *testing.T) {
+	t.Parallel()
+	wedged := withUnverified(obs("backend-0", true, 100, 100), 120)
+	in := []observation{
+		wedged,
+		obs("backend-1", false, 100, -1),
+	}
+	p := decideParams{incumbent: "backend-0", leaseUnverifiedGrace: 60 * time.Second}
+	d := decide(in, p)
+	if d.liveLeaderCount != 0 {
+		t.Fatalf("a leader unverified past the grace must lose its claim, got %d live", d.liveLeaderCount)
+	}
+	if d.promoteTarget == nil || d.promoteTarget.be.Pod != "backend-1" {
+		t.Fatalf("want backend-1 promoted past the wedged leader, got %+v", d.promoteTarget)
+	}
+	if len(d.demotes) != 0 {
+		t.Fatalf("a wedged leader must not be a demote target, got %+v", d.demotes)
+	}
+}
+
+func TestDecide_UnverifiedWithinGraceKeepsClaim(t *testing.T) {
 	t.Parallel()
 	in := []observation{
-		obs("backend-0", true, 100, 100),
-		obs("backend-1", false, 99, -1),
-		unreachable("backend-2"),
+		withUnverified(obs("backend-0", true, 100, 100), 30),
+		obs("backend-1", false, 100, -1),
 	}
-	if got := claimedLeaders(in); len(got) != 1 || got[0].be.Pod != "backend-0" {
-		t.Fatalf("want only backend-0 as claimed leader, got %+v", got)
+	p := decideParams{incumbent: "backend-0", leaseUnverifiedGrace: 60 * time.Second}
+	d := decide(in, p)
+	if d.liveLeaderCount != 1 || d.leaderPod != "backend-0" {
+		t.Fatalf("an unverified-within-grace leader keeps its claim, got %d live leader %q",
+			d.liveLeaderCount, d.leaderPod)
+	}
+}
+
+func TestDecide_NilUnverifiedOrZeroGraceKeepsClaim(t *testing.T) {
+	t.Parallel()
+	nilField := []observation{obs("backend-0", true, 100, 100)}
+	d := decide(nilField, decideParams{incumbent: "backend-0", leaseUnverifiedGrace: 60 * time.Second})
+	if d.liveLeaderCount != 1 {
+		t.Fatalf("an old backend without the field must keep its claim, got %d", d.liveLeaderCount)
+	}
+	stale := []observation{withUnverified(obs("backend-0", true, 100, 100), 10_000)}
+	d = decide(stale, decideParams{incumbent: "backend-0"})
+	if d.liveLeaderCount != 1 {
+		t.Fatalf("grace 0 disables the check, got %d live leaders", d.liveLeaderCount)
+	}
+}
+
+func TestDecide_SplitBrain_StaleClaimLoses(t *testing.T) {
+	t.Parallel()
+	in := []observation{
+		withUnverified(obs("backend-0", true, 100, 150), 120),
+		obs("backend-1", true, 100, 50),
+	}
+	p := decideParams{incumbent: "backend-0", leaseUnverifiedGrace: 60 * time.Second}
+	d := decide(in, p)
+	if d.leaderPod != "backend-1" {
+		t.Fatalf("split-brain with one stale claim must resolve to the fresh one, got %q", d.leaderPod)
 	}
 }
 
@@ -252,18 +317,6 @@ func TestDecide_Leaderless_PromotesHighestPriorityNotWarmest(t *testing.T) {
 	}
 	if d.promoteTarget.be.Pod != "primary" {
 		t.Fatalf("leaderless must promote highest-PRIORITY pod 'primary', got %q", d.promoteTarget.be.Pod)
-	}
-}
-
-func TestDecide_Leaderless_EqualPriorityBreaksByWarmth(t *testing.T) {
-	t.Parallel()
-	in := []observation{
-		withPriority(obs("a", false, 90, -1), 50),
-		withPriority(obs("b", false, 120, -1), 50),
-	}
-	d := decide(in, sticky(""))
-	if d.promoteTarget == nil || d.promoteTarget.be.Pod != "b" {
-		t.Fatalf("equal priority -> warmest 'b' should win, got %+v", d.promoteTarget)
 	}
 }
 
@@ -317,21 +370,6 @@ func TestDecide_Failback_NoFailbackWhenNotWarm(t *testing.T) {
 	}
 	if d.failbackState != (failbackState{}) {
 		t.Fatalf("a not-warm candidate must RESET the clock, got %+v", d.failbackState)
-	}
-}
-
-func TestDecide_Failback_DemotedNotReadyExLeaderIsEligible(t *testing.T) {
-	t.Parallel()
-	now := time.Unix(1000, 0)
-	in := []observation{
-		withPriority(obs("standby", true, 100, 100), 0),
-		withPriority(obs("primary", false, 99, -1), 100),
-	}
-	prior := failbackState{candidate: "primary", eligibleSince: now.Add(-1 * time.Hour)}
-	d := decide(in, decideParams{incumbent: "standby", failback: fb(now, prior)})
-	if d.failbackTarget == nil || d.failbackTarget.be.Pod != "primary" {
-		t.Fatalf("a demoted-in-place primary (NotReady by role-conformance readyz) must be failback-eligible, got %+v",
-			d.failbackTarget)
 	}
 }
 

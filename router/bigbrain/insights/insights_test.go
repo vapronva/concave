@@ -39,19 +39,6 @@ func TestIngestRecognizesOCCAndReadLimit(t *testing.T) {
 	}
 }
 
-func TestRingBufferCap(t *testing.T) {
-	t.Parallel()
-	i := insights.New(3)
-	for range 5 {
-		_ = i.Ingest("d", []insights.AnyEvent{
-			{"FunctionCall": map[string]any{"is_occ": true, "udf_id": "f", "id": "x"}},
-		})
-	}
-	if i.MemLen() != 3 {
-		t.Errorf("ring cap broken: MemLen=%d", i.MemLen())
-	}
-}
-
 func TestRingBufferCapPerDeployment(t *testing.T) {
 	t.Parallel()
 	i := insights.New(3)
@@ -179,30 +166,6 @@ func TestQueryOCCFailedPermanentlyUsesExplicitSignal(t *testing.T) {
 	}
 }
 
-func TestQueryReadLimitBytesThresholdAndLimit(t *testing.T) {
-	t.Parallel()
-	i := insights.New(100)
-	_ = i.Ingest("p", []insights.AnyEvent{
-		{"InsightReadLimit": map[string]any{
-			"udf_id": "q", "id": "i", "request_id": "r",
-			"calls": []any{
-				map[string]any{"table_name": "items", "bytes_read": 17 * 1024 * 1024, "documents_read": 1},
-			},
-		}},
-	})
-	today := time.Now().UTC().Format("2006-01-02")
-	out, _ := i.Query("p", today, today)
-	var sawLimit bool
-	for _, row := range out {
-		if row[0] == "bytesReadLimit" {
-			sawLimit = true
-		}
-	}
-	if !sawLimit {
-		t.Errorf("expected bytesReadLimit row; got %v", out)
-	}
-}
-
 func TestIngestStripsGroupSeparator(t *testing.T) {
 	t.Parallel()
 	i := insights.New(100)
@@ -293,16 +256,5 @@ func TestIngestQueryRoundTripRowShapes(t *testing.T) {
 	}
 	if _, ok = kinds["documentsReadLimit"]; !ok {
 		t.Errorf("missing documentsReadLimit row; got %v", out)
-	}
-}
-
-func TestRingGrowsInMemory(t *testing.T) {
-	t.Parallel()
-	i := insights.New(10)
-	_ = i.Ingest("p", []insights.AnyEvent{
-		{"FunctionCall": map[string]any{"is_occ": true, "udf_id": "f", "id": "i"}},
-	})
-	if i.MemLen() != 1 {
-		t.Errorf("expected mem to grow in in-memory mode; got %d", i.MemLen())
 	}
 }

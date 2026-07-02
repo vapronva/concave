@@ -126,7 +126,7 @@ func newProxyTransport() *http.Transport {
 }
 
 func newReverseProxy(u *url.URL, nudge func(), tr *http.Transport) *httputil.ReverseProxy {
-	rp := &httputil.ReverseProxy{
+	return &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(u)
 			pr.Out.Header["X-Forwarded-For"] = pr.In.Header["X-Forwarded-For"]
@@ -171,7 +171,6 @@ func newReverseProxy(u *url.URL, nudge func(), tr *http.Transport) *httputil.Rev
 			return nil
 		},
 	}
-	return rp
 }
 
 func (t *tracker) applyLeader(leaderURL string, seq, epoch uint64) bool {
@@ -260,6 +259,9 @@ func (t *tracker) queryBigbrain(ctx context.Context) (leaderResponse, bool, erro
 		var lr leaderResponse
 		if err = json.NewDecoder(io.LimitReader(resp.Body, bodyReadLimit)).Decode(&lr); err != nil {
 			return leaderResponse{}, false, err
+		}
+		if lr.Epoch == 0 {
+			return leaderResponse{}, false, errors.New("bigbrain leader query: 503 without epoch is not authoritative")
 		}
 		lr.LeaderURL = ""
 		return lr, false, nil
@@ -754,25 +756,38 @@ func validateConfig(cfg config, bigbrainURL string, mono bool) error {
 	return validateDeployments(cfg.Deployments)
 }
 
+func resolvedDeploymentName(d deploymentCfg) (string, error) {
+	name := d.Name
+	if name == "" {
+		name = firstLabel(d.Host)
+	}
+	if name == "" || url.PathEscape(name) != name {
+		return "", fmt.Errorf("deployment %s: name %q must be a non-empty URL path segment", d.Host, name)
+	}
+	return name, nil
+}
+
 func validateDeployments(deployments []deploymentCfg) error {
 	hosts := make(map[string]struct{}, len(deployments)*routesPerDeployment)
+	names := make(map[string]string, len(deployments))
 	for _, d := range deployments {
 		if d.Host == "" {
 			return errors.New("deployment host must not be empty")
 		}
-		name := d.Name
-		if name == "" {
-			name = firstLabel(d.Host)
+		name, err := resolvedDeploymentName(d)
+		if err != nil {
+			return err
 		}
-		if name == "" || url.PathEscape(name) != name {
-			return fmt.Errorf("deployment %s: name %q must be a non-empty URL path segment", d.Host, name)
+		if prev, dup := names[name]; dup {
+			return fmt.Errorf("deployments %q and %q resolve to the same name %q", prev, d.Host, name)
 		}
+		names[name] = d.Host
 		for _, host := range []string{d.Host, d.SiteHost} {
 			if host == "" {
 				continue
 			}
 			host = strings.ToLower(host)
-			if _, _, err := net.SplitHostPort(host); err == nil {
+			if _, _, portErr := net.SplitHostPort(host); portErr == nil {
 				return fmt.Errorf("deployment host %q must not include a port", host)
 			}
 			if _, exists := hosts[host]; exists {

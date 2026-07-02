@@ -27,10 +27,20 @@ type failbackState struct {
 	eligibleSince time.Time
 }
 
-func claimedLeaders(obs []observation) []observation {
+func isLiveLeaderClaim(o observation, grace time.Duration) bool {
+	if !o.reach || !o.status.IsLeader {
+		return false
+	}
+	if grace <= 0 || o.status.LeaseUnverifiedSecs == nil {
+		return true
+	}
+	return *o.status.LeaseUnverifiedSecs <= uint64(grace/time.Second)
+}
+
+func claimedLeaders(obs []observation, grace time.Duration) []observation {
 	var out []observation
 	for _, o := range obs {
-		if o.reach && o.status.IsLeader {
+		if isLiveLeaderClaim(o, grace) {
 			out = append(out, o)
 		}
 	}
@@ -38,7 +48,10 @@ func claimedLeaders(obs []observation) []observation {
 }
 
 func isTransitioning(o observation) bool {
-	return o.reach && !o.status.IsLeader && o.status.LeaseTS != nil
+	if !o.reach || o.status.IsLeader {
+		return false
+	}
+	return o.status.LeaseTS != nil || o.status.Role == "promoting" || o.status.Role == "demoting"
 }
 
 func anyTransitioning(obs []observation) bool {
@@ -132,12 +145,13 @@ type failbackParams struct {
 }
 
 type decideParams struct {
-	incumbent string
-	failback  failbackParams
+	incumbent            string
+	leaseUnverifiedGrace time.Duration
+	failback             failbackParams
 }
 
 func decide(obs []observation, p decideParams) decision {
-	claims := claimedLeaders(obs)
+	claims := claimedLeaders(obs, p.leaseUnverifiedGrace)
 	d := decision{liveLeaderCount: len(claims), hasTransitioning: anyTransitioning(obs)}
 	if len(claims) == 0 {
 		d.incumbentUnreachable = incumbentDiscoveredUnreachable(obs, p.incumbent)

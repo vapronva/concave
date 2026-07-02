@@ -50,10 +50,16 @@ func TestRegistry_SeqMonotonicPerDistinctLeaderState(t *testing.T) {
 	}
 }
 
-func TestRegistry_EventsCarrySeq(t *testing.T) {
+func TestRegistry_SubscriberEvents(t *testing.T) {
 	t.Parallel()
 	r := registry.New()
 	r.EnsureDeployment("dev", "convex-dev")
+	if r.Epoch() == 0 {
+		t.Fatal("registry epoch must be a non-zero per-process nonce")
+	}
+	if registry.New().Epoch() == r.Epoch() {
+		t.Fatal("a fresh registry (a bigbrain restart) must carry a distinct epoch")
+	}
 	ch, cancel, ok := r.Subscribe("dev")
 	if !ok {
 		t.Fatal("subscribe failed")
@@ -63,66 +69,17 @@ func TestRegistry_EventsCarrySeq(t *testing.T) {
 	var first uint64
 	select {
 	case ev := <-ch:
+		if ev.LeaderPod != "backend-0" {
+			t.Fatalf("want backend-0, got %q", ev.LeaderPod)
+		}
 		_, _, seq, _ := r.Leader("dev")
 		if ev.Seq == 0 || ev.Seq != seq {
 			t.Fatalf("event seq %d must match Leader() seq %d and be non-zero", ev.Seq, seq)
 		}
-		first = ev.Seq
-	case <-time.After(time.Second):
-		t.Fatal("expected a leader event")
-	}
-	r.Update("dev", "backend-1", "http://b:3210")
-	select {
-	case ev := <-ch:
-		if ev.Seq <= first {
-			t.Fatalf("event seq must strictly increase across changes: %d -> %d", first, ev.Seq)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("expected a leader-change event")
-	}
-}
-
-func TestRegistry_EventsCarryEpoch(t *testing.T) {
-	t.Parallel()
-	r := registry.New()
-	r.EnsureDeployment("dev", "convex-dev")
-	if r.Epoch() == 0 {
-		t.Fatal("registry epoch must be a non-zero per-process nonce")
-	}
-	ch, cancel, ok := r.Subscribe("dev")
-	if !ok {
-		t.Fatal("subscribe failed")
-	}
-	defer cancel()
-	r.Update("dev", "backend-0", "http://a:3210")
-	select {
-	case ev := <-ch:
 		if ev.Epoch != r.Epoch() {
 			t.Fatalf("event epoch %d must match registry epoch %d", ev.Epoch, r.Epoch())
 		}
-	case <-time.After(time.Second):
-		t.Fatal("expected a leader event")
-	}
-	if registry.New().Epoch() == r.Epoch() {
-		t.Fatal("a fresh registry (a bigbrain restart) must carry a distinct epoch")
-	}
-}
-
-func TestRegistry_LeaderEventOnChange(t *testing.T) {
-	t.Parallel()
-	r := registry.New()
-	r.EnsureDeployment("dev", "convex-dev")
-	ch, cancel, ok := r.Subscribe("dev")
-	if !ok {
-		t.Fatal("subscribe failed")
-	}
-	defer cancel()
-	r.Update("dev", "backend-0", "http://a:3210")
-	select {
-	case ev := <-ch:
-		if ev.LeaderPod != "backend-0" {
-			t.Fatalf("want backend-0, got %q", ev.LeaderPod)
-		}
+		first = ev.Seq
 	case <-time.After(time.Second):
 		t.Fatal("expected a leader event")
 	}
@@ -137,6 +94,9 @@ func TestRegistry_LeaderEventOnChange(t *testing.T) {
 	case ev := <-ch:
 		if ev.LeaderPod != "backend-1" {
 			t.Fatalf("want backend-1, got %q", ev.LeaderPod)
+		}
+		if ev.Seq <= first {
+			t.Fatalf("event seq must strictly increase across changes: %d -> %d", first, ev.Seq)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("expected a leader-change event")

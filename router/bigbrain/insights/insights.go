@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -172,13 +173,7 @@ func aggregateOCC(rows []Row) [][]any {
 }
 
 func buildOCCRow(udfID, comp, occTable string, grp []Row) []any {
-	permanently := false
-	for _, r := range grp {
-		if r.OCCFailedPermanently {
-			permanently = true
-			break
-		}
-	}
+	permanently := slices.ContainsFunc(grp, func(r Row) bool { return r.OCCFailedPermanently })
 	kind := kindOCCRetried
 	if permanently {
 		kind = kindOCCFailedPermanent
@@ -276,12 +271,8 @@ func readMaxes(grp []Row) (int, int) {
 			bsum += c.BytesRead
 			dsum += c.DocumentsRead
 		}
-		if bsum > maxBytes {
-			maxBytes = bsum
-		}
-		if dsum > maxDocs {
-			maxDocs = dsum
-		}
+		maxBytes = max(maxBytes, bsum)
+		maxDocs = max(maxDocs, dsum)
 	}
 	return maxBytes, maxDocs
 }

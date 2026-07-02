@@ -171,11 +171,8 @@ func (s *Server) handleGetLeader(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, registry.LeaderEvent{Name: name, Seq: seq, Epoch: s.reg.Epoch()})
 		return
 	}
-	writeJSON(
-		w,
-		http.StatusOK,
-		registry.LeaderEvent{Name: name, LeaderPod: pod, LeaderURL: url, Seq: seq, Epoch: s.reg.Epoch()},
-	)
+	ev := registry.LeaderEvent{Name: name, LeaderPod: pod, LeaderURL: url, Seq: seq, Epoch: s.reg.Epoch()}
+	writeJSON(w, http.StatusOK, ev)
 }
 
 func (s *Server) handleLeaderStream(w http.ResponseWriter, r *http.Request) {
@@ -196,13 +193,8 @@ func (s *Server) handleLeaderStream(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	if s.reg.Published(name) {
 		pod, url, seq, _ := s.reg.Leader(name)
-		if !emitFrame(
-			w,
-			rc,
-			leaderFrame(
-				registry.LeaderEvent{Name: name, LeaderPod: pod, LeaderURL: url, Seq: seq, Epoch: s.reg.Epoch()},
-			),
-		) {
+		ev := registry.LeaderEvent{Name: name, LeaderPod: pod, LeaderURL: url, Seq: seq, Epoch: s.reg.Epoch()}
+		if !emitFrame(w, rc, leaderFrame(ev)) {
 			return
 		}
 	}
@@ -273,19 +265,8 @@ func logging(log *slog.Logger, next http.Handler) http.Handler {
 		if quietPattern(r.Pattern) {
 			level = slog.LevelDebug
 		}
-		log.Log(
-			r.Context(),
-			level,
-			"http",
-			"method",
-			r.Method,
-			"path",
-			r.URL.Path,
-			"status",
-			sw.status,
-			"dur",
-			time.Since(start).String(),
-		)
+		log.Log(r.Context(), level, "http",
+			"method", r.Method, "path", r.URL.Path, "status", sw.status, "dur", time.Since(start).String())
 	})
 }
 

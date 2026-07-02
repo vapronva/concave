@@ -160,12 +160,15 @@ func (r *Registry) Subscribe(name string) (<-chan LeaderEvent, func(), bool) {
 	cancel := func() {
 		r.mu.Lock()
 		defer r.mu.Unlock()
-		if set, ok := r.subs[name]; ok {
-			if _, present := set[ch]; present {
-				delete(set, ch)
-				close(ch)
-			}
+		set, ok := r.subs[name]
+		if !ok {
+			return
 		}
+		if _, present := set[ch]; !present {
+			return
+		}
+		delete(set, ch)
+		close(ch)
 	}
 	return ch, cancel, true
 }

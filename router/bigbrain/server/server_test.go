@@ -77,34 +77,21 @@ func TestServer_Leader(t *testing.T) {
 	}
 }
 
-func TestServer_RegistryListEndpointsRemoved(t *testing.T) {
+func TestServer_UnroutedPaths(t *testing.T) {
 	t.Parallel()
 	reg, h := newTestServer(t)
 	reg.EnsureDeployment("dev", "convex-dev")
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/registry/deployments", nil))
-	if rr.Code != http.StatusNotFound {
-		t.Fatalf("GET /registry/deployments should be unrouted: want 404, got %d", rr.Code)
-	}
-	rr = httptest.NewRecorder()
-	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/registry/deployments/dev", nil))
-	if rr.Code != http.StatusNotFound {
-		t.Fatalf("GET /registry/deployments/{name} should be unrouted: want 404, got %d", rr.Code)
-	}
-}
-
-func TestServer_NoProvisioningRoutes(t *testing.T) {
-	t.Parallel()
-	_, h := newTestServer(t)
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/provision", strings.NewReader(`{"name":"x"}`)))
-	if rr.Code != http.StatusNotFound {
-		t.Fatalf("POST /provision should be unrouted: want 404, got %d", rr.Code)
-	}
-	rr = httptest.NewRecorder()
-	h.ServeHTTP(rr, httptest.NewRequest(http.MethodDelete, "/deployments/x", nil))
-	if rr.Code != http.StatusNotFound {
-		t.Fatalf("DELETE /deployments/{name} should be unrouted: want 404, got %d", rr.Code)
+	for _, c := range []struct{ method, path string }{
+		{http.MethodGet, "/registry/deployments"},
+		{http.MethodGet, "/registry/deployments/dev"},
+		{http.MethodPost, "/provision"},
+		{http.MethodDelete, "/deployments/x"},
+	} {
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, httptest.NewRequest(c.method, c.path, nil))
+		if rr.Code != http.StatusNotFound {
+			t.Fatalf("%s %s should be unrouted: want 404, got %d", c.method, c.path, rr.Code)
+		}
 	}
 }
 

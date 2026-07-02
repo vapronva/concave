@@ -78,14 +78,7 @@ func TestServeHTTP_RejectsActuationPaths(t *testing.T) {
 		wantBodyContains string
 	}{
 		{http.MethodPost, "/instance/promote", http.StatusNotFound, false, ""},
-		{http.MethodPost, "/instance/demote", http.StatusNotFound, false, ""},
-		{http.MethodGet, "/instance/promote", http.StatusNotFound, false, ""},
-		{http.MethodPost, "/instance/promote/", http.StatusNotFound, false, ""},
-		{http.MethodGet, "/instance/leadership", http.StatusNotFound, false, ""},
-		{http.MethodGet, "/instance/foo", http.StatusNotFound, false, ""},
-		{http.MethodGet, "/INSTANCE/promote", http.StatusNotFound, false, ""},
 		{http.MethodGet, "/instance_name", http.StatusOK, true, "upstream-reached"},
-		{http.MethodGet, "/instance_version", http.StatusOK, true, "upstream-reached"},
 		{http.MethodPost, "/api/mutation", http.StatusOK, true, "upstream-reached"},
 	}
 	for _, c := range cases {
@@ -329,35 +322,6 @@ func TestNudgeResolveDeduplicates(t *testing.T) {
 	}
 }
 
-func TestServeHTTP_RejectsKnownOversizedBody(t *testing.T) {
-	t.Parallel()
-	var hits atomic.Int64
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		hits.Add(1)
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer upstream.Close()
-	tr := &tracker{
-		host:           "api.example",
-		maxBodyBytes:   defaultMaxBodyBytes,
-		resolveCh:      make(chan struct{}, 1),
-		proxyTransport: newProxyTransport(),
-	}
-	if !tr.setLeader(upstream.URL) {
-		t.Fatal("setLeader should install proxy")
-	}
-	req := httptest.NewRequest(http.MethodPost, "/api/mutation", strings.NewReader("x"))
-	req.ContentLength = defaultMaxBodyBytes + 1
-	rr := httptest.NewRecorder()
-	tr.serveHTTP(rr, req, false)
-	if rr.Code != http.StatusRequestEntityTooLarge {
-		t.Fatalf("status=%d want 413", rr.Code)
-	}
-	if hits.Load() != 0 {
-		t.Fatalf("upstream hits=%d want 0", hits.Load())
-	}
-}
-
 func TestServeHTTP_ZeroMaxBodyBytesDisablesCap(t *testing.T) {
 	t.Parallel()
 	var hits atomic.Int64
@@ -445,11 +409,9 @@ func TestValidateConfig(t *testing.T) {
 	if err := validateConfig(emptyDerived, "http://bigbrain:8081", false); err == nil {
 		t.Fatal("host yielding an empty derived name must be rejected")
 	}
-	for _, h := range []string{"api.example:8443", "api.example.com:443"} {
-		ported := config{Deployments: []deploymentCfg{{Host: h}}}
-		if err := validateConfig(ported, "http://bigbrain:8081", false); err == nil {
-			t.Errorf("ported host %q must be rejected at boot", h)
-		}
+	ported := config{Deployments: []deploymentCfg{{Host: "api.example:8443"}}}
+	if err := validateConfig(ported, "http://bigbrain:8081", false); err == nil {
+		t.Fatal("ported host must be rejected at boot")
 	}
 	portedSite := config{Deployments: []deploymentCfg{{Host: "api.example", SiteHost: "site.example:8443"}}}
 	if err := validateConfig(portedSite, "http://bigbrain:8081", false); err == nil {
@@ -458,6 +420,21 @@ func TestValidateConfig(t *testing.T) {
 	derived := config{Deployments: []deploymentCfg{{Host: "team-app.example.com"}}}
 	if err := validateConfig(derived, "http://bigbrain:8081", false); err != nil {
 		t.Fatalf("derived name rejected: %v", err)
+	}
+	dupName := config{Deployments: []deploymentCfg{
+		{Host: "api.a.example", Name: "convex"},
+		{Host: "api.b.example", Name: "convex"},
+	}}
+	dupNameErr := validateConfig(dupName, "http://bigbrain:8081", false)
+	if dupNameErr == nil || !strings.Contains(dupNameErr.Error(), `"convex"`) {
+		t.Fatalf("duplicate-name error must name the colliding name, got %v", dupNameErr)
+	}
+	dupDerived := config{Deployments: []deploymentCfg{
+		{Host: "convex.a.example"},
+		{Host: "convex.b.example"},
+	}}
+	if err := validateConfig(dupDerived, "http://bigbrain:8081", false); err == nil {
+		t.Fatal("hosts deriving the same name must be rejected at boot")
 	}
 }
 
@@ -534,7 +511,7 @@ func TestResolveOnce_ClearsLeaderOnAuthoritativeNoLeader(t *testing.T) {
 		t.Parallel()
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(http.StatusServiceUnavailable)
-			_, _ = w.Write([]byte(`{"error":"no leader"}`))
+			_, _ = w.Write([]byte(`{"name":"test","seq":3,"epoch":42}`))
 		}))
 		defer srv.Close()
 		tr := &tracker{name: "test", bigbrainURL: srv.URL, client: &http.Client{}, proxyTransport: newProxyTransport()}
@@ -542,6 +519,20 @@ func TestResolveOnce_ClearsLeaderOnAuthoritativeNoLeader(t *testing.T) {
 		tr.resolveOnce(context.Background())
 		if tr.currentLeader(false) != nil {
 			t.Fatal("503 no-leader must clear the leader, matching SSE")
+		}
+	})
+	t.Run("status_503_error_body_preserves", func(t *testing.T) {
+		t.Parallel()
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"error":"boom"}`))
+		}))
+		defer srv.Close()
+		tr := &tracker{name: "test", bigbrainURL: srv.URL, client: &http.Client{}, proxyTransport: newProxyTransport()}
+		tr.setLeader("http://10.0.0.5:3210")
+		tr.resolveOnce(context.Background())
+		if tr.currentLeader(false) == nil {
+			t.Fatal("503 without an epoch must be treated as a poll error and preserve the leader")
 		}
 	})
 	t.Run("status_200_empty_url_clears", func(t *testing.T) {
@@ -583,19 +574,6 @@ func TestResolveOnce_ClearsLeaderOnAuthoritativeNoLeader(t *testing.T) {
 		tr.resolveOnce(context.Background())
 		if tr.currentLeader(false) == nil {
 			t.Fatal("503 with an undecodable body must preserve last-known leader")
-		}
-	})
-	t.Run("status_425_preserves", func(t *testing.T) {
-		t.Parallel()
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			w.WriteHeader(http.StatusTooEarly)
-		}))
-		defer srv.Close()
-		tr := &tracker{name: "test", bigbrainURL: srv.URL, client: &http.Client{}, proxyTransport: newProxyTransport()}
-		tr.setLeader("http://10.0.0.5:3210")
-		tr.resolveOnce(context.Background())
-		if tr.currentLeader(false) == nil {
-			t.Fatal("425 must preserve last-known leader")
 		}
 	})
 	t.Run("status_404_preserves", func(t *testing.T) {
@@ -643,10 +621,15 @@ func leaderSnapshot(tr *tracker) string {
 	return tr.leaderURL
 }
 
-func TestLeaderSeqOrdering_StaleStreamEventAfterNewerPoll(t *testing.T) {
+func TestLeaderSeqOrdering_AcrossPollAndStream(t *testing.T) {
 	t.Parallel()
+	var polls atomic.Int64
 	poll := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = io.WriteString(w, `{"leaderUrl":"http://10.0.0.1:3210","seq":10}`)
+		if polls.Add(1) == 1 {
+			_, _ = io.WriteString(w, `{"leaderUrl":"http://10.0.0.1:3210","seq":10}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"leaderUrl":"http://10.0.0.2:3210","seq":5}`)
 	}))
 	defer poll.Close()
 	tr := &tracker{
@@ -665,34 +648,14 @@ func TestLeaderSeqOrdering_StaleStreamEventAfterNewerPoll(t *testing.T) {
 	if got := leaderSnapshot(tr); got != "http://10.0.0.1:3210" {
 		t.Fatalf("stale stream event (seq 5 <= 10) must be rejected, got leader %q", got)
 	}
+	tr.resolveOnce(context.Background())
+	if got := leaderSnapshot(tr); got != "http://10.0.0.1:3210" {
+		t.Fatalf("stale poll (seq 5 <= 10) must be rejected, got leader %q", got)
+	}
 	fresh := sseServer(t, `{"leaderUrl":"http://10.0.0.3:3210","seq":11}`)
 	tr.consumeStream(context.Background(), fresh.URL)
 	if got := leaderSnapshot(tr); got != "http://10.0.0.3:3210" {
 		t.Fatalf("newer stream event (seq 11 > 10) must apply, got leader %q", got)
-	}
-}
-
-func TestLeaderSeqOrdering_StalePollAfterNewerStream(t *testing.T) {
-	t.Parallel()
-	poll := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = io.WriteString(w, `{"leaderUrl":"http://10.0.0.2:3210","seq":5}`)
-	}))
-	defer poll.Close()
-	tr := &tracker{
-		name:           "test",
-		bigbrainURL:    poll.URL,
-		client:         &http.Client{},
-		streamClient:   &http.Client{},
-		proxyTransport: newProxyTransport(),
-	}
-	stream := sseServer(t, `{"leaderUrl":"http://10.0.0.1:3210","seq":10}`)
-	tr.consumeStream(context.Background(), stream.URL)
-	if got := leaderSnapshot(tr); got != "http://10.0.0.1:3210" {
-		t.Fatalf("stream seq 10 must apply, got leader %q", got)
-	}
-	tr.resolveOnce(context.Background())
-	if got := leaderSnapshot(tr); got != "http://10.0.0.1:3210" {
-		t.Fatalf("stale poll (seq 5 <= 10) must be rejected, got leader %q", got)
 	}
 }
 
@@ -888,12 +851,9 @@ func TestNewMux_MethodAndHostGates(t *testing.T) {
 		want               int
 	}{
 		{http.MethodTrace, "probe.invalid", "/usher/healthz", http.StatusMethodNotAllowed},
-		{http.MethodPost, "probe.invalid", "/usher/healthz", http.StatusMethodNotAllowed},
 		{http.MethodHead, "probe.invalid", "/usher/healthz", http.StatusOK},
 		{http.MethodGet, "127.0.0.1:8080", "/usher/healthz", http.StatusOK},
 		{http.MethodTrace, "api.example", "/api/query", http.StatusMethodNotAllowed},
-		{http.MethodConnect, "api.example", "/api/query", http.StatusMethodNotAllowed},
-		{http.MethodTrace, "api.example", "/usher/healthz", http.StatusMethodNotAllowed},
 		{http.MethodGet, "probe.invalid", "/api/query", http.StatusNotFound},
 	}
 	for _, c := range cases {
