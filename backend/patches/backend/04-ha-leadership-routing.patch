@@ -31,10 +31,10 @@ index 986cfe59a..82f7a31a8 100644
  }
 diff --git a/crates/local_backend/src/leadership.rs b/crates/local_backend/src/leadership.rs
 new file mode 100644
-index 000000000..dc8b81e60
+index 000000000..7f7732342
 --- /dev/null
 +++ b/crates/local_backend/src/leadership.rs
-@@ -0,0 +1,795 @@
+@@ -0,0 +1,816 @@
 +use std::sync::{
 +    atomic::{
 +        AtomicU8,
@@ -136,6 +136,15 @@ index 000000000..dc8b81e60
 +        match self.role.load(Ordering::SeqCst) {
 +            ROLE_LEADER => BackendRole::Leader,
 +            _ => BackendRole::Follower,
++        }
++    }
++
++    pub fn current_label(&self) -> &'static str {
++        match self.role.load(Ordering::SeqCst) {
++            ROLE_LEADER => "leader",
++            ROLE_PROMOTING => "promoting",
++            ROLE_DEMOTING => "demoting",
++            _ => "follower",
 +        }
 +    }
 +
@@ -270,6 +279,7 @@ index 000000000..dc8b81e60
 +    pub role: String,
 +    pub is_leader: bool,
 +    pub lease_ts: Option<u64>,
++    pub lease_unverified_secs: Option<u64>,
 +    pub latest_ts: u64,
 +}
 +
@@ -279,10 +289,16 @@ index 000000000..dc8b81e60
 +{
 +    let latest_ts: Timestamp = *st.application.now_ts_for_reads();
 +    let lease_ts = st.leader_handle.lease_ts();
++    let lease_unverified_secs = if st.role.is_leader() {
++        st.application.database().lease_unverified_secs()
++    } else {
++        None
++    };
 +    axum::Json(LeadershipResponse {
-+        role: st.role.current().as_str().to_string(),
++        role: st.role.current_label().to_string(),
 +        is_leader: st.role.is_leader(),
 +        lease_ts,
++        lease_unverified_secs,
 +        latest_ts: u64::from(latest_ts),
 +    })
 +    .into_response()
@@ -381,6 +397,7 @@ index 000000000..dc8b81e60
 +        },
 +    };
 +    tracing::info!("[concave] promotion lease acquired; promoting in-process");
++    st.leader_handle.set_rw_persistence(rw_persistence.clone());
 +    install_lease_lost_handler(&st, rw_persistence.clone());
 +    match st
 +        .application
@@ -392,7 +409,6 @@ index 000000000..dc8b81e60
 +        .await
 +    {
 +        Ok(()) => {
-+            st.leader_handle.set_rw_persistence(rw_persistence);
 +            if st.role.finish_promotion_success() {
 +                tracing::info!("[concave] promotion succeeded; now serving as leader");
 +            } else {
@@ -767,15 +783,20 @@ index 000000000..dc8b81e60
 +    #[test]
 +    fn promote_then_demote_round_trips() {
 +        let rs = RoleState::new(BackendRole::Follower);
++        assert_eq!(rs.current_label(), "follower");
 +        assert!(matches!(rs.begin_promotion(), PromotionAttempt::Started));
 +        assert!(!rs.is_leader());
++        assert_eq!(rs.current_label(), "promoting");
 +        rs.finish_promotion_success();
 +        assert!(rs.is_leader());
++        assert_eq!(rs.current_label(), "leader");
 +        assert!(matches!(rs.begin_demotion(), DemotionAttempt::Started));
 +        assert!(!rs.is_leader());
 +        assert_eq!(rs.current(), BackendRole::Follower);
++        assert_eq!(rs.current_label(), "demoting");
 +        rs.finish_demotion_success();
 +        assert!(!rs.is_leader());
++        assert_eq!(rs.current_label(), "follower");
 +        assert!(matches!(rs.begin_promotion(), PromotionAttempt::Started));
 +        rs.finish_promotion_success();
 +        assert!(rs.is_leader());

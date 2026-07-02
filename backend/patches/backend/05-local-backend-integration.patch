@@ -1120,3 +1120,21 @@ index 0ea3363be..d401785cc 100644
          *HTTP_SERVER_TIMEOUT_DURATION,
          NoopRouteMapper,
      );
+diff --git a/self-hosted/docker-build/read_credentials.sh b/self-hosted/docker-build/read_credentials.sh
+index f7a79d85a..081c8f173 100644
+--- a/self-hosted/docker-build/read_credentials.sh
++++ b/self-hosted/docker-build/read_credentials.sh
+@@ -11,8 +11,11 @@ mkdir -p "$CREDENTIALS_DIR"
+ # 2. Read from CREDENTIALS_DIR/instance_secret if file exists
+ # 3. Generate new random secret if neither exists
+ # Finally, save the secret to disk for persistence
+-export INSTANCE_SECRET=${INSTANCE_SECRET:-$(cat "$CREDENTIALS_DIR/instance_secret" 2>/dev/null || openssl rand -hex 32)}
+-echo "$INSTANCE_SECRET" > "$CREDENTIALS_DIR/instance_secret"
++if [ -z "${INSTANCE_SECRET:-}" ]; then
++  INSTANCE_SECRET=$(cat "$CREDENTIALS_DIR/instance_secret" 2>/dev/null || openssl rand -hex 32)
++  echo "$INSTANCE_SECRET" > "$CREDENTIALS_DIR/instance_secret"
++fi
++export INSTANCE_SECRET
+ 
+ # Set INSTANCE_NAME by checking in order:
+ # 1. Use existing INSTANCE_NAME env var if set

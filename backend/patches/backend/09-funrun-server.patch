@@ -958,10 +958,10 @@ index 000000000..6eaebb1e2
 +}
 diff --git a/crates/funrun_server/src/main.rs b/crates/funrun_server/src/main.rs
 new file mode 100644
-index 000000000..e4b6bae91
+index 000000000..8eae9692e
 --- /dev/null
 +++ b/crates/funrun_server/src/main.rs
-@@ -0,0 +1,275 @@
+@@ -0,0 +1,278 @@
 +use std::sync::{
 +    atomic::{
 +        AtomicBool,
@@ -1133,7 +1133,10 @@ index 000000000..e4b6bae91
 +}
 +
 +fn spawn_pod_deletion_cost_updater(registry: Arc<InstanceRegistry<ProdRuntime>>) {
-+    if std::env::var_os("CONVEX_FUNRUN_POD_DELETION_COST").is_none() {
++    let enabled = std::env::var("CONVEX_FUNRUN_POD_DELETION_COST")
++        .map(|v| v == "true" || v == "1")
++        .unwrap_or(false);
++    if !enabled {
 +        return;
 +    }
 +    let (Ok(pod), Ok(namespace)) = (std::env::var("POD_NAME"), std::env::var("POD_NAMESPACE"))
@@ -1239,10 +1242,10 @@ index 000000000..e4b6bae91
 +}
 diff --git a/crates/funrun_server/src/service.rs b/crates/funrun_server/src/service.rs
 new file mode 100644
-index 000000000..cf5736f65
+index 000000000..baecbc971
 --- /dev/null
 +++ b/crates/funrun_server/src/service.rs
-@@ -0,0 +1,673 @@
+@@ -0,0 +1,652 @@
 +use std::{
 +    collections::BTreeMap,
 +    pin::Pin,
@@ -1347,6 +1350,37 @@ index 000000000..cf5736f65
 +    action_callbacks: Arc<HttpActionCallbacks>,
 +    deployment: DeploymentMetadata,
 +    snapshot: crate::snapshot::SnapshotInputs,
++}
++
++impl CommonRunInputs {
++    fn into_run_request_args<RT: Runtime>(
++        self,
++        instance: &InstanceState<RT>,
++        fetch_client: Arc<dyn common::http::fetch::FetchClient>,
++        udf_type: UdfType,
++        log_line_sender: mpsc::UnboundedSender<LogLine>,
++    ) -> RunRequestArgs {
++        RunRequestArgs {
++            key_broker: instance.key_broker.clone(),
++            index_reader: self.snapshot.index_reader,
++            convex_origin: self.backend_url,
++            bootstrap_metadata: self.snapshot.bootstrap_metadata,
++            table_count_snapshot: self.snapshot.table_count_snapshot,
++            text_index_snapshot: self.snapshot.text_index_snapshot,
++            action_callbacks: self.action_callbacks,
++            fetch_client,
++            log_line_sender: Some(log_line_sender),
++            function_started_sender: None,
++            udf_type,
++            identity: self.identity,
++            existing_writes: self.existing_writes,
++            default_system_env_vars: self.default_system_env_vars,
++            in_memory_index_last_modified: self.in_memory_index_last_modified,
++            context: self.context,
++            subfunctions_in_same_isolate: *common::knobs::SUBFUNCTIONS_IN_SAME_ISOLATE,
++            deployment: self.deployment,
++        }
++    }
 +}
 +
 +pub struct FunrunService<RT: Runtime> {
@@ -1525,18 +1559,7 @@ index 000000000..cf5736f65
 +        let action_name = function_metadata
 +            .as_ref()
 +            .map(|m| m.path_and_args.path().udf_path.to_string());
-+        let CommonRunInputs {
-+            identity,
-+            ts,
-+            existing_writes,
-+            default_system_env_vars,
-+            in_memory_index_last_modified,
-+            context,
-+            backend_url,
-+            action_callbacks,
-+            deployment,
-+            snapshot,
-+        } = Self::decode_common_run_inputs(
++        let common = Self::decode_common_run_inputs(
 +            &instance,
 +            callback_client,
 +            identity,
@@ -1552,27 +1575,10 @@ index 000000000..cf5736f65
 +            action_name,
 +        )
 +        .await?;
++        let ts = common.ts;
 +        let (log_line_sender, log_line_receiver) = mpsc::unbounded_channel::<LogLine>();
-+        let run_request_args = RunRequestArgs {
-+            key_broker: instance.key_broker.clone(),
-+            index_reader: snapshot.index_reader,
-+            convex_origin: backend_url,
-+            bootstrap_metadata: snapshot.bootstrap_metadata,
-+            table_count_snapshot: snapshot.table_count_snapshot,
-+            text_index_snapshot: snapshot.text_index_snapshot,
-+            action_callbacks,
-+            fetch_client,
-+            log_line_sender: Some(log_line_sender),
-+            function_started_sender: None,
-+            udf_type,
-+            identity,
-+            existing_writes,
-+            default_system_env_vars,
-+            in_memory_index_last_modified,
-+            context,
-+            subfunctions_in_same_isolate: *common::knobs::SUBFUNCTIONS_IN_SAME_ISOLATE,
-+            deployment,
-+        };
++        let run_request_args =
++            common.into_run_request_args(&instance, fetch_client, udf_type, log_line_sender);
 +        let result = Self::drive_and_stream_log_lines(
 +            &instance.core,
 +            run_request_args,
@@ -1628,18 +1634,7 @@ index 000000000..cf5736f65
 +            });
 +        let http_request = HttpActionRequest { head, body };
 +        let action_name = Some(http_module_path.path().udf_path.to_string());
-+        let CommonRunInputs {
-+            identity,
-+            ts,
-+            existing_writes,
-+            default_system_env_vars,
-+            in_memory_index_last_modified,
-+            context,
-+            backend_url,
-+            action_callbacks,
-+            deployment,
-+            snapshot,
-+        } = Self::decode_common_run_inputs(
++        let common = Self::decode_common_run_inputs(
 +            &instance,
 +            callback_client,
 +            identity,
@@ -1655,27 +1650,14 @@ index 000000000..cf5736f65
 +            action_name,
 +        )
 +        .await?;
++        let ts = common.ts;
 +        let (log_line_sender, log_line_receiver) = mpsc::unbounded_channel::<LogLine>();
-+        let run_request_args = RunRequestArgs {
-+            key_broker: instance.key_broker.clone(),
-+            index_reader: snapshot.index_reader,
-+            convex_origin: backend_url,
-+            bootstrap_metadata: snapshot.bootstrap_metadata,
-+            table_count_snapshot: snapshot.table_count_snapshot,
-+            text_index_snapshot: snapshot.text_index_snapshot,
-+            action_callbacks,
++        let run_request_args = common.into_run_request_args(
++            &instance,
 +            fetch_client,
-+            log_line_sender: Some(log_line_sender),
-+            function_started_sender: None,
-+            udf_type: UdfType::HttpAction,
-+            identity,
-+            existing_writes,
-+            default_system_env_vars,
-+            in_memory_index_last_modified,
-+            context,
-+            subfunctions_in_same_isolate: *common::knobs::SUBFUNCTIONS_IN_SAME_ISOLATE,
-+            deployment,
-+        };
++            UdfType::HttpAction,
++            log_line_sender,
++        );
 +        let (inner_response_sender, inner_response_receiver) = mpsc::unbounded_channel();
 +        let http_action_metadata = HttpActionMetadata {
 +            http_response_streamer: HttpActionResponseStreamer::new(inner_response_sender),
@@ -1825,7 +1807,7 @@ index 000000000..cf5736f65
 +        return;
 +    }
 +    log_counter_with_labels(
-+        &crate::snapshot::FUNRUN_REJECTED_BEFORE_EXECUTION_TOTAL,
++        &crate::snapshot::REJECTED_BEFORE_EXECUTION_TOTAL,
 +        1,
 +        vec![StaticMetricLabel::new(
 +            "reason",
@@ -1918,10 +1900,10 @@ index 000000000..cf5736f65
 +}
 diff --git a/crates/funrun_server/src/snapshot.rs b/crates/funrun_server/src/snapshot.rs
 new file mode 100644
-index 000000000..b0765cb54
+index 000000000..08ddef1e9
 --- /dev/null
 +++ b/crates/funrun_server/src/snapshot.rs
-@@ -0,0 +1,807 @@
+@@ -0,0 +1,808 @@
 +use std::{
 +    collections::HashMap,
 +    sync::{
@@ -2009,7 +1991,7 @@ index 000000000..b0765cb54
 +);
 +register_convex_counter!(
 +    SNAPSHOT_REQUESTS_TOTAL,
-+    "Funrun snapshot_inputs calls; cache hit rate = 1 - (warm_hit + cold) / requests"
++    "Funrun snapshot_inputs calls; cache hit rate = 1 - cold_load / requests"
 +);
 +register_convex_gauge!(
 +    ISOLATE_BUSY_THREADS,
@@ -2020,7 +2002,7 @@ index 000000000..b0765cb54
 +    "Total funrun V8 isolate worker threads in the shared pool (MAX_ISOLATE_WORKERS)"
 +);
 +register_convex_counter!(
-+    pub(crate) FUNRUN_REJECTED_BEFORE_EXECUTION_TOTAL,
++    pub(crate) REJECTED_BEFORE_EXECUTION_TOTAL,
 +    "Funrun requests rejected before execution started, by rejection reason",
 +    &["reason"]
 +);
@@ -2497,7 +2479,8 @@ index 000000000..b0765cb54
 +                    .try_get_with(*ts, self.cold_snapshot_inputs(ts, index_reader))
 +                    .await
 +                    .map_err(|e| match e.downcast_ref::<errors::ErrorMetadata>() {
-+                        Some(metadata) => anyhow::anyhow!(metadata.clone()),
++                        Some(metadata) => anyhow::anyhow!("funrun snapshot inputs failed: {e:#}")
++                            .context(metadata.clone()),
 +                        None => anyhow::anyhow!("funrun snapshot inputs failed: {e:#}"),
 +                    })
 +            },

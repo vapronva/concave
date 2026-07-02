@@ -11,7 +11,7 @@ index e234c8bb1..7c4c72d30 100644
                          outcome.result.is_ok(),
                          usage_stats,
 diff --git a/crates/application/src/lib.rs b/crates/application/src/lib.rs
-index 6371f8dc4..ebda58010 100644
+index 6371f8dc4..610170c77 100644
 --- a/crates/application/src/lib.rs
 +++ b/crates/application/src/lib.rs
 @@ -133,6 +133,7 @@ use common::{
@@ -22,7 +22,23 @@ index 6371f8dc4..ebda58010 100644
          ConvexOrigin,
          ConvexSite,
          DeploymentMetadata,
-@@ -595,7 +596,7 @@ pub struct Application<RT: Runtime> {
+@@ -168,6 +169,7 @@ use database::{
+     Transaction,
+     UserFacingModel,
+     WriteSource,
++    SCHEMAS_TABLE,
+ };
+ use either::Either;
+ use errors::{
+@@ -276,6 +278,7 @@ use model::{
+         FileStorageModel,
+     },
+     fivetran_import::FivetranImportModel,
++    initialize_application_system_tables,
+     migrations::MigrationWorker,
+     modules::{
+         module_versions::{
+@@ -595,7 +598,7 @@ pub struct Application<RT: Runtime> {
      usage_event_logger: Arc<dyn UsageEventLogger>,
      key_broker: KeyBroker,
      deployment: DeploymentMetadata,
@@ -31,7 +47,7 @@ index 6371f8dc4..ebda58010 100644
      log_visibility: Arc<dyn LogVisibility<RT>>,
      module_cache: ModuleCache<RT>,
      system_env_var_names: HashSet<EnvVarName>,
-@@ -603,6 +604,10 @@ pub struct Application<RT: Runtime> {
+@@ -603,6 +606,10 @@ pub struct Application<RT: Runtime> {
      log_manager_client: LogManagerClient,
      audit_log_client: AuditLogClient,
      oidc_http_client: CachedHttpClient,
@@ -42,7 +58,7 @@ index 6371f8dc4..ebda58010 100644
  }
  
  /// Create storage based on the storage type configuration
-@@ -645,29 +650,31 @@ impl<RT: Runtime> Application<RT> {
+@@ -645,29 +652,31 @@ impl<RT: Runtime> Application<RT> {
              storage_type
          };
  
@@ -88,7 +104,7 @@ index 6371f8dc4..ebda58010 100644
          Ok(ApplicationStorage {
              files_storage,
              modules_storage,
-@@ -677,7 +684,34 @@ impl<RT: Runtime> Application<RT> {
+@@ -677,7 +686,34 @@ impl<RT: Runtime> Application<RT> {
          })
      }
  
@@ -123,7 +139,7 @@ index 6371f8dc4..ebda58010 100644
          runtime: RT,
          database: Database<RT>,
          file_storage: FileStorage<RT>,
-@@ -690,7 +724,7 @@ impl<RT: Runtime> Application<RT> {
+@@ -690,7 +726,7 @@ impl<RT: Runtime> Application<RT> {
          convex_site: ConvexSite,
          searcher: Arc<dyn Searcher>,
          segment_term_metadata_fetcher: Arc<dyn SegmentTermMetadataFetcher>,
@@ -132,7 +148,7 @@ index 6371f8dc4..ebda58010 100644
          node_actions: Actions<RT>,
          log_visibility: Arc<dyn LogVisibility<RT>>,
          app_auth: Arc<ApplicationAuth<RT>>,
-@@ -713,6 +747,140 @@ impl<RT: Runtime> Application<RT> {
+@@ -713,6 +749,140 @@ impl<RT: Runtime> Application<RT> {
              CONVEX_SITE.clone() => convex_site.parse()?
          };
  
@@ -273,7 +289,7 @@ index 6371f8dc4..ebda58010 100644
          let mut index_worker = Arc::new(Mutex::new(None));
          if *ENABLE_INDEX_BACKFILL {
              let index_worker_fut = IndexWorker::new(
-@@ -737,12 +905,12 @@ impl<RT: Runtime> Application<RT> {
+@@ -737,12 +907,12 @@ impl<RT: Runtime> Application<RT> {
              database.clone(),
              persistence.reader(),
              application_storage.search_storage.clone(),
@@ -289,7 +305,7 @@ index 6371f8dc4..ebda58010 100644
          let table_summary_worker = TableSummaryWorker::start(
              runtime.clone(),
              database.clone(),
-@@ -764,68 +932,6 @@ impl<RT: Runtime> Application<RT> {
+@@ -764,68 +934,6 @@ impl<RT: Runtime> Application<RT> {
              runtime.spawn("system_table_cleanup_worker", system_table_cleanup_worker),
          ));
  
@@ -358,7 +374,7 @@ index 6371f8dc4..ebda58010 100644
          let scheduled_job_runner = ScheduledJobRunner::start(
              runtime.clone(),
              deployment_name.clone(),
-@@ -850,7 +956,7 @@ impl<RT: Runtime> Application<RT> {
+@@ -850,7 +958,7 @@ impl<RT: Runtime> Application<RT> {
              database.clone(),
              application_storage.exports_storage.clone(),
              application_storage.files_storage.clone(),
@@ -367,7 +383,7 @@ index 6371f8dc4..ebda58010 100644
              usage_counter.clone(),
              deployment_name.clone(),
          );
-@@ -887,7 +993,7 @@ impl<RT: Runtime> Application<RT> {
+@@ -887,7 +995,7 @@ impl<RT: Runtime> Application<RT> {
              deployment_name.clone(),
          );
  
@@ -376,7 +392,7 @@ index 6371f8dc4..ebda58010 100644
              usage_gauges_tracking_worker,
              scheduled_job_runner,
              cron_job_executor,
-@@ -902,33 +1008,82 @@ impl<RT: Runtime> Application<RT> {
+@@ -902,33 +1010,86 @@ impl<RT: Runtime> Application<RT> {
              system_table_cleanup_worker,
              migration_worker,
          };
@@ -418,6 +434,10 @@ index 6371f8dc4..ebda58010 100644
 +                retention_rate_limiter,
 +                preempt_signal.clone(),
 +            )
++            .await?;
++        initialize_application_system_tables(&self.database).await?;
++        self.database
++            .load_indexes_into_memory(btreeset! { SCHEMAS_TABLE.clone() })
 +            .await?;
 +        let log_streaming_allowed = {
 +            let mut tx = self.database.begin(Identity::system()).await?;
@@ -479,7 +499,7 @@ index 6371f8dc4..ebda58010 100644
      pub fn modules_storage(&self) -> &Arc<dyn Storage> {
          &self.application_storage.modules_storage
      }
-@@ -3791,7 +3946,10 @@ impl<RT: Runtime> Application<RT> {
+@@ -3791,7 +3952,10 @@ impl<RT: Runtime> Application<RT> {
      }
  
      pub async fn shutdown(&self) -> anyhow::Result<()> {

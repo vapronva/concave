@@ -68,7 +68,7 @@ index 1aa73c8f9..acb0969c8 100644
  /// convenience) from allowing browsers to make these requests.
  pub fn platform_api_cors() -> CorsLayer {
 diff --git a/crates/common/src/knobs.rs b/crates/common/src/knobs.rs
-index 1f2323571..b4b9fc77e 100644
+index 1f2323571..d6f6b9183 100644
 --- a/crates/common/src/knobs.rs
 +++ b/crates/common/src/knobs.rs
 @@ -424,6 +424,17 @@ pub static MAX_REPEATABLE_TIMESTAMP_IDLE_FREQUENCY: LazyLock<Duration> = LazyLoc
@@ -114,13 +114,12 @@ index 1f2323571..b4b9fc77e 100644
  /// The maximum number of concurrent index cache requests in Funrun.
  pub static FUNRUN_INDEX_CACHE_CONCURRENCY: LazyLock<usize> =
      LazyLock::new(|| env_config("FUNRUN_INDEX_CACHE_CONCURRENCY", 200));
-@@ -1085,28 +1107,46 @@ pub static FUNRUN_MODULE_QUEUE_SIZE: LazyLock<usize> =
+@@ -1085,28 +1107,41 @@ pub static FUNRUN_MODULE_QUEUE_SIZE: LazyLock<usize> =
  pub static FUNRUN_CODE_CACHE_SIZE: LazyLock<u64> =
      LazyLock::new(|| env_config("FUNRUN_CODE_CACHE_SIZE", 500_000_000));
  
-+/// Max number of cold-loaded funrun snapshots to cache, keyed by read
-+/// timestamp. Coalesces concurrent same-timestamp cold loads (single-flight)
-+/// and serves repeat timestamps from cache; also bounds the cache's memory.
++/// Max cold-loaded funrun snapshots to cache, keyed by read timestamp;
++/// concurrent same-timestamp loads are coalesced (single-flight).
 +pub static FUNRUN_SNAPSHOT_CACHE_SIZE: LazyLock<u64> =
 +    LazyLock::new(|| env_config("FUNRUN_SNAPSHOT_CACHE_SIZE", 16));
 +
@@ -148,14 +147,10 @@ index 1f2323571..b4b9fc77e 100644
 -
 -/// The maximum number of retries a Funrun client will perform. The client only
 -/// retries overloaded errors.
-+/// Maximum number of retries the funrun client performs for queries and
-+/// mutations when an attempt fails with Unavailable, a response timeout, or an
-+/// error whose decoded metadata is rejected-before-execution (WorkerOverloaded,
-+/// IsolateNotClean, InitialPermitTimeoutError). A whole attempt (call plus
-+/// response-stream consumption) is retried, but never after a log line has been
-+/// forwarded (exactly-once log delivery); retries are commit-safe because
-+/// funrun queries/mutations never commit server-side. Actions are never
-+/// retried. Total attempts = retries + 1.
++/// Max retries per funrun call; total attempts = retries + 1. Queries and
++/// mutations retry on transport errors, attempt timeout, and
++/// rejected-before-execution; actions only on rejected-before-execution; HTTP
++/// actions never. Never retries after a log line has been forwarded.
  pub static FUNRUN_CLIENT_MAX_RETRIES: LazyLock<usize> =
 -    LazyLock::new(|| env_config("FUNRUN_CLIENT_MAX_RETRIES", 4));
 +    LazyLock::new(|| env_config("FUNRUN_CLIENT_MAX_RETRIES", 2));
@@ -170,9 +165,9 @@ index 1f2323571..b4b9fc77e 100644
 +pub static FUNRUN_RESPONSE_TIMEOUT: LazyLock<Duration> =
 +    LazyLock::new(|| Duration::from_secs(env_config("FUNRUN_RESPONSE_TIMEOUT_SECS", 600)));
 +
-+/// How long the funrun endpoint set may stay empty (DNS yields no pods) before
-+/// requests fail fast with a retryable error instead of parking in the balance
-+/// channel.
++/// How long the endpoint set may stay empty before requests fail fast with a
++/// retryable error. Arms only until the first successful DNS resolution; after
++/// that, the last-known-good endpoints are kept through DNS outages.
 +pub static FUNRUN_EMPTY_ENDPOINTS_FAIL_FAST: LazyLock<Duration> =
 +    LazyLock::new(|| Duration::from_secs(env_config("FUNRUN_EMPTY_ENDPOINTS_FAIL_FAST_SECS", 30)));
  
@@ -444,10 +439,10 @@ index 000000000..17e83f819
 +}
 diff --git a/crates/function_runner/src/remote.rs b/crates/function_runner/src/remote.rs
 new file mode 100644
-index 000000000..bba9a0cd1
+index 000000000..0e22ca79a
 --- /dev/null
 +++ b/crates/function_runner/src/remote.rs
-@@ -0,0 +1,896 @@
+@@ -0,0 +1,909 @@
 +use std::{
 +    collections::{
 +        BTreeMap,
@@ -763,6 +758,11 @@ index 000000000..bba9a0cd1
 +            .filter(|v| !v.is_empty());
 +        if let Some(url) = &callback_transport_url {
 +            tracing::info!("[funrun] action callbacks will use transport URL {url}");
++        } else {
++            tracing::warn!(
++                "[funrun] CONVEX_FUNRUN_CALLBACK_URL unset; action callbacks fall back to the \
++                 public origin and are not leader-affine — unsafe under HA failover"
++            );
 +        }
 +        Ok(Self {
 +            channel,
@@ -795,15 +795,19 @@ index 000000000..bba9a0cd1
 +    }
 +
 +    fn is_retryable_rpc(udf_type: UdfType, status: &tonic::Status) -> bool {
-+        if !matches!(udf_type, UdfType::Query | UdfType::Mutation) {
-+            return false;
-+        }
-+        if status.code() == tonic::Code::Unavailable {
-+            return true;
-+        }
-+        status
++        let rejected_before_execution = status
 +            .error_metadata()
-+            .is_some_and(|metadata| metadata.is_rejected_before_execution())
++            .is_some_and(|metadata| metadata.is_rejected_before_execution());
++        match udf_type {
++            UdfType::Query | UdfType::Mutation => {
++                matches!(
++                    status.code(),
++                    tonic::Code::Unavailable | tonic::Code::Cancelled | tonic::Code::Unknown
++                ) || rejected_before_execution
++            },
++            UdfType::Action => rejected_before_execution,
++            UdfType::HttpAction => false,
++        }
 +    }
 +
 +    fn ensure_endpoints_available(&self) -> anyhow::Result<()> {
@@ -945,12 +949,12 @@ index 000000000..bba9a0cd1
 +            auth_header,
 +        };
 +        let max_attempts = (*common::knobs::FUNRUN_CLIENT_MAX_RETRIES as u32).saturating_add(1);
-+        let retryable = matches!(udf_type, UdfType::Query | UdfType::Mutation);
++        let has_deadline = matches!(udf_type, UdfType::Query | UdfType::Mutation);
 +        let mut attempt: u32 = 0;
 +        let mut request = Some(request);
 +        let result =
 +            'attempts: loop {
-+                let last_attempt = !retryable || attempt + 1 >= max_attempts;
++                let last_attempt = attempt + 1 >= max_attempts;
 +                let mut parts_forwarded = false;
 +                let failure = 'attempt: {
 +                    if let Err(e) = self.ensure_endpoints_available() {
@@ -964,7 +968,7 @@ index 000000000..bba9a0cd1
 +                    let req = self.authenticated_request(req)?;
 +                    let attempt_fut =
 +                        self.run_function_attempt(req, &log_line_sender, &mut parts_forwarded);
-+                    let outcome = if retryable {
++                    let outcome = if has_deadline {
 +                        timeout(*common::knobs::FUNRUN_RESPONSE_TIMEOUT, attempt_fut).await
 +                    } else {
 +                        Ok(attempt_fut.await)
@@ -1057,11 +1061,15 @@ index 000000000..bba9a0cd1
 +                let mut buf = Vec::new();
 +                while let Some(chunk) = body.next().await {
 +                    let chunk = chunk?;
-+                    anyhow::ensure!(
-+                        buf.len().saturating_add(chunk.len()) <= udf::HTTP_ACTION_BODY_LIMIT,
-+                        "HTTP action request body exceeds {} byte limit",
-+                        udf::HTTP_ACTION_BODY_LIMIT
-+                    );
++                    if buf.len().saturating_add(chunk.len()) > udf::HTTP_ACTION_BODY_LIMIT {
++                        anyhow::bail!(ErrorMetadata::bad_request(
++                            "HttpActionRequestTooLarge",
++                            format!(
++                                "HTTP action request body exceeds the {} byte limit",
++                                udf::HTTP_ACTION_BODY_LIMIT
++                            ),
++                        ));
++                    }
 +                    buf.extend_from_slice(&chunk);
 +                }
 +                Some(buf)

@@ -57,10 +57,10 @@ index 9da2989bb..9af453d36 100644
      persistence
          .write_persistence_global(PersistenceGlobalKey::MaxRepeatableTimestamp, now.into())
 diff --git a/crates/postgres/src/lib.rs b/crates/postgres/src/lib.rs
-index 9f598b5b6..a53a478f1 100644
+index 9f598b5b6..5e1459172 100644
 --- a/crates/postgres/src/lib.rs
 +++ b/crates/postgres/src/lib.rs
-@@ -462,6 +462,34 @@ impl PostgresPersistence {
+@@ -462,6 +462,41 @@ impl PostgresPersistence {
              .await?
              .is_none())
      }
@@ -87,15 +87,22 @@ index 9f598b5b6..a53a478f1 100644
 +        if options.multitenant {
 +            params.push(&options.instance_name.raw as &(dyn ToSql + Sync));
 +        }
-+        Ok(client
++        if client
 +            .query_opt(sql::check_lease_row_exists(options.multitenant), &params)
++            .await?
++            .is_none()
++        {
++            return Ok(false);
++        }
++        Ok(client
++            .query_opt(sql::check_newly_created(options.multitenant), &params)
 +            .await?
 +            .is_some())
 +    }
  }
  
  #[async_trait]
-@@ -480,6 +508,22 @@ impl Persistence for PostgresPersistence {
+@@ -480,6 +515,22 @@ impl Persistence for PostgresPersistence {
          })
      }
  
@@ -118,7 +125,7 @@ index 9f598b5b6..a53a478f1 100644
      #[fastrace::trace]
      async fn write<'a>(
          &self,
-@@ -745,6 +789,10 @@ impl Persistence for PostgresPersistence {
+@@ -745,6 +796,10 @@ impl Persistence for PostgresPersistence {
          &self,
          mut documents: BoxStream<'_, Vec<DocumentLogEntry>>,
      ) -> anyhow::Result<()> {
@@ -129,7 +136,7 @@ index 9f598b5b6..a53a478f1 100644
          let conn = self
              .lease
              .pool
-@@ -806,7 +854,10 @@ impl Persistence for PostgresPersistence {
+@@ -806,7 +861,10 @@ impl Persistence for PostgresPersistence {
              writer.finish().await?;
              break;
          }
@@ -141,7 +148,7 @@ index 9f598b5b6..a53a478f1 100644
          Ok(())
      }
  
-@@ -814,6 +865,10 @@ impl Persistence for PostgresPersistence {
+@@ -814,6 +872,10 @@ impl Persistence for PostgresPersistence {
          &self,
          mut indexes: BoxStream<'_, Vec<PersistenceIndexEntry>>,
      ) -> anyhow::Result<()> {
@@ -152,7 +159,7 @@ index 9f598b5b6..a53a478f1 100644
          let conn = self
              .lease
              .pool
-@@ -872,7 +927,10 @@ impl Persistence for PostgresPersistence {
+@@ -872,7 +934,10 @@ impl Persistence for PostgresPersistence {
              writer.finish().await?;
              break;
          }
@@ -164,7 +171,7 @@ index 9f598b5b6..a53a478f1 100644
          Ok(())
      }
  
-@@ -1757,8 +1815,6 @@ struct Lease {
+@@ -1757,8 +1822,6 @@ struct Lease {
  }
  
  impl Lease {
@@ -173,7 +180,7 @@ index 9f598b5b6..a53a478f1 100644
      async fn acquire(
          pool: Arc<ConvexPgPool>,
          schema: &SchemaName,
-@@ -1776,27 +1832,27 @@ impl Lease {
+@@ -1776,27 +1839,27 @@ impl Lease {
              .as_nanos() as i64;
  
          tracing::info!("attempting to acquire lease");
@@ -215,7 +222,7 @@ index 9f598b5b6..a53a478f1 100644
              schema: schema.clone(),
              instance_name,
              multitenant,
-@@ -1804,6 +1860,61 @@ impl Lease {
+@@ -1804,6 +1867,61 @@ impl Lease {
          })
      }
  

@@ -166,7 +166,7 @@ index 53ffc9e49..ced2d4354 100644
  
  // Within a single transaction that writes multiple documents, this is the order
 diff --git a/crates/database/src/database.rs b/crates/database/src/database.rs
-index e723ba825..2a08975f2 100644
+index e723ba825..3d9bd0831 100644
 --- a/crates/database/src/database.rs
 +++ b/crates/database/src/database.rs
 @@ -54,12 +54,15 @@ use common::{
@@ -224,13 +224,14 @@ index e723ba825..2a08975f2 100644
      virtual_system_mapping: VirtualSystemMapping,
      pub bootstrap_metadata: BootstrapMetadata,
      invalidation_callback: InvalidationMetricCallback,
-@@ -311,6 +314,20 @@ pub struct Database<RT: Runtime> {
+@@ -311,6 +314,21 @@ pub struct Database<RT: Runtime> {
      component_paths_snapshot_cache: AsyncLru<RT, Timestamp, BTreeMap<ComponentId, ComponentPath>>,
      list_snapshot_table_iterator_cache:
          Arc<tokio::sync::Mutex<Option<ListSnapshotTableIteratorCacheEntry<RT>>>>,
 +    follower_tailer_handle: Arc<tokio::sync::Mutex<Option<FollowerTailerHandle>>>,
 +    lease_lost_handler: Arc<parking_lot::Mutex<Option<LeaseLostHandler>>>,
 +    lease_watch_handle: Arc<parking_lot::Mutex<Option<Box<dyn SpawnHandle>>>>,
++    lease_probe_last_ok: Arc<parking_lot::Mutex<Option<std::time::Instant>>>,
 +}
 +
 +pub type LeaseLostHandler = Arc<dyn Fn() -> BoxFuture<'static, bool> + Send + Sync>;
@@ -245,7 +246,7 @@ index e723ba825..2a08975f2 100644
  }
  
  struct ListSnapshotTableIteratorCacheEntry<RT: Runtime> {
-@@ -1049,18 +1066,20 @@ impl<RT: Runtime> Database<RT> {
+@@ -1049,18 +1067,20 @@ impl<RT: Runtime> Database<RT> {
              AsyncLru::new(runtime.clone(), 20, 2, 200, "component_paths_snapshot");
          let list_snapshot_table_iterator_cache = Arc::new(tokio::sync::Mutex::new(None));
          let database = Self {
@@ -272,13 +273,14 @@ index e723ba825..2a08975f2 100644
              virtual_system_mapping,
              bootstrap_metadata,
              invalidation_callback,
-@@ -1068,11 +1087,387 @@ impl<RT: Runtime> Database<RT> {
+@@ -1068,11 +1088,403 @@ impl<RT: Runtime> Database<RT> {
              by_id_indexes_snapshot_cache,
              component_paths_snapshot_cache,
              list_snapshot_table_iterator_cache,
 +            follower_tailer_handle: Arc::new(tokio::sync::Mutex::new(None)),
 +            lease_lost_handler: Arc::new(parking_lot::Mutex::new(None)),
 +            lease_watch_handle: Arc::new(parking_lot::Mutex::new(None)),
++            lease_probe_last_ok: Arc::new(parking_lot::Mutex::new(None)),
          };
  
          Ok(database)
@@ -363,6 +365,7 @@ index e723ba825..2a08975f2 100644
 +            follower_tailer_handle,
 +            lease_lost_handler: Arc::new(parking_lot::Mutex::new(None)),
 +            lease_watch_handle: Arc::new(parking_lot::Mutex::new(None)),
++            lease_probe_last_ok: Arc::new(parking_lot::Mutex::new(None)),
 +        };
 +        Ok(database)
 +    }
@@ -428,6 +431,7 @@ index e723ba825..2a08975f2 100644
 +        let mut index_cache_handle = self
 +            .index_cache_handle()
 +            .ok_or_else(|| anyhow::anyhow!("become_leader requires an index cache handle"))?;
++        index_cache_handle.remove_deployment();
 +        index_cache_handle.set_write_log_reader(Arc::new(log_reader.clone()));
 +        let subscriptions = SubscriptionsWorker::start(
 +            log_owner,
@@ -521,6 +525,10 @@ index e723ba825..2a08975f2 100644
 +        let retention_manager: Arc<dyn RetentionValidator> = Arc::new(
 +            FollowerRetentionManager::new(self.runtime.clone(), self.reader.clone()).await?,
 +        );
++        let already_warm = {
++            let snapshot = self.snapshot_manager.lock().latest_snapshot();
++            !snapshot.text_indexes.is_bootstrapping() && !snapshot.vector_indexes.is_bootstrapping()
++        };
 +        let follower_tailer = FollowerLogTailer::start(
 +            self.runtime.clone(),
 +            snapshot_writer,
@@ -528,7 +536,7 @@ index e723ba825..2a08975f2 100644
 +            retention_manager.clone(),
 +            self.virtual_system_mapping.clone(),
 +            tailed_ts,
-+            true,
++            already_warm,
 +        );
 +        let (log_owner, log_reader, _log_writer) = new_write_log(*tailed_ts);
 +        let mut index_cache_handle = self
@@ -565,6 +573,12 @@ index e723ba825..2a08975f2 100644
 +        drop(self.lease_watch_handle.lock().take());
 +    }
 +
++    pub fn lease_unverified_secs(&self) -> Option<u64> {
++        self.lease_probe_last_ok
++            .lock()
++            .map(|t| t.elapsed().as_secs())
++    }
++
 +    pub fn spawn_lease_watch(
 +        &self,
 +        rw_persistence: Arc<dyn Persistence>,
@@ -572,6 +586,8 @@ index e723ba825..2a08975f2 100644
 +    ) {
 +        let runtime = self.runtime.clone();
 +        let handler = self.lease_lost_handler.clone();
++        let probe_last_ok = self.lease_probe_last_ok.clone();
++        *probe_last_ok.lock() = Some(std::time::Instant::now());
 +        let worker = async move {
 +            const MAX_NON_TRANSIENT_PROBE_FAILURES: usize = 3;
 +            const TRANSIENT_HEARTBEAT_EVERY: usize = 20;
@@ -587,6 +603,7 @@ index e723ba825..2a08975f2 100644
 +                    Ok(held) => {
 +                        non_transient_failures = 0;
 +                        transient_failures = 0;
++                        *probe_last_ok.lock() = Some(std::time::Instant::now());
 +                        held
 +                    },
 +                    Err(e) => {
@@ -660,7 +677,7 @@ index e723ba825..2a08975f2 100644
      /// Sets the invalidation callback for tracking which mutations invalidate
      /// subscriptions. Must be called after `load` and before any subscriptions
      /// are invalidated.
-@@ -1090,45 +1485,71 @@ impl<RT: Runtime> Database<RT> {
+@@ -1090,45 +1502,71 @@ impl<RT: Runtime> Database<RT> {
          tracing::info!("Set search storage to {search_storage:?}");
      }
  
@@ -746,7 +763,7 @@ index e723ba825..2a08975f2 100644
      }
  
      /// Load the set of documents and tombstones in the given table between
-@@ -1558,7 +1979,7 @@ impl<RT: Runtime> Database<RT> {
+@@ -1558,7 +1996,7 @@ impl<RT: Runtime> Database<RT> {
              Arc::new(snapshot.in_memory_indexes),
              snapshot.table_registry.table_mapping().clone(),
              Arc::new(persistence_snapshot),
@@ -755,7 +772,7 @@ index e723ba825..2a08975f2 100644
              None,
          );
          let (results, cursor) = db_index_snapshot
-@@ -1813,11 +2234,11 @@ impl<RT: Runtime> Database<RT> {
+@@ -1813,11 +2251,11 @@ impl<RT: Runtime> Database<RT> {
                      RepeatablePersistence::new(
                          self.reader.clone(),
                          repeatable_ts,
@@ -769,7 +786,7 @@ index e723ba825..2a08975f2 100644
                  index_cache,
              ),
              Arc::new(TextIndexManagerSnapshot::new(
-@@ -1881,7 +2302,7 @@ impl<RT: Runtime> Database<RT> {
+@@ -1881,7 +2319,7 @@ impl<RT: Runtime> Database<RT> {
              bootstrap_metadata: self.bootstrap_metadata.clone(),
              snapshot,
              persistence_snapshot: repeatable_persistence.read_snapshot(ts)?,
@@ -778,7 +795,7 @@ index e723ba825..2a08975f2 100644
              persistence_reader: self.reader.clone(),
              retention_validator: self.retention_validator(),
          })
-@@ -1903,7 +2324,7 @@ impl<RT: Runtime> Database<RT> {
+@@ -1903,7 +2341,7 @@ impl<RT: Runtime> Database<RT> {
          task::consume_budget().await;
          let readonly = transaction.is_readonly();
          let result = self
@@ -787,7 +804,7 @@ index e723ba825..2a08975f2 100644
              .commit(transaction, write_source.into())
              .await?;
          if !readonly {
-@@ -1917,7 +2338,7 @@ impl<RT: Runtime> Database<RT> {
+@@ -1917,7 +2355,7 @@ impl<RT: Runtime> Database<RT> {
          &self,
          tables: BTreeSet<TableName>,
      ) -> anyhow::Result<()> {
@@ -796,11 +813,12 @@ index e723ba825..2a08975f2 100644
      }
  
      pub fn write_commits_since_load(&self) -> usize {
-@@ -1928,14 +2349,14 @@ impl<RT: Runtime> Database<RT> {
+@@ -1928,14 +2366,15 @@ impl<RT: Runtime> Database<RT> {
      /// N.B. Only use this function for user subscriptions. System subscriptions
      /// should use `subscribe_and_wait_for_invalidation`.
      pub async fn subscribe(&self, token: Token) -> anyhow::Result<Subscription> {
 -        self.subscriptions.subscribe(token, false)
++        self.committer()?;
 +        self.subscriptions().subscribe(token, false)
      }
  
@@ -813,7 +831,7 @@ index e723ba825..2a08975f2 100644
          let invalid_ts = subscription.wait_for_invalidation().await;
          let current_ts = self.now_ts_for_reads();
          metrics::log_subscription_invalidation_lag(invalid_ts, *current_ts);
-@@ -2404,11 +2825,19 @@ impl<RT: Runtime> Database<RT> {
+@@ -2404,11 +2843,19 @@ impl<RT: Runtime> Database<RT> {
          ts: Timestamp,
      ) -> anyhow::Result<Result<Token, Option<Timestamp>>> {
          let _timer = metrics::refresh_token_timer();
@@ -838,10 +856,10 @@ index e723ba825..2a08975f2 100644
      pub fn memory_consistency_check(&self) -> anyhow::Result<()> {
 diff --git a/crates/database/src/follower_tailer.rs b/crates/database/src/follower_tailer.rs
 new file mode 100644
-index 000000000..62a79ba9c
+index 000000000..ccaa28c46
 --- /dev/null
 +++ b/crates/database/src/follower_tailer.rs
-@@ -0,0 +1,436 @@
+@@ -0,0 +1,437 @@
 +use std::{
 +    ops::Bound,
 +    sync::Arc,
@@ -986,6 +1004,7 @@ index 000000000..62a79ba9c
 +                        Ok(new_ts) => {
 +                            tailed_ts = new_ts;
 +                            backoff.reset();
++                            break;
 +                        },
 +                        Err(e) => {
 +                            let delay = backoff.fail(&mut self.runtime.rng());

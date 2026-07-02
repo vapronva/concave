@@ -157,7 +157,7 @@ index 000000000..bbb76e89f
 +  uint64 rows_read = 2;
 +}
 diff --git a/crates/pb/src/error_metadata.rs b/crates/pb/src/error_metadata.rs
-index 3c2f00973..eaa4e382a 100644
+index 3c2f00973..9530de573 100644
 --- a/crates/pb/src/error_metadata.rs
 +++ b/crates/pb/src/error_metadata.rs
 @@ -131,11 +131,23 @@ impl TryFrom<ErrorMetadataProto> for ErrorMetadata {
@@ -193,14 +193,19 @@ index 3c2f00973..eaa4e382a 100644
 -            Err(err) => {
 -                return anyhow::anyhow!("Failed to decode StatusDetails proto: {}", err);
 -            },
-+        let metadata = match decode_status_details(self.details()) {
-+            Ok(metadata) => metadata,
-+            Err(err) => return err,
++        let (metadata, details_error) = match decode_status_details(self.details()) {
++            Ok(metadata) => (metadata, None),
++            Err(err) => (None, Some(err)),
          };
          let message = self.message().to_string();
          let mut source_chain = String::new();
-@@ -167,11 +177,7 @@ impl ErrorMetadataStatusExt for tonic::Status {
+@@ -165,13 +175,12 @@ impl ErrorMetadataStatusExt for tonic::Status {
+             source_chain.push_str(&format!(": {s}"));
+             source = s.source();
          }
++        if let Some(err) = details_error {
++            source_chain.push_str(&format!("; undecodable status details: {err:#}"));
++        }
          let mut error: anyhow::Error =
              anyhow::anyhow!("status: {code:?}, message: {message:?}{source_chain}");
 -        if let Some(error_metadata) = details.error_metadata {
@@ -212,7 +217,7 @@ index 3c2f00973..eaa4e382a 100644
              error = error.context(error_metadata)
          } else if code == tonic::Code::ResourceExhausted {
              error = error.context(ErrorMetadata::overloaded(
-@@ -182,6 +188,10 @@ impl ErrorMetadataStatusExt for tonic::Status {
+@@ -182,6 +191,10 @@ impl ErrorMetadataStatusExt for tonic::Status {
          error
      }
  

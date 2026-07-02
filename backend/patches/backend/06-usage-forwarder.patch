@@ -38,10 +38,10 @@ index d8ef7d6f1..81bb043dd 100644
 +}
 diff --git a/crates/local_backend/src/usage_forwarder.rs b/crates/local_backend/src/usage_forwarder.rs
 new file mode 100644
-index 000000000..3e2a53e57
+index 000000000..d9206c6c2
 --- /dev/null
 +++ b/crates/local_backend/src/usage_forwarder.rs
-@@ -0,0 +1,341 @@
+@@ -0,0 +1,352 @@
 +use async_trait::async_trait;
 +use axum::{
 +    extract::RawQuery,
@@ -310,6 +310,17 @@ index 000000000..3e2a53e57
 +        Ok(resp) => {
 +            let status =
 +                StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
++            if status == StatusCode::NOT_FOUND {
++                tracing::warn!(
++                    "[concave] insights upstream does not know deployment {}",
++                    st.instance_name
++                );
++                return (
++                    StatusCode::BAD_GATEWAY,
++                    "insights upstream does not know this deployment",
++                )
++                    .into_response();
++            }
 +            let content_type = resp.headers().get(http::header::CONTENT_TYPE).cloned();
 +            let body = match resp.bytes().await {
 +                Ok(body) => body,
