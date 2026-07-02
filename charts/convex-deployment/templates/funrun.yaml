@@ -30,6 +30,8 @@ spec:
       {{- with include "convex.imagePullSecrets" . }}{{- . | nindent 6 }}{{- end }}
       {{- if .Values.funrun.podDeletionCost.enabled }}
       serviceAccountName: {{ include "convex.funrunName" . }}
+      {{- else }}
+      automountServiceAccountToken: false
       {{- end }}
       {{- with include "convex.podScheduling" .Values.funrun }}{{- . | nindent 6 }}{{- end }}
       {{- if .Values.funrun.affinity }}
@@ -98,7 +100,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: {{ include "convex.instanceSecretName" . }}
-                  key: {{ .Values.instance.secretRef.key }}
+                  key: {{ default "instance-secret" .Values.instance.secretRef.key }}
             {{- include "convex.pgEnv" . | nindent 12 }}
             - name: FUNRUN_DB
               value: postgres-v5

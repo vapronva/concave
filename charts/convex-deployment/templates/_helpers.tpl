@@ -27,14 +27,12 @@ app.kubernetes.io/part-of: convex
 {{- end -}}
 
 {{- define "convex.componentLabels" -}}
-{{- $ctx := .ctx -}}
-{{ include "convex.labels" $ctx }}
+{{ include "convex.labels" .ctx }}
 app.kubernetes.io/component: {{ .component }}
 {{- end -}}
 
 {{- define "convex.componentSelectorLabels" -}}
-{{- $ctx := .ctx -}}
-{{ include "convex.selectorLabels" $ctx }}
+{{ include "convex.selectorLabels" .ctx }}
 app.kubernetes.io/component: {{ .component }}
 {{- end -}}
 
@@ -226,7 +224,7 @@ seccompProfile:
   env:
     - name: CONVEX_BACKEND_ROLE
       value: {{ .role }}
-    {{- if and (eq .role "leader") $ctx.Values.controlPlane.tokenSecretRef.name }}
+    {{- if eq .role "leader" }}
     - name: CONVEX_BOOT_FOLLOWER_WHEN_INITIALIZED
       value: "true"
     {{- end }}
@@ -273,9 +271,8 @@ seccompProfile:
 {{- end -}}
 
 {{- define "convex.usageSinkEnv" -}}
-{{- $sink := required "insights.sinkUrl is required when insights.enabled" .Values.insights.sinkUrl -}}
 - name: CONVEX_USAGE_SINK_URL
-  value: {{ $sink | quote }}
+  value: {{ required "insights.sinkUrl is required when insights.enabled" .Values.insights.sinkUrl | quote }}
 - name: CONVEX_USAGE_SINK_TOKEN
   valueFrom:
     secretKeyRef:

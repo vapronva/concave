@@ -27,14 +27,12 @@ app.kubernetes.io/part-of: convex
 {{- end -}}
 
 {{- define "convex.componentLabels" -}}
-{{- $ctx := .ctx -}}
-{{ include "convex.labels" $ctx }}
+{{ include "convex.labels" .ctx }}
 app.kubernetes.io/component: {{ .component }}
 {{- end -}}
 
 {{- define "convex.componentSelectorLabels" -}}
-{{- $ctx := .ctx -}}
-{{ include "convex.selectorLabels" $ctx }}
+{{ include "convex.selectorLabels" .ctx }}
 app.kubernetes.io/component: {{ .component }}
 {{- end -}}
 
