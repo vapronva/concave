@@ -29,10 +29,10 @@ index 6c018be51..0b891fcc1 100644
      >
        {children}
 diff --git a/npm-packages/common/config/rush/pnpm-lock.yaml b/npm-packages/common/config/rush/pnpm-lock.yaml
-index 578c62369..2639d15c0 100644
+index 9a0f2f5ce..ca898876c 100644
 --- a/npm-packages/common/config/rush/pnpm-lock.yaml
 +++ b/npm-packages/common/config/rush/pnpm-lock.yaml
-@@ -1201,6 +1201,9 @@ importers:
+@@ -1207,6 +1207,9 @@ importers:
        react-resizable-panels:
          specifier: ~2.1.1
          version: 2.1.9(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
@@ -42,7 +42,7 @@ index 578c62369..2639d15c0 100644
        react-table:
          specifier: 7.8.0
          version: 7.8.0(react@18.3.1)
-@@ -1298,6 +1301,9 @@ importers:
+@@ -1304,6 +1307,9 @@ importers:
        '@types/react-dom':
          specifier: ^18.0.0
          version: 18.3.7(@types/react@18.3.26)
@@ -53,10 +53,10 @@ index 578c62369..2639d15c0 100644
          specifier: ^7.7.2
          version: 7.7.20
 diff --git a/npm-packages/dashboard-common/package.json b/npm-packages/dashboard-common/package.json
-index 715c4eed5..c3701fe9c 100644
+index 2ac2504e4..caa34fc85 100644
 --- a/npm-packages/dashboard-common/package.json
 +++ b/npm-packages/dashboard-common/package.json
-@@ -52,6 +52,7 @@
+@@ -54,6 +54,7 @@
      "react-hotkeys-hook": "~4.6.0",
      "react-popper": "^2.3.0",
      "react-resizable-panels": "~2.1.1",
@@ -64,7 +64,7 @@ index 715c4eed5..c3701fe9c 100644
      "react-table": "7.8.0",
      "react-virtualized-auto-sizer": "1.0.26",
      "react-window": "1.8.11",
-@@ -85,6 +86,7 @@
+@@ -87,6 +88,7 @@
      "@types/prettier-old-sync": "npm:@types/prettier@2.7.3",
      "@types/react": "^18.0.0",
      "@types/react-dom": "^18.0.0",

@@ -11,7 +11,7 @@ index bbdcaec82..9db9f167f 100644
      module_paths::CanonicalizedComponentModulePath,
      reference::Reference,
 diff --git a/crates/common/src/http/mod.rs b/crates/common/src/http/mod.rs
-index 1aa73c8f9..acb0969c8 100644
+index 330c603f4..84ccdd4b7 100644
 --- a/crates/common/src/http/mod.rs
 +++ b/crates/common/src/http/mod.rs
 @@ -212,8 +212,7 @@ impl From<HttpRequest> for HttpRequestStream {
@@ -68,10 +68,10 @@ index 1aa73c8f9..acb0969c8 100644
  /// convenience) from allowing browsers to make these requests.
  pub fn platform_api_cors() -> CorsLayer {
 diff --git a/crates/common/src/knobs.rs b/crates/common/src/knobs.rs
-index 1f2323571..d6f6b9183 100644
+index 1e5f4b9cc..e2de042aa 100644
 --- a/crates/common/src/knobs.rs
 +++ b/crates/common/src/knobs.rs
-@@ -424,6 +424,17 @@ pub static MAX_REPEATABLE_TIMESTAMP_IDLE_FREQUENCY: LazyLock<Duration> = LazyLoc
+@@ -515,6 +515,17 @@ pub static MAX_REPEATABLE_TIMESTAMP_IDLE_FREQUENCY: LazyLock<Duration> = LazyLoc
  pub static MAX_REPEATABLE_TIMESTAMP_COMMIT_DELAY: LazyLock<Duration> =
      LazyLock::new(|| Duration::from_secs(env_config("MAX_REPEATABLE_TIMESTAMP_COMMIT_DELAY", 5)));
  
@@ -89,7 +89,7 @@ index 1f2323571..d6f6b9183 100644
  /// The maximum delay between runs of retention, this is now only used for error
  /// backoff and the initial delay when backend is started.
  pub static MAX_RETENTION_DELAY_SECONDS: LazyLock<Duration> =
-@@ -740,6 +751,11 @@ pub static ISOLATE_QUEUE_SIZE: LazyLock<usize> =
+@@ -831,6 +842,11 @@ pub static ISOLATE_QUEUE_SIZE: LazyLock<usize> =
  pub static MAX_ISOLATE_WORKERS: LazyLock<usize> =
      LazyLock::new(|| env_config("MAX_ISOLATE_WORKERS", 300));
  
@@ -101,7 +101,7 @@ index 1f2323571..d6f6b9183 100644
  /// The size of the pending commits in the committer queue. This is a FIFO
  /// queue, so if the queue is too large, we run into a risk of all requests
  /// waiting too long and no requests going through during overload. The size of
-@@ -1061,6 +1077,12 @@ pub static MODULE_CACHE_MAX_CONCURRENCY: LazyLock<usize> =
+@@ -1152,6 +1168,12 @@ pub static MODULE_CACHE_MAX_CONCURRENCY: LazyLock<usize> =
  pub static FUNRUN_INDEX_CACHE_SIZE: LazyLock<u64> =
      LazyLock::new(|| env_config("FUNRUN_INDEX_CACHE_SIZE", 50_000_000)); // 50 MB
  
@@ -114,7 +114,7 @@ index 1f2323571..d6f6b9183 100644
  /// The maximum number of concurrent index cache requests in Funrun.
  pub static FUNRUN_INDEX_CACHE_CONCURRENCY: LazyLock<usize> =
      LazyLock::new(|| env_config("FUNRUN_INDEX_CACHE_CONCURRENCY", 200));
-@@ -1085,28 +1107,41 @@ pub static FUNRUN_MODULE_QUEUE_SIZE: LazyLock<usize> =
+@@ -1176,28 +1198,41 @@ pub static FUNRUN_MODULE_QUEUE_SIZE: LazyLock<usize> =
  pub static FUNRUN_CODE_CACHE_SIZE: LazyLock<u64> =
      LazyLock::new(|| env_config("FUNRUN_CODE_CACHE_SIZE", 500_000_000));
  
