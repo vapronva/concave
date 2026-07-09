@@ -12,7 +12,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -97,20 +96,28 @@ func run() int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	ctrlDone := runController(ctx, ctrl)
-	metricsDone := startMetricsAPIServer(ctx, stop, k8s, reg, *labelPrefix, log)
-	var listenFailed atomic.Bool
+	metricsDone, apiserverErr := startMetricsAPIServer(ctx, stop, k8s, reg, *labelPrefix, log)
+	serveErr := make(chan error, 1)
 	go func() {
 		log.Info("bigbrain: listening", "addr", *addr)
-		if serr := httpSrv.ListenAndServe(); serr != nil && !errors.Is(serr, http.ErrServerClosed) {
+		serr := httpSrv.ListenAndServe()
+		if serr != nil && !errors.Is(serr, http.ErrServerClosed) {
 			log.Error("bigbrain: http server failed", "err", serr)
-			listenFailed.Store(true)
+			serveErr <- serr
 			stop()
+			return
 		}
+		serveErr <- nil
 	}()
 	<-ctx.Done()
 	shutdown(httpSrv, srv, ctrlDone, metricsDone, actuation+actuationDrainSlack, log)
-	if listenFailed.Load() {
+	if <-serveErr != nil {
 		return 1
+	}
+	select {
+	case <-apiserverErr:
+		return 1
+	default:
 	}
 	return 0
 }
@@ -253,9 +260,9 @@ func startMetricsAPIServer(
 	reg *registry.Registry,
 	labelPrefix string,
 	log *slog.Logger,
-) <-chan struct{} {
+) (<-chan struct{}, <-chan error) {
 	if enabled, _ := envBool("BIGBRAIN_METRICS_APISERVER_ENABLED", false); !enabled {
-		return nil
+		return nil, nil
 	}
 	prov := apiserver.NewProvider()
 	seen := make(map[string]struct{}, len(reg.Names()))
@@ -287,9 +294,11 @@ func startMetricsAPIServer(
 	wg.Go(func() {
 		apiserver.NewScraper(k8s.Clientset(), labelPrefix, namespaces, prov, scrapeInterval, log).Run(ctx)
 	})
+	apiserverErr := make(chan error, 1)
 	wg.Go(func() {
 		if aerr := apiserver.Run(ctx, cfg, prov, log); aerr != nil {
 			log.ErrorContext(ctx, "bigbrain: custom-metrics apiserver exited", "err", aerr)
+			apiserverErr <- aerr
 			stop()
 		}
 	})
@@ -300,7 +309,7 @@ func startMetricsAPIServer(
 	}()
 	log.InfoContext(ctx, "bigbrain: custom-metrics apiserver enabled",
 		"port", cfg.SecurePort, "scrapeInterval", scrapeInterval.String())
-	return done
+	return done, apiserverErr
 }
 
 func loadDeploymentTokens(
