@@ -2,7 +2,7 @@
 {{- $funrunDrainDelay := int (.Values.funrun.drainDelaySeconds | default 8) }}
 {{- $funrunShutdownNeed := add 15 $funrunDrainDelay 600 }}
 {{- if gt $funrunShutdownNeed (int .Values.funrun.terminationGracePeriodSeconds) }}
-{{- fail (printf "funrun.terminationGracePeriodSeconds=%d is below the %d seconds a clean shutdown needs: 15 (preStop sleep) + %d (drain delay) + 600 (default action budget, ACTIONS_USER_TIMEOUT_SECS); raise funrun.terminationGracePeriodSeconds" (int .Values.funrun.terminationGracePeriodSeconds) $funrunShutdownNeed $funrunDrainDelay) }}
+{{- fail (printf "funrun.terminationGracePeriodSeconds=%d is below the %d seconds a clean shutdown needs: 15 (preStop sleep) + %d (drain delay) + 600 (default action budget, V8_ACTION_USER_TIMEOUT_SECS); raise funrun.terminationGracePeriodSeconds" (int .Values.funrun.terminationGracePeriodSeconds) $funrunShutdownNeed $funrunDrainDelay) }}
 {{- end }}
 ---
 apiVersion: apps/v1
