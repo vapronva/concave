@@ -79,6 +79,7 @@ backend:
     queries: ""
     mutations: ""
     v8Actions: ""
+  actionUserTimeoutSeconds: 600
   httpTimeoutSeconds: ""
   maxConcurrentRequests: ""
   committerQueueSize: ""
@@ -95,7 +96,7 @@ funrun:
   healthListen: :8091
   maxSnapshotLagSeconds: 30
   drainDelaySeconds: ""
-  terminationGracePeriodSeconds: 630
+  terminationGracePeriodSeconds: 930
   nodes: []
   nodeSelector: {}
   tolerations: []

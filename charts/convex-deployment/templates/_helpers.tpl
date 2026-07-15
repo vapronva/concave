@@ -295,6 +295,8 @@ seccompProfile:
 - name: MALLOC_ARENA_MAX
   value: {{ int64 . | quote }}
 {{- end }}
+- name: V8_ACTION_USER_TIMEOUT_SECS
+  value: {{ .Values.backend.actionUserTimeoutSeconds | default 600 | int64 | quote }}
 {{- end -}}
 
 {{- define "convex.backendTunableEnv" -}}
