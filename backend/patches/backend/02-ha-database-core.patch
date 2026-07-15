@@ -1,5 +1,5 @@
 diff --git a/crates/database/src/committer.rs b/crates/database/src/committer.rs
-index 10720aa62..3e90a5df7 100644
+index 3aef13f4a..3fc709b6f 100644
 --- a/crates/database/src/committer.rs
 +++ b/crates/database/src/committer.rs
 @@ -40,6 +40,7 @@ use common::{
@@ -167,7 +167,7 @@ index 10720aa62..3e90a5df7 100644
  
  // Within a single transaction that writes multiple documents, this is the order
 diff --git a/crates/database/src/database.rs b/crates/database/src/database.rs
-index 9c75a4ca8..01b7c719e 100644
+index bd57e7e6e..322ef531c 100644
 --- a/crates/database/src/database.rs
 +++ b/crates/database/src/database.rs
 @@ -59,12 +59,15 @@ use common::{
@@ -837,7 +837,7 @@ index 9c75a4ca8..01b7c719e 100644
          let invalid_ts = subscription.wait_for_invalidation().await;
          let current_ts = self.now_ts_for_reads();
          metrics::log_subscription_invalidation_lag(invalid_ts, *current_ts);
-@@ -2490,11 +2930,19 @@ impl<RT: Runtime> Database<RT> {
+@@ -2480,11 +2920,19 @@ impl<RT: Runtime> Database<RT> {
          ts: Timestamp,
      ) -> anyhow::Result<Result<Token, Option<Timestamp>>> {
          let _timer = metrics::refresh_token_timer();
@@ -1304,7 +1304,7 @@ index 000000000..ccaa28c46
 +    }
 +}
 diff --git a/crates/database/src/lib.rs b/crates/database/src/lib.rs
-index d39a0143f..821c29a53 100644
+index c759c64df..45c415149 100644
 --- a/crates/database/src/lib.rs
 +++ b/crates/database/src/lib.rs
 @@ -15,6 +15,7 @@ mod committer;
@@ -1315,7 +1315,7 @@ index d39a0143f..821c29a53 100644
  mod metrics;
  pub mod patch;
  pub mod persistence_helpers;
-@@ -175,6 +176,7 @@ pub use self::{
+@@ -178,6 +179,7 @@ pub use self::{
          Database,
          DatabaseSnapshot,
          DocumentDeltas,

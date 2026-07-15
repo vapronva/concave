@@ -24,7 +24,7 @@ index 000000000..fdc1f9de5
 +    }
 +}
 diff --git a/crates/common/src/types/mod.rs b/crates/common/src/types/mod.rs
-index 3ae4ca6d1..5c647f798 100644
+index 23ab810ab..f101b4a63 100644
 --- a/crates/common/src/types/mod.rs
 +++ b/crates/common/src/types/mod.rs
 @@ -17,6 +17,7 @@ pub use value::{
@@ -35,7 +35,7 @@ index 3ae4ca6d1..5c647f798 100644
  mod backend_state;
  mod deployments;
  mod environment_variables;
-@@ -51,6 +52,7 @@ pub use backend_info::{
+@@ -52,6 +53,7 @@ pub use backend_info::{
      BackendInfo,
      DEFAULT_PROVISION_CONCURRENCY,
  };

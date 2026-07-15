@@ -124,10 +124,10 @@ index dfe80d124..4a3d1d2f9 100644
 +    }
 +}
 diff --git a/crates/local_backend/src/lib.rs b/crates/local_backend/src/lib.rs
-index 2090b1b68..c613dcfab 100644
+index 613949a98..2106b31c8 100644
 --- a/crates/local_backend/src/lib.rs
 +++ b/crates/local_backend/src/lib.rs
-@@ -33,7 +33,10 @@ use common::{
+@@ -34,7 +34,10 @@ use common::{
          NODE_ACTION_USER_TIMEOUT,
          UDF_CACHE_MAX_SIZE,
      },
@@ -139,7 +139,7 @@ index 2090b1b68..c613dcfab 100644
      runtime::{
          new_rate_limiter,
          Runtime,
-@@ -49,6 +52,10 @@ use common::{
+@@ -50,6 +53,10 @@ use common::{
  };
  use config::LocalConfig;
  use database::Database;
@@ -150,7 +150,7 @@ index 2090b1b68..c613dcfab 100644
  use events::usage::NoOpUsageEventLogger;
  use exports::interface::InProcessExportProvider;
  use file_storage::{
-@@ -95,6 +102,7 @@ pub mod deployment_info;
+@@ -96,6 +103,7 @@ pub mod deployment_info;
  pub mod deployment_state;
  pub mod environment_variables;
  pub mod http_actions;
@@ -158,7 +158,7 @@ index 2090b1b68..c613dcfab 100644
  pub mod log_sinks;
  pub mod logs;
  pub mod node_action_callbacks;
-@@ -110,10 +118,9 @@ pub mod storage;
+@@ -111,10 +119,9 @@ pub mod storage;
  pub mod streaming_export;
  pub mod streaming_import;
  pub mod subs;
@@ -170,7 +170,7 @@ index 2090b1b68..c613dcfab 100644
  #[derive(Clone)]
  pub struct LocalAppState {
      // Origin for the server (e.g. http://127.0.0.1:3210, https://demo.convex.cloud)
-@@ -122,6 +129,12 @@ pub struct LocalAppState {
+@@ -123,6 +130,12 @@ pub struct LocalAppState {
      pub site_origin: ConvexSite,
      // Name of the instance. (e.g. crazy-giraffe-123)
      pub instance_name: String,
@@ -183,7 +183,7 @@ index 2090b1b68..c613dcfab 100644
      pub application: Application<ProdRuntime>,
      pub zombify_rx: async_broadcast::Receiver<()>,
  }
-@@ -146,10 +159,31 @@ pub struct RouterState {
+@@ -147,10 +160,31 @@ pub struct RouterState {
  #[derive(Serialize)]
  pub struct EmptyResponse {}
  
@@ -216,7 +216,7 @@ index 2090b1b68..c613dcfab 100644
      zombify_rx: async_broadcast::Receiver<()>,
      preempt_tx: ShutdownSignal,
  ) -> anyhow::Result<LocalAppState> {
-@@ -159,29 +193,70 @@ pub async fn make_app(
+@@ -160,29 +194,70 @@ pub async fn make_app(
      // TODO(CX-6572) Separate `SegmentMetadataFetcher` from `SearcherImpl`
      let segment_metadata_fetcher: Arc<dyn SegmentTermMetadataFetcher> = in_process_searcher;
      let (deleted_tablet_sender, deleted_tablet_receiver) = tokio::sync::mpsc::channel(100);
@@ -309,7 +309,7 @@ index 2090b1b68..c613dcfab 100644
  
      let file_storage = FileStorage {
          transactional_file_storage: TransactionalFileStorage::new(
-@@ -224,21 +299,41 @@ pub async fn make_app(
+@@ -225,21 +300,41 @@ pub async fn make_app(
          reqwest::redirect::Policy::default(),
      );
      let function_runner: Arc<dyn FunctionRunner<ProdRuntime>> =
@@ -363,7 +363,7 @@ index 2090b1b68..c613dcfab 100644
          runtime.clone(),
          database.clone(),
          file_storage.clone(),
-@@ -255,7 +350,7 @@ pub async fn make_app(
+@@ -257,7 +352,7 @@ pub async fn make_app(
          config.convex_site_url()?,
          searcher.clone(),
          segment_metadata_fetcher,
@@ -372,7 +372,7 @@ index 2090b1b68..c613dcfab 100644
          node_actions,
          Arc::new(RedactLogsToClient::new(config.redact_logs_to_client)),
          Arc::new(ApplicationAuth::new(
-@@ -276,7 +371,7 @@ pub async fn make_app(
+@@ -278,7 +373,7 @@ pub async fn make_app(
      let origin = config.convex_origin_url()?;
      let instance_name = config.name();
  
@@ -381,7 +381,7 @@ index 2090b1b68..c613dcfab 100644
          let beacon_future = beacon::start_beacon(
              runtime.clone(),
              database.clone(),
-@@ -286,14 +381,100 @@ pub async fn make_app(
+@@ -288,14 +383,100 @@ pub async fn make_app(
          runtime.spawn_background("beacon_worker", beacon_future);
      }
  

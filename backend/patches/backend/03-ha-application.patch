@@ -11,7 +11,7 @@ index e234c8bb1..7c4c72d30 100644
                          outcome.result.is_ok(),
                          usage_stats,
 diff --git a/crates/application/src/lib.rs b/crates/application/src/lib.rs
-index 98c36e074..3b55daff1 100644
+index db649b6f5..05212c40f 100644
 --- a/crates/application/src/lib.rs
 +++ b/crates/application/src/lib.rs
 @@ -133,6 +133,7 @@ use common::{
@@ -38,8 +38,24 @@ index 98c36e074..3b55daff1 100644
      migrations::MigrationWorker,
      modules::{
          module_versions::{
-@@ -599,7 +602,7 @@ pub struct Application<RT: Runtime> {
-     usage_event_logger: Arc<dyn UsageEventLogger>,
+@@ -314,7 +317,6 @@ use model::{
+         types::UdfConfig,
+         UdfConfigModel,
+     },
+-    usage_limits::UsageLimitsModel,
+ };
+ use node_executor::NodeActions;
+ use parking_lot::Mutex;
+@@ -413,7 +415,6 @@ use crate::{
+     usage_limits::{
+         UsageLimitNotifier,
+         UsageLimitRecorder,
+-        UsageLimitWorker,
+         UsageMeter,
+     },
+ };
+@@ -607,7 +608,7 @@ pub struct Application<RT: Runtime> {
+     usage_meter: Arc<UsageMeter>,
      key_broker: KeyBroker,
      deployment: DeploymentMetadata,
 -    workers: WorkerHandles,
@@ -47,7 +63,7 @@ index 98c36e074..3b55daff1 100644
      log_visibility: Arc<dyn LogVisibility<RT>>,
      module_cache: ModuleCache<RT>,
      system_env_var_names: HashSet<EnvVarName>,
-@@ -607,6 +610,10 @@ pub struct Application<RT: Runtime> {
+@@ -615,6 +616,10 @@ pub struct Application<RT: Runtime> {
      log_manager_client: LogManagerClient,
      audit_log_client: AuditLogClient,
      oidc_http_client: CachedHttpClient,
@@ -58,7 +74,7 @@ index 98c36e074..3b55daff1 100644
  }
  
  /// Create storage based on the storage type configuration
-@@ -649,29 +656,31 @@ impl<RT: Runtime> Application<RT> {
+@@ -657,29 +662,31 @@ impl<RT: Runtime> Application<RT> {
              storage_type
          };
  
@@ -104,7 +120,7 @@ index 98c36e074..3b55daff1 100644
          Ok(ApplicationStorage {
              files_storage,
              modules_storage,
-@@ -681,7 +690,34 @@ impl<RT: Runtime> Application<RT> {
+@@ -689,7 +696,34 @@ impl<RT: Runtime> Application<RT> {
          })
      }
  
@@ -139,7 +155,7 @@ index 98c36e074..3b55daff1 100644
          runtime: RT,
          database: Database<RT>,
          file_storage: FileStorage<RT>,
-@@ -694,7 +730,7 @@ impl<RT: Runtime> Application<RT> {
+@@ -703,7 +737,7 @@ impl<RT: Runtime> Application<RT> {
          convex_site: ConvexSite,
          searcher: Arc<dyn Searcher>,
          segment_term_metadata_fetcher: Arc<dyn SegmentTermMetadataFetcher>,
@@ -148,7 +164,22 @@ index 98c36e074..3b55daff1 100644
          node_actions: NodeActions<RT>,
          log_visibility: Arc<dyn LogVisibility<RT>>,
          app_auth: Arc<ApplicationAuth<RT>>,
-@@ -717,6 +753,140 @@ impl<RT: Runtime> Application<RT> {
+@@ -715,11 +749,12 @@ impl<RT: Runtime> Application<RT> {
+         deleted_tablet_receiver: tokio::sync::mpsc::Receiver<TabletId>,
+         oidc_http_client: CachedHttpClient,
+     ) -> anyhow::Result<Self> {
+-        // Wrap the usage logger so usage is recorded for enforcement before
+-        // being forwarded downstream.
++        // Wrap the usage logger so recorded usage flows into the meter read by
++        // the get_current_usage endpoint.
+         let usage_meter = Arc::new(UsageMeter::new(runtime.system_time())?);
+         let usage_event_logger: Arc<dyn UsageEventLogger> =
+             UsageLimitRecorder::new(runtime.clone(), usage_meter.clone(), usage_event_logger);
++        let _ = usage_limit_notifier;
+ 
+         let deployment_name = deployment.name.clone();
+         let deployment_region = deployment.region.clone();
+@@ -732,6 +767,141 @@ impl<RT: Runtime> Application<RT> {
              CONVEX_SITE.clone() => convex_site.parse()?
          };
  
@@ -231,6 +262,7 @@ index 98c36e074..3b55daff1 100644
 +            application_storage,
 +            usage_event_logger,
 +            usage_counter,
++            usage_meter,
 +            key_broker,
 +            deployment,
 +            workers: Arc::new(Mutex::new(None)),
@@ -289,7 +321,7 @@ index 98c36e074..3b55daff1 100644
          let mut index_worker = Arc::new(Mutex::new(None));
          if *ENABLE_INDEX_BACKFILL {
              let index_worker_fut = IndexWorker::new(
-@@ -741,12 +911,12 @@ impl<RT: Runtime> Application<RT> {
+@@ -756,12 +926,12 @@ impl<RT: Runtime> Application<RT> {
              database.clone(),
              persistence.reader(),
              application_storage.search_storage.clone(),
@@ -305,7 +337,7 @@ index 98c36e074..3b55daff1 100644
          let table_summary_worker = TableSummaryWorker::start(
              runtime.clone(),
              database.clone(),
-@@ -768,68 +938,6 @@ impl<RT: Runtime> Application<RT> {
+@@ -783,88 +953,9 @@ impl<RT: Runtime> Application<RT> {
              runtime.spawn("system_table_cleanup_worker", system_table_cleanup_worker),
          ));
  
@@ -342,6 +374,27 @@ index 98c36e074..3b55daff1 100644
 -        )
 -        .await?;
 -
+-        let usage_limit_configs = UsageLimitsModel::new(&mut tx)
+-            .list()
+-            .await?
+-            .into_iter()
+-            .map(|config| {
+-                let id = config.id();
+-                (id, config.into_value())
+-            })
+-            .collect();
+-        usage_meter.refresh_configs(usage_limit_configs);
+-        let usage_limit_worker = Arc::new(Mutex::new(runtime.spawn(
+-            "usage_limit_worker",
+-            UsageLimitWorker::start(
+-                runtime.clone(),
+-                database.clone(),
+-                Arc::new(log_manager_client.clone()),
+-                usage_limit_notifier,
+-                usage_meter.clone(),
+-            ),
+-        )));
+-
 -        let function_log = FunctionExecutionLog::new(
 -            runtime.clone(),
 -            usage_counter.clone(),
@@ -368,13 +421,14 @@ index 98c36e074..3b55daff1 100644
 -            audit_log_client.clone(),
 -            default_system_env_vars.clone(),
 -            cache,
--        ));
++        let usage_limit_worker = Arc::new(Mutex::new(
++            runtime.spawn("usage_limit_worker", std::future::pending::<()>()),
+         ));
 -        function_runner.set_action_callbacks(runner.clone());
--
+ 
          let scheduled_job_runner = ScheduledJobRunner::start(
              runtime.clone(),
-             deployment_name.clone(),
-@@ -854,7 +962,7 @@ impl<RT: Runtime> Application<RT> {
+@@ -890,7 +981,7 @@ impl<RT: Runtime> Application<RT> {
              database.clone(),
              application_storage.exports_storage.clone(),
              application_storage.files_storage.clone(),
@@ -383,7 +437,7 @@ index 98c36e074..3b55daff1 100644
              usage_counter.clone(),
              deployment_name.clone(),
          );
-@@ -891,7 +999,7 @@ impl<RT: Runtime> Application<RT> {
+@@ -927,7 +1018,7 @@ impl<RT: Runtime> Application<RT> {
              deployment_name.clone(),
          );
  
@@ -392,9 +446,9 @@ index 98c36e074..3b55daff1 100644
              usage_gauges_tracking_worker,
              scheduled_job_runner,
              cron_job_executor,
-@@ -906,33 +1014,86 @@ impl<RT: Runtime> Application<RT> {
-             system_table_cleanup_worker,
+@@ -943,28 +1034,76 @@ impl<RT: Runtime> Application<RT> {
              migration_worker,
+             usage_limit_worker,
          };
 +        *self.workers.lock() = Some(handles);
 +        Ok(())
@@ -409,6 +463,7 @@ index 98c36e074..3b55daff1 100644
 -            application_storage,
 -            usage_event_logger,
 -            usage_counter,
+-            usage_meter,
 -            key_broker,
 -            deployment,
 -            workers,
@@ -488,7 +543,8 @@ index 98c36e074..3b55daff1 100644
 +        Ok(())
      }
  
-     pub fn runtime(&self) -> RT {
+     pub fn usage_meter(&self) -> &Arc<UsageMeter> {
+@@ -975,6 +1114,10 @@ impl<RT: Runtime> Application<RT> {
          self.runtime.clone()
      }
  
@@ -499,7 +555,7 @@ index 98c36e074..3b55daff1 100644
      pub fn modules_storage(&self) -> &Arc<dyn Storage> {
          &self.application_storage.modules_storage
      }
-@@ -3828,7 +3989,10 @@ impl<RT: Runtime> Application<RT> {
+@@ -3870,7 +4013,10 @@ impl<RT: Runtime> Application<RT> {
      }
  
      pub async fn shutdown(&self) -> anyhow::Result<()> {

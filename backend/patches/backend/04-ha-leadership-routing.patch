@@ -852,7 +852,7 @@ index 000000000..7f7732342
 +    }
 +}
 diff --git a/crates/local_backend/src/router.rs b/crates/local_backend/src/router.rs
-index f6a138efe..72d06e80f 100644
+index d2ba3d6df..12bfb7e0e 100644
 --- a/crates/local_backend/src/router.rs
 +++ b/crates/local_backend/src/router.rs
 @@ -1,6 +1,9 @@
@@ -907,7 +907,7 @@ index f6a138efe..72d06e80f 100644
  
      let snapshot_export_routes = Router::new()
          .route("/request/zip", post(request_zip_export))
-@@ -368,6 +370,10 @@ pub fn router(st: LocalAppState) -> Router {
+@@ -370,6 +372,10 @@ pub fn router(st: LocalAppState) -> Router {
          .nest("/actions", action_callback_routes(st.clone()))
          .nest("/export", snapshot_export_routes)
          .nest("/streaming_import", streaming_import_routes())
@@ -918,7 +918,7 @@ index f6a138efe..72d06e80f 100644
          .nest("/v1", platform_routes);
  
      // Endpoints migrated to use the RouterState trait instead of application.
-@@ -405,6 +411,9 @@ pub fn router(st: LocalAppState) -> Router {
+@@ -407,6 +413,9 @@ pub fn router(st: LocalAppState) -> Router {
      Router::new()
          .nest("/api", api_routes)
          .merge(health_check_routes(version))
@@ -928,7 +928,7 @@ index f6a138efe..72d06e80f 100644
          .layer(cors())
          .with_state(st)
          .merge(migrated)
-@@ -448,6 +457,9 @@ where
+@@ -450,6 +459,9 @@ where
          .route("/storage_get_url", post(storage_get_url))
          .route("/storage_get_metadata", post(storage_get_metadata))
          .route("/storage_delete", post(storage_delete))
@@ -938,7 +938,7 @@ index f6a138efe..72d06e80f 100644
          .route("/audit_log", post(audit_log))
          // All routes above this line get the increased limit
          .layer(DefaultBodyLimit::max(*MAX_BACKEND_RPC_REQUEST_SIZE))
-@@ -528,6 +540,7 @@ where
+@@ -530,6 +542,7 @@ where
              get(|MtState(st): MtState<LocalAppState>| async move { st.instance_name.clone() }),
          )
          .route("/instance_version", get(|| async move { version }))
@@ -946,7 +946,7 @@ index f6a138efe..72d06e80f 100644
          .route(
              "/",
              get(|| async { "This Convex deployment is running. See https://docs.convex.dev/." }),
-@@ -590,10 +603,15 @@ where
+@@ -592,10 +605,15 @@ where
          .route("/get_table_column_names", get(get_table_column_names))
  }
  
@@ -964,7 +964,7 @@ index f6a138efe..72d06e80f 100644
          .allow_methods(vec![
              Method::GET,
              Method::POST,
-@@ -602,6 +620,51 @@ pub fn cors() -> CorsLayer {
+@@ -604,6 +622,51 @@ pub fn cors() -> CorsLayer {
              Method::DELETE,
              Method::PUT,
          ])

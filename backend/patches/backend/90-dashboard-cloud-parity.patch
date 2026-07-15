@@ -29,7 +29,7 @@ index 6c018be51..0b891fcc1 100644
      >
        {children}
 diff --git a/npm-packages/common/config/rush/pnpm-lock.yaml b/npm-packages/common/config/rush/pnpm-lock.yaml
-index 9a0f2f5ce..ca898876c 100644
+index 92c617d22..ca424c72e 100644
 --- a/npm-packages/common/config/rush/pnpm-lock.yaml
 +++ b/npm-packages/common/config/rush/pnpm-lock.yaml
 @@ -1207,6 +1207,9 @@ importers:
@@ -2932,10 +2932,10 @@ index 000000000..1476c354a
 +  );
 +}
 diff --git a/npm-packages/dashboard-common/src/layouts/SettingsSidebar.tsx b/npm-packages/dashboard-common/src/layouts/SettingsSidebar.tsx
-index e268b7bd5..fa13effce 100644
+index bd755f8fd..fa2384c84 100644
 --- a/npm-packages/dashboard-common/src/layouts/SettingsSidebar.tsx
 +++ b/npm-packages/dashboard-common/src/layouts/SettingsSidebar.tsx
-@@ -60,8 +60,6 @@ export function SettingsSidebar({
+@@ -61,8 +61,6 @@ export function SettingsSidebar({
        >
          {/* On larger screens, this is a sidebar and not a popover menu. */}
          {allowedPages.map((page) => {
@@ -2944,7 +2944,7 @@ index e268b7bd5..fa13effce 100644
            const isUnavailableForSelfHosted =
              (page === "backups" || page === "custom-domains") &&
              isSelfHostedDeployment;
-@@ -71,11 +69,7 @@ export function SettingsSidebar({
+@@ -72,11 +70,7 @@ export function SettingsSidebar({
  
            return (
              <SidebarLink
@@ -2957,7 +2957,7 @@ index e268b7bd5..fa13effce 100644
                isActive={page === selectedPage}
                key={page}
                disabled={isUnavailableForSelfHosted || isUnavailableForLocal}
-@@ -86,12 +80,8 @@ export function SettingsSidebar({
+@@ -87,12 +81,8 @@ export function SettingsSidebar({
                      ? `The ${DEPLOYMENT_SETTINGS_PAGES_AND_NAMES[page]} feature is not currently available in self-hosted deployments.`
                      : undefined
                }
@@ -2971,15 +2971,16 @@ index e268b7bd5..fa13effce 100644
              </SidebarLink>
            );
          })}
-@@ -155,6 +145,7 @@ export function SettingsSidebar({
+@@ -156,7 +146,7 @@ export function SettingsSidebar({
  
  function useAllowedPages() {
    const { nents } = useNents();
-+  const { isSelfHosted } = useContext(DeploymentInfoContext);
+-  const { usageLimitsEnabled } = useContext(DeploymentInfoContext);
++  const { isSelfHosted, usageLimitsEnabled } = useContext(DeploymentInfoContext);
  
    let pages = DEPLOYMENT_SETTINGS_PAGES;
  
-@@ -162,7 +153,9 @@ function useAllowedPages() {
+@@ -164,7 +154,9 @@ function useAllowedPages() {
      pages = pages.filter((d) => d !== "components");
    }
  
@@ -2988,8 +2989,8 @@ index e268b7bd5..fa13effce 100644
 +    isSelfHosted ? d !== "backups" : d !== "snapshots",
 +  );
  
-   return pages;
- }
+   // Usage limits is feature-flagged; hide it from the sidebar when off.
+   if (!usageLimitsEnabled) {
 diff --git a/npm-packages/dashboard-common/src/lib/deploymentApi.ts b/npm-packages/dashboard-common/src/lib/deploymentApi.ts
 index a3b43aab0..a6240cac7 100644
 --- a/npm-packages/dashboard-common/src/lib/deploymentApi.ts

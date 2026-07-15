@@ -11,7 +11,7 @@ index bbdcaec82..9db9f167f 100644
      module_paths::CanonicalizedComponentModulePath,
      reference::Reference,
 diff --git a/crates/common/src/http/mod.rs b/crates/common/src/http/mod.rs
-index 330c603f4..84ccdd4b7 100644
+index 96e8e8795..a3c46f219 100644
 --- a/crates/common/src/http/mod.rs
 +++ b/crates/common/src/http/mod.rs
 @@ -212,8 +212,7 @@ impl From<HttpRequest> for HttpRequestStream {
@@ -68,10 +68,10 @@ index 330c603f4..84ccdd4b7 100644
  /// convenience) from allowing browsers to make these requests.
  pub fn platform_api_cors() -> CorsLayer {
 diff --git a/crates/common/src/knobs.rs b/crates/common/src/knobs.rs
-index 1e5f4b9cc..e2de042aa 100644
+index 4ec77a0af..fcf0dfe51 100644
 --- a/crates/common/src/knobs.rs
 +++ b/crates/common/src/knobs.rs
-@@ -515,6 +515,17 @@ pub static MAX_REPEATABLE_TIMESTAMP_IDLE_FREQUENCY: LazyLock<Duration> = LazyLoc
+@@ -552,6 +552,17 @@ pub static MAX_REPEATABLE_TIMESTAMP_IDLE_FREQUENCY: LazyLock<Duration> = LazyLoc
  pub static MAX_REPEATABLE_TIMESTAMP_COMMIT_DELAY: LazyLock<Duration> =
      LazyLock::new(|| Duration::from_secs(env_config("MAX_REPEATABLE_TIMESTAMP_COMMIT_DELAY", 5)));
  
@@ -89,7 +89,7 @@ index 1e5f4b9cc..e2de042aa 100644
  /// The maximum delay between runs of retention, this is now only used for error
  /// backoff and the initial delay when backend is started.
  pub static MAX_RETENTION_DELAY_SECONDS: LazyLock<Duration> =
-@@ -831,6 +842,11 @@ pub static ISOLATE_QUEUE_SIZE: LazyLock<usize> =
+@@ -868,6 +879,11 @@ pub static ISOLATE_QUEUE_SIZE: LazyLock<usize> =
  pub static MAX_ISOLATE_WORKERS: LazyLock<usize> =
      LazyLock::new(|| env_config("MAX_ISOLATE_WORKERS", 300));
  
@@ -101,7 +101,7 @@ index 1e5f4b9cc..e2de042aa 100644
  /// The size of the pending commits in the committer queue. This is a FIFO
  /// queue, so if the queue is too large, we run into a risk of all requests
  /// waiting too long and no requests going through during overload. The size of
-@@ -1152,6 +1168,12 @@ pub static MODULE_CACHE_MAX_CONCURRENCY: LazyLock<usize> =
+@@ -1189,6 +1205,12 @@ pub static MODULE_CACHE_MAX_CONCURRENCY: LazyLock<usize> =
  pub static FUNRUN_INDEX_CACHE_SIZE: LazyLock<u64> =
      LazyLock::new(|| env_config("FUNRUN_INDEX_CACHE_SIZE", 50_000_000)); // 50 MB
  
@@ -114,7 +114,7 @@ index 1e5f4b9cc..e2de042aa 100644
  /// The maximum number of concurrent index cache requests in Funrun.
  pub static FUNRUN_INDEX_CACHE_CONCURRENCY: LazyLock<usize> =
      LazyLock::new(|| env_config("FUNRUN_INDEX_CACHE_CONCURRENCY", 200));
-@@ -1176,28 +1198,41 @@ pub static FUNRUN_MODULE_QUEUE_SIZE: LazyLock<usize> =
+@@ -1213,28 +1235,41 @@ pub static FUNRUN_MODULE_QUEUE_SIZE: LazyLock<usize> =
  pub static FUNRUN_CODE_CACHE_SIZE: LazyLock<u64> =
      LazyLock::new(|| env_config("FUNRUN_CODE_CACHE_SIZE", 500_000_000));
  
@@ -1446,7 +1446,7 @@ index c489a0ac7..18c54d317 100644
  
      pub fn concurrency_limiter(&self) -> &isolate::ConcurrencyLimiter {
 diff --git a/crates/isolate/src/client.rs b/crates/isolate/src/client.rs
-index a8c990b9e..674162f1b 100644
+index 097acac72..cc0a9afd0 100644
 --- a/crates/isolate/src/client.rs
 +++ b/crates/isolate/src/client.rs
 @@ -9,6 +9,7 @@ use std::{
@@ -1465,7 +1465,7 @@ index a8c990b9e..674162f1b 100644
          ISOLATE_QUEUE_SIZE,
          REUSE_ISOLATES,
          V8_THREADS,
-@@ -205,7 +207,6 @@ impl IsolateConfig {
+@@ -208,7 +210,6 @@ impl IsolateConfig {
              limiter,
          }
      }
@@ -1473,7 +1473,7 @@ index a8c990b9e..674162f1b 100644
  }
  
  pub struct UdfRequest<RT: Runtime> {
-@@ -482,6 +483,7 @@ impl<RT: Runtime> Clone for IsolateClient<RT> {
+@@ -485,6 +486,7 @@ impl<RT: Runtime> Clone for IsolateClient<RT> {
              concurrency_logger: self.concurrency_logger.clone(),
              concurrency_limiter: self.concurrency_limiter.clone(),
              active_workers: self.active_workers.clone(),
@@ -1481,7 +1481,7 @@ index a8c990b9e..674162f1b 100644
              max_workers: self.max_workers,
          }
      }
-@@ -570,6 +572,7 @@ pub struct IsolateClient<RT: Runtime> {
+@@ -573,6 +575,7 @@ pub struct IsolateClient<RT: Runtime> {
      /// Shared with the scheduler. Tracks the total number of in-progress
      /// workers across all clients.
      active_workers: Arc<AtomicUsize>,
@@ -1489,7 +1489,7 @@ index a8c990b9e..674162f1b 100644
      max_workers: usize,
  }
  
-@@ -603,6 +606,9 @@ impl<RT: Runtime> IsolateClient<RT> {
+@@ -606,6 +609,9 @@ impl<RT: Runtime> IsolateClient<RT> {
          let active_workers = Arc::new(AtomicUsize::new(0));
          let _active_workers = active_workers.clone();
          let rt_clone = rt.clone();
@@ -1499,7 +1499,7 @@ index a8c990b9e..674162f1b 100644
          let scheduler = rt.spawn("shared_isolate_scheduler", async move {
              // The scheduler thread pops a worker from available_workers and
              // pops a request from the CoDelQueueReceiver. Then it sends the request
-@@ -616,7 +622,9 @@ impl<RT: Runtime> IsolateClient<RT> {
+@@ -619,7 +625,9 @@ impl<RT: Runtime> IsolateClient<RT> {
                  max_percent_per_client,
                  _active_workers,
              );
@@ -1510,7 +1510,7 @@ index a8c990b9e..674162f1b 100644
          });
          Ok(Self {
              rt,
-@@ -626,6 +634,7 @@ impl<RT: Runtime> IsolateClient<RT> {
+@@ -629,6 +637,7 @@ impl<RT: Runtime> IsolateClient<RT> {
              handles,
              concurrency_limiter,
              active_workers,
@@ -1518,7 +1518,7 @@ index a8c990b9e..674162f1b 100644
              max_workers: max_isolate_workers,
          })
      }
-@@ -646,6 +655,10 @@ impl<RT: Runtime> IsolateClient<RT> {
+@@ -649,6 +658,10 @@ impl<RT: Runtime> IsolateClient<RT> {
          self.max_workers
      }
  
@@ -1529,7 +1529,7 @@ index a8c990b9e..674162f1b 100644
      pub fn aggregate_heap_stats(&self) -> IsolateHeapStats {
          let mut total = IsolateHeapStats::default();
          for handle in self.handles.lock().iter() {
-@@ -1190,6 +1203,7 @@ pub struct SharedIsolateScheduler<RT: Runtime, W: IsolateWorker<RT>> {
+@@ -1193,6 +1206,7 @@ pub struct SharedIsolateScheduler<RT: Runtime, W: IsolateWorker<RT>> {
      /// recreated and there will be no penalty for reassigning this worker to a
      /// new client.
      available_workers: HashMap<String, VecDeque<IdleWorkerState>>,
@@ -1537,7 +1537,7 @@ index a8c990b9e..674162f1b 100644
      /// Set of futures awaiting a response from an active worker.
      in_progress_workers:
          FuturesUnordered<Join<oneshot::Receiver<IdleWorkerInfo>, Ready<ActiveWorkerState>>>,
-@@ -1236,6 +1250,7 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
+@@ -1239,6 +1253,7 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
              in_progress_count: HashMap::new(),
              active_workers,
              available_workers: HashMap::new(),
@@ -1545,7 +1545,7 @@ index a8c990b9e..674162f1b 100644
              max_workers,
              handles,
              max_active_workers_per_client: (max_workers * max_percent_per_client)
-@@ -1286,6 +1301,10 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
+@@ -1289,6 +1304,10 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
  
      pub async fn run(mut self, mut receiver: CoDelQueueReceiver<RT, Request<RT>>) {
          log_pool_max(self.worker.config().name, self.max_workers);
@@ -1556,9 +1556,9 @@ index a8c990b9e..674162f1b 100644
          let mut report_stats = self.rt.wait(*HEAP_WORKER_REPORT_INTERVAL_SECONDS);
          loop {
              let all_workers_busy = self.active_workers.load(Ordering::Relaxed) >= self.max_workers;
-@@ -1412,26 +1431,13 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
-             }
-             return Some(worker.worker_id);
+@@ -1418,26 +1437,13 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
+             // It's possible that one of our own workers will end up being the
+             // least-recently-used one.
          }
 +        if let Some(worker_id) = self.preloaded_workers.pop_front() {
 +            return Some(worker_id);
@@ -1587,7 +1587,7 @@ index a8c990b9e..674162f1b 100644
          }
          // No existing worker for this client and we've already started the max number
          // of workers -- just grab the least recently used worker. This worker is least
-@@ -1462,6 +1468,26 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
+@@ -1468,6 +1474,26 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
          Some(worker.worker_id)
      }
  
