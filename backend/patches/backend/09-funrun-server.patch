@@ -1242,7 +1242,7 @@ index 000000000..8eae9692e
 +}
 diff --git a/crates/funrun_server/src/service.rs b/crates/funrun_server/src/service.rs
 new file mode 100644
-index 000000000..baecbc971
+index 000000000..c618f5813
 --- /dev/null
 +++ b/crates/funrun_server/src/service.rs
 @@ -0,0 +1,652 @@
@@ -1448,7 +1448,7 @@ index 000000000..baecbc971
 +        callback_client: reqwest::Client,
 +        identity: Option<pb::convex_identity::UncheckedIdentity>,
 +        ts: Option<pb::common::RepeatableTimestamp>,
-+        existing_writes: Vec<pb::common::DocumentUpdateWithPrevTs>,
++        existing_writes: Vec<pb::common::PendingDocumentUpdate>,
 +        default_system_env_vars: Vec<pb::funrun::EnvVar>,
 +        in_memory_index_last_modified: Vec<pb::funrun::IndexLastModified>,
 +        context: Option<pb::common::ExecutionContext>,
@@ -1464,7 +1464,7 @@ index 000000000..baecbc971
 +        let existing_writes = FunctionWrites {
 +            updates: existing_writes
 +                .into_iter()
-+                .map(common::document::DocumentUpdateWithPrevTs::try_from)
++                .map(common::document::PendingDocumentUpdate::try_from)
 +                .collect::<anyhow::Result<Vec<_>>>()?,
 +        };
 +        let default_system_env_vars: BTreeMap<EnvVarName, EnvVarValue> = default_system_env_vars

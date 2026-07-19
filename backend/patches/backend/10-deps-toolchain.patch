@@ -6,7 +6,7 @@ index db49bb14d..ca5c35005 100644
 -22.22.2
 +24.18.0
 diff --git a/Cargo.lock b/Cargo.lock
-index 88efa8a3b..e42365fa7 100644
+index 8b271ab0e..b7ed2a40b 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
 @@ -356,7 +356,7 @@ dependencies = [
@@ -626,7 +626,7 @@ index 88efa8a3b..e42365fa7 100644
   "pin-project",
   "sentry-core",
   "tower-layer",
-@@ -9627,7 +9676,7 @@ dependencies = [
+@@ -9628,7 +9677,7 @@ dependencies = [
   "fastrace",
   "keybroker",
   "pb_data_sync",
@@ -635,7 +635,7 @@ index 88efa8a3b..e42365fa7 100644
   "table_iteration",
   "tracing",
   "usage_tracking",
-@@ -10543,9 +10592,9 @@ dependencies = [
+@@ -10544,9 +10593,9 @@ dependencies = [
  
  [[package]]
  name = "tonic"
@@ -647,7 +647,7 @@ index 88efa8a3b..e42365fa7 100644
  dependencies = [
   "async-trait",
   "axum",
-@@ -10553,7 +10602,7 @@ dependencies = [
+@@ -10554,7 +10603,7 @@ dependencies = [
   "bytes",
   "flate2",
   "h2",
@@ -656,7 +656,7 @@ index 88efa8a3b..e42365fa7 100644
   "http-body 1.0.1",
   "http-body-util",
   "hyper",
-@@ -10575,9 +10624,9 @@ dependencies = [
+@@ -10576,9 +10625,9 @@ dependencies = [
  
  [[package]]
  name = "tonic-build"
@@ -668,7 +668,7 @@ index 88efa8a3b..e42365fa7 100644
  dependencies = [
   "prettyplease",
   "proc-macro2",
-@@ -10591,7 +10640,7 @@ version = "0.14.5"
+@@ -10592,7 +10641,7 @@ version = "0.14.5"
  source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "f4ff0636fef47afb3ec02818f5bceb4377b8abb9d6a386aeade18bd6212f8eb7"
  dependencies = [
@@ -677,7 +677,7 @@ index 88efa8a3b..e42365fa7 100644
   "tokio",
   "tokio-stream",
   "tonic",
-@@ -10612,20 +10661,20 @@ dependencies = [
+@@ -10613,20 +10662,20 @@ dependencies = [
  
  [[package]]
  name = "tonic-prost"
@@ -703,7 +703,7 @@ index 88efa8a3b..e42365fa7 100644
  dependencies = [
   "prettyplease",
   "proc-macro2",
-@@ -10665,7 +10714,7 @@ dependencies = [
+@@ -10666,7 +10715,7 @@ dependencies = [
   "axum-core",
   "cookie",
   "futures-util",
@@ -712,7 +712,7 @@ index 88efa8a3b..e42365fa7 100644
   "parking_lot",
   "pin-project-lite",
   "tower-layer",
-@@ -10683,7 +10732,7 @@ dependencies = [
+@@ -10684,7 +10733,7 @@ dependencies = [
   "bytes",
   "futures-core",
   "futures-util",
@@ -721,7 +721,7 @@ index 88efa8a3b..e42365fa7 100644
   "http-body 1.0.1",
   "http-body-util",
   "iri-string",
-@@ -10831,7 +10880,7 @@ dependencies = [
+@@ -10832,7 +10881,7 @@ dependencies = [
   "data-encoding",
   "flate2",
   "headers",
@@ -730,7 +730,7 @@ index 88efa8a3b..e42365fa7 100644
   "httparse",
   "log",
   "native-tls",
-@@ -10876,7 +10925,7 @@ dependencies = [
+@@ -10877,7 +10926,7 @@ dependencies = [
   "fastrace",
   "futures",
   "headers",
@@ -739,7 +739,7 @@ index 88efa8a3b..e42365fa7 100644
   "humansize",
   "keybroker",
   "metrics",
-@@ -11033,7 +11082,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -11034,7 +11083,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "d81f9efa9df032be5934a46a068815a10a042b494b6a58cb0a1a97bb5467ed6f"
  dependencies = [
   "base64 0.22.1",
@@ -748,7 +748,7 @@ index 88efa8a3b..e42365fa7 100644
   "httparse",
   "log",
  ]
-@@ -12220,7 +12269,7 @@ dependencies = [
+@@ -12221,7 +12270,7 @@ dependencies = [
   "async-trait",
   "common",
   "errors",
@@ -779,11 +779,11 @@ index 17dcf6afb..4581b4371 100644
  roles = { workspace = true }
  runtime = { workspace = true }
 diff --git a/rust-toolchain b/rust-toolchain
-index 4ac917ad3..ddcac4a1b 100644
+index 4ac917ad3..ca1e8fe7c 100644
 --- a/rust-toolchain
 +++ b/rust-toolchain
 @@ -1,2 +1,3 @@
  [toolchain]
 -channel = "nightly-2026-06-28"
-+channel = "nightly-2026-07-16"
++channel = "nightly-2026-07-19"
 +components = ["rustfmt"]

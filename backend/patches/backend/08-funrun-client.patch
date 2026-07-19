@@ -68,10 +68,10 @@ index 96e8e8795..a3c46f219 100644
  /// convenience) from allowing browsers to make these requests.
  pub fn platform_api_cors() -> CorsLayer {
 diff --git a/crates/common/src/knobs.rs b/crates/common/src/knobs.rs
-index 4ec77a0af..fcf0dfe51 100644
+index 654ac334c..16ede8346 100644
 --- a/crates/common/src/knobs.rs
 +++ b/crates/common/src/knobs.rs
-@@ -552,6 +552,17 @@ pub static MAX_REPEATABLE_TIMESTAMP_IDLE_FREQUENCY: LazyLock<Duration> = LazyLoc
+@@ -567,6 +567,17 @@ pub static MAX_REPEATABLE_TIMESTAMP_IDLE_FREQUENCY: LazyLock<Duration> = LazyLoc
  pub static MAX_REPEATABLE_TIMESTAMP_COMMIT_DELAY: LazyLock<Duration> =
      LazyLock::new(|| Duration::from_secs(env_config("MAX_REPEATABLE_TIMESTAMP_COMMIT_DELAY", 5)));
  
@@ -89,7 +89,7 @@ index 4ec77a0af..fcf0dfe51 100644
  /// The maximum delay between runs of retention, this is now only used for error
  /// backoff and the initial delay when backend is started.
  pub static MAX_RETENTION_DELAY_SECONDS: LazyLock<Duration> =
-@@ -868,6 +879,11 @@ pub static ISOLATE_QUEUE_SIZE: LazyLock<usize> =
+@@ -883,6 +894,11 @@ pub static ISOLATE_QUEUE_SIZE: LazyLock<usize> =
  pub static MAX_ISOLATE_WORKERS: LazyLock<usize> =
      LazyLock::new(|| env_config("MAX_ISOLATE_WORKERS", 300));
  
@@ -101,7 +101,7 @@ index 4ec77a0af..fcf0dfe51 100644
  /// The size of the pending commits in the committer queue. This is a FIFO
  /// queue, so if the queue is too large, we run into a risk of all requests
  /// waiting too long and no requests going through during overload. The size of
-@@ -1189,6 +1205,12 @@ pub static MODULE_CACHE_MAX_CONCURRENCY: LazyLock<usize> =
+@@ -1204,6 +1220,12 @@ pub static MODULE_CACHE_MAX_CONCURRENCY: LazyLock<usize> =
  pub static FUNRUN_INDEX_CACHE_SIZE: LazyLock<u64> =
      LazyLock::new(|| env_config("FUNRUN_INDEX_CACHE_SIZE", 50_000_000)); // 50 MB
  
@@ -114,7 +114,7 @@ index 4ec77a0af..fcf0dfe51 100644
  /// The maximum number of concurrent index cache requests in Funrun.
  pub static FUNRUN_INDEX_CACHE_CONCURRENCY: LazyLock<usize> =
      LazyLock::new(|| env_config("FUNRUN_INDEX_CACHE_CONCURRENCY", 200));
-@@ -1213,28 +1235,41 @@ pub static FUNRUN_MODULE_QUEUE_SIZE: LazyLock<usize> =
+@@ -1228,28 +1250,41 @@ pub static FUNRUN_MODULE_QUEUE_SIZE: LazyLock<usize> =
  pub static FUNRUN_CODE_CACHE_SIZE: LazyLock<u64> =
      LazyLock::new(|| env_config("FUNRUN_CODE_CACHE_SIZE", 500_000_000));
  
@@ -206,7 +206,7 @@ index e02daa22b..d1d9b6348 100644
  usage_tracking = { workspace = true }
  value = { workspace = true }
 diff --git a/crates/function_runner/src/lib.rs b/crates/function_runner/src/lib.rs
-index 8bd359400..0572882c7 100644
+index 8586b10ae..bcf4a4777 100644
 --- a/crates/function_runner/src/lib.rs
 +++ b/crates/function_runner/src/lib.rs
 @@ -78,6 +78,8 @@ mod in_memory_indexes;
@@ -220,7 +220,7 @@ index 8bd359400..0572882c7 100644
  #[async_trait]
 diff --git a/crates/function_runner/src/proto.rs b/crates/function_runner/src/proto.rs
 new file mode 100644
-index 000000000..17e83f819
+index 000000000..9bda993e2
 --- /dev/null
 +++ b/crates/function_runner/src/proto.rs
 @@ -0,0 +1,213 @@
@@ -385,7 +385,7 @@ index 000000000..17e83f819
 +        let writes = writes
 +            .updates
 +            .into_iter()
-+            .map(pb::common::DocumentUpdateWithPrevTs::try_from)
++            .map(pb::common::PendingDocumentUpdate::try_from)
 +            .collect::<anyhow::Result<Vec<_>>>()?;
 +        let rows_read_by_tablet = rows_read_by_tablet
 +            .into_iter()
@@ -416,7 +416,7 @@ index 000000000..17e83f819
 +    ) -> anyhow::Result<Self> {
 +        let writes = writes
 +            .into_iter()
-+            .map(common::document::DocumentUpdateWithPrevTs::try_from)
++            .map(common::document::PendingDocumentUpdate::try_from)
 +            .collect::<anyhow::Result<Vec<_>>>()?;
 +        let rows_read_by_tablet = rows_read_by_tablet
 +            .into_iter()
@@ -439,7 +439,7 @@ index 000000000..17e83f819
 +}
 diff --git a/crates/function_runner/src/remote.rs b/crates/function_runner/src/remote.rs
 new file mode 100644
-index 000000000..0e22ca79a
+index 000000000..9dc6e953d
 --- /dev/null
 +++ b/crates/function_runner/src/remote.rs
 @@ -0,0 +1,909 @@
@@ -908,7 +908,7 @@ index 000000000..0e22ca79a
 +        let existing_writes = existing_writes
 +            .updates
 +            .into_iter()
-+            .map(pb::common::DocumentUpdateWithPrevTs::try_from)
++            .map(pb::common::PendingDocumentUpdate::try_from)
 +            .collect::<anyhow::Result<Vec<_>>>()?;
 +        let (path_and_args_proto, journal_proto) = match function_metadata {
 +            Some(FunctionMetadata {
@@ -1079,7 +1079,7 @@ index 000000000..0e22ca79a
 +        let existing_writes = existing_writes
 +            .updates
 +            .into_iter()
-+            .map(pb::common::DocumentUpdateWithPrevTs::try_from)
++            .map(pb::common::PendingDocumentUpdate::try_from)
 +            .collect::<anyhow::Result<Vec<_>>>()?;
 +        let request = pb::funrun::RunHttpActionRequest {
 +            instance_name: self.deployment.name.clone(),
@@ -1446,7 +1446,7 @@ index c489a0ac7..18c54d317 100644
  
      pub fn concurrency_limiter(&self) -> &isolate::ConcurrencyLimiter {
 diff --git a/crates/isolate/src/client.rs b/crates/isolate/src/client.rs
-index 097acac72..cc0a9afd0 100644
+index 7ba871c7f..3e8f969e6 100644
 --- a/crates/isolate/src/client.rs
 +++ b/crates/isolate/src/client.rs
 @@ -9,6 +9,7 @@ use std::{
@@ -1780,7 +1780,7 @@ index 000000000..d76e4928d
 +    }
 +}
 diff --git a/crates/keybroker/src/lib.rs b/crates/keybroker/src/lib.rs
-index 801f70273..e734870fc 100644
+index f538ebe6f..2fae9bb6d 100644
 --- a/crates/keybroker/src/lib.rs
 +++ b/crates/keybroker/src/lib.rs
 @@ -2,6 +2,7 @@
@@ -1791,10 +1791,10 @@ index 801f70273..e734870fc 100644
  mod legacy_encryptor;
  mod metrics;
  mod operations;
-@@ -25,6 +26,12 @@ pub use self::{
-         UserIdentity,
+@@ -28,6 +29,12 @@ pub use self::{
+         Encryptor,
+         RandomEncryptor,
      },
-     encryptor::Encryptor,
 +    funrun_auth::{
 +        constant_time_eq_sha256,
 +        funrun_auth_header,

@@ -1,6 +1,6 @@
 diff --git a/crates/pb/protos/funrun.proto b/crates/pb/protos/funrun.proto
 new file mode 100644
-index 000000000..bbb76e89f
+index 000000000..93e7fe12b
 --- /dev/null
 +++ b/crates/pb/protos/funrun.proto
 @@ -0,0 +1,152 @@
@@ -29,7 +29,7 @@ index 000000000..bbb76e89f
 +
 +  common.RepeatableTimestamp ts = 4;
 +
-+  repeated common.DocumentUpdateWithPrevTs existing_writes = 5;
++  repeated common.PendingDocumentUpdate existing_writes = 5;
 +
 +  optional common.ValidatedPathAndArgs path_and_args = 6;
 +  optional convex_query_journal.QueryJournal journal = 7;
@@ -76,7 +76,7 @@ index 000000000..bbb76e89f
 +
 +  common.RepeatableTimestamp ts = 3;
 +
-+  repeated common.DocumentUpdateWithPrevTs existing_writes = 4;
++  repeated common.PendingDocumentUpdate existing_writes = 4;
 +
 +  repeated EnvVar default_system_env_vars = 5;
 +
@@ -106,7 +106,7 @@ index 000000000..bbb76e89f
 +message FunctionFinalTransaction {
 +  uint64 begin_timestamp = 1;
 +  FunctionReads reads = 2;
-+  repeated common.DocumentUpdateWithPrevTs writes = 3;
++  repeated common.PendingDocumentUpdate writes = 3;
 +  repeated RowsReadByTablet rows_read_by_tablet = 4;
 +}
 +

@@ -29,10 +29,10 @@ index 6c018be51..0b891fcc1 100644
      >
        {children}
 diff --git a/npm-packages/common/config/rush/pnpm-lock.yaml b/npm-packages/common/config/rush/pnpm-lock.yaml
-index 92c617d22..ca424c72e 100644
+index 9eeb6981a..b771d9ead 100644
 --- a/npm-packages/common/config/rush/pnpm-lock.yaml
 +++ b/npm-packages/common/config/rush/pnpm-lock.yaml
-@@ -1207,6 +1207,9 @@ importers:
+@@ -1213,6 +1213,9 @@ importers:
        react-resizable-panels:
          specifier: ~2.1.1
          version: 2.1.9(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
@@ -42,7 +42,7 @@ index 92c617d22..ca424c72e 100644
        react-table:
          specifier: 7.8.0
          version: 7.8.0(react@18.3.1)
-@@ -1304,6 +1307,9 @@ importers:
+@@ -1310,6 +1313,9 @@ importers:
        '@types/react-dom':
          specifier: ^18.0.0
          version: 18.3.7(@types/react@18.3.26)
@@ -52,6 +52,17 @@ index 92c617d22..ca424c72e 100644
        '@types/react-table':
          specifier: ^7.7.2
          version: 7.7.20
+diff --git a/npm-packages/common/config/rush/repo-state.json b/npm-packages/common/config/rush/repo-state.json
+index c99be24d9..af0016431 100644
+--- a/npm-packages/common/config/rush/repo-state.json
++++ b/npm-packages/common/config/rush/repo-state.json
+@@ -1,5 +1,5 @@
+ // DO NOT MODIFY THIS FILE MANUALLY BUT DO COMMIT IT. It is generated and used by Rush.
+ {
+   "preferredVersionsHash": "ddfe6c8b90159b81dbcfa41446efd1a25968dcc6",
+-  "packageJsonInjectedDependenciesHash": "69e75716a1116717d7e83813a16b06a6a195d01e"
++  "packageJsonInjectedDependenciesHash": "1a19836fbffe0ffc0ad55cea3406e592fc5fc7fe"
+ }
 diff --git a/npm-packages/dashboard-common/package.json b/npm-packages/dashboard-common/package.json
 index 2ac2504e4..caa34fc85 100644
 --- a/npm-packages/dashboard-common/package.json
@@ -2932,7 +2943,7 @@ index 000000000..1476c354a
 +  );
 +}
 diff --git a/npm-packages/dashboard-common/src/layouts/SettingsSidebar.tsx b/npm-packages/dashboard-common/src/layouts/SettingsSidebar.tsx
-index bd755f8fd..fa2384c84 100644
+index 26c497de1..5568ff688 100644
 --- a/npm-packages/dashboard-common/src/layouts/SettingsSidebar.tsx
 +++ b/npm-packages/dashboard-common/src/layouts/SettingsSidebar.tsx
 @@ -61,8 +61,6 @@ export function SettingsSidebar({
@@ -2954,10 +2965,10 @@ index bd755f8fd..fa2384c84 100644
 -                  : `${deploymentsURI}/settings/${page === "general" ? "" : page}`
 -              }
 +              href={`${deploymentsURI}/settings/${page === "general" ? "" : page}`}
+               Icon={DEPLOYMENT_SETTINGS_PAGE_ICONS[page]}
                isActive={page === selectedPage}
                key={page}
-               disabled={isUnavailableForSelfHosted || isUnavailableForLocal}
-@@ -87,12 +81,8 @@ export function SettingsSidebar({
+@@ -88,12 +82,8 @@ export function SettingsSidebar({
                      ? `The ${DEPLOYMENT_SETTINGS_PAGES_AND_NAMES[page]} feature is not currently available in self-hosted deployments.`
                      : undefined
                }
@@ -2971,7 +2982,7 @@ index bd755f8fd..fa2384c84 100644
              </SidebarLink>
            );
          })}
-@@ -156,7 +146,7 @@ export function SettingsSidebar({
+@@ -159,7 +149,7 @@ export function SettingsSidebar({
  
  function useAllowedPages() {
    const { nents } = useNents();
@@ -2980,7 +2991,7 @@ index bd755f8fd..fa2384c84 100644
  
    let pages = DEPLOYMENT_SETTINGS_PAGES;
  
-@@ -164,7 +154,9 @@ function useAllowedPages() {
+@@ -167,7 +157,9 @@ function useAllowedPages() {
      pages = pages.filter((d) => d !== "components");
    }
  
@@ -2992,7 +3003,7 @@ index bd755f8fd..fa2384c84 100644
    // Usage limits is feature-flagged; hide it from the sidebar when off.
    if (!usageLimitsEnabled) {
 diff --git a/npm-packages/dashboard-common/src/lib/deploymentApi.ts b/npm-packages/dashboard-common/src/lib/deploymentApi.ts
-index a3b43aab0..a6240cac7 100644
+index 3d3625939..125128092 100644
 --- a/npm-packages/dashboard-common/src/lib/deploymentApi.ts
 +++ b/npm-packages/dashboard-common/src/lib/deploymentApi.ts
 @@ -1,14 +1,15 @@
@@ -3013,7 +3024,7 @@ index a3b43aab0..a6240cac7 100644
  import { displayName } from "@common/lib/functions/generateFileTree";
  
  export function useDeploymentUrl(): string {
-@@ -65,7 +66,6 @@ export function useTableShapes(): {
+@@ -64,7 +65,6 @@ export function useTableShapes(): {
    return {
      tables: useMemo(() => {
        if (!data) return undefined;
@@ -3021,7 +3032,7 @@ index a3b43aab0..a6240cac7 100644
        const shapes = shapes2ResponseSchema.parse(data);
        return new Map(
          Object.entries(shapes)
-@@ -77,8 +77,6 @@ export function useTableShapes(): {
+@@ -76,8 +76,6 @@ export function useTableShapes(): {
    };
  }
  
@@ -3030,7 +3041,7 @@ index a3b43aab0..a6240cac7 100644
  export function useFunctionUrl(udfPath: string, componentId?: string | null) {
    const { deploymentsURI } = useContext(DeploymentInfoContext);
  
-@@ -103,3 +101,174 @@ export const deploymentAuthMiddleware: Middleware =
+@@ -102,3 +100,174 @@ export const deploymentAuthMiddleware: Middleware =
  
      return useSWRNext(swrKey, fetcher, config);
    };

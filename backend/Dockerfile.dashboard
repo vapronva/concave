@@ -48,7 +48,7 @@ RUN rush-pnpm deploy --legacy --filter=dashboard-self-hosted --prod /tmp/deploy
 
 FROM docker.io/library/node:24-trixie-slim
 
-LABEL org.opencontainers.image.source=https://github.com/get-convex/convex-backend
+LABEL org.opencontainers.image.source=https://git.horse/vapronva/concave
 
 RUN echo 'Acquire::ForceIPv4 "true";' > /etc/apt/apt.conf.d/99force-ipv4 && \
       sed --in-place 's!http://deb.debian.org/debian-security!http://mirror.selectel.ru/debian-security!g; s!http://deb.debian.org/debian!http://mirror.selectel.ru/debian!g' /etc/apt/sources.list.d/debian.sources && \
