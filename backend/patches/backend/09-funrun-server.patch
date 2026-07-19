@@ -57,10 +57,10 @@ index 000000000..8375eb65c
 +workspace = true
 diff --git a/crates/funrun_server/src/callbacks.rs b/crates/funrun_server/src/callbacks.rs
 new file mode 100644
-index 000000000..b3b253642
+index 000000000..2ce86c184
 --- /dev/null
 +++ b/crates/funrun_server/src/callbacks.rs
-@@ -0,0 +1,609 @@
+@@ -0,0 +1,625 @@
 +use anyhow::Context;
 +use async_trait::async_trait;
 +use common::{
@@ -192,7 +192,7 @@ index 000000000..b3b253642
 +        let args_raw: Box<RawValue> = RawValue::from_string(args.get().to_owned())?;
 +        let body = RunFunctionBody {
 +            path: Some(function_path.udf_path.to_string()),
-+            component_path: function_path.component.serialize(),
++            component_path: Some(function_path.component.to_string()),
 +            reference: None,
 +            function_handle: None,
 +            args: args_raw,
@@ -431,7 +431,7 @@ index 000000000..b3b253642
 +        let udf_args: Box<RawValue> = RawValue::from_string(udf_args.get().to_owned())?;
 +        let body = ScheduleJobBody {
 +            udf_path: Some(scheduled_path.udf_path.to_string()),
-+            component_path: scheduled_path.component.serialize(),
++            component_path: Some(scheduled_path.component.to_string()),
 +            reference: None,
 +            function_handle: None,
 +            udf_args,
@@ -470,7 +470,7 @@ index 000000000..b3b253642
 +    ) -> anyhow::Result<FunctionHandle> {
 +        let body = CreateFunctionHandleBody {
 +            udf_path: Some(path.udf_path.to_string()),
-+            component_path: path.component.serialize(),
++            component_path: Some(path.component.to_string()),
 +            reference: None,
 +        };
 +        let response = self
@@ -630,12 +630,28 @@ index 000000000..b3b253642
 +
 +#[cfg(test)]
 +mod tests {
++    use common::components::ComponentPath;
 +    use serde_json::json;
 +
 +    use super::{
 +        build_js_error,
++        RunFunctionBody,
 +        RunFunctionResponse,
 +    };
++
++    #[test]
++    fn run_function_body_keeps_root_component_path_absolute() {
++        let body = RunFunctionBody {
++            path: Some("app.js:bump".to_string()),
++            component_path: Some(ComponentPath::root().to_string()),
++            reference: None,
++            function_handle: None,
++            args: serde_json::value::RawValue::from_string("{}".to_string()).unwrap(),
++        };
++        let encoded = serde_json::to_value(&body).unwrap();
++        assert_eq!(encoded.get("componentPath"), Some(&json!("")));
++        assert_eq!("".parse::<ComponentPath>().unwrap(), ComponentPath::root());
++    }
 +
 +    #[test]
 +    fn run_function_response_decodes_success_and_error() {
@@ -1242,10 +1258,10 @@ index 000000000..8eae9692e
 +}
 diff --git a/crates/funrun_server/src/service.rs b/crates/funrun_server/src/service.rs
 new file mode 100644
-index 000000000..c618f5813
+index 000000000..a9fa4c85f
 --- /dev/null
 +++ b/crates/funrun_server/src/service.rs
-@@ -0,0 +1,652 @@
+@@ -0,0 +1,654 @@
 +use std::{
 +    collections::BTreeMap,
 +    pin::Pin,
@@ -1488,7 +1504,9 @@ index 000000000..c618f5813
 +                    },
 +                )
 +                .collect::<anyhow::Result<_>>()?;
-+        let snapshot = instance.snapshot_inputs(ts).await?;
++        let snapshot = instance
++            .snapshot_inputs(ts, &in_memory_index_last_modified)
++            .await?;
 +        let backend_url =
 +            ConvexOrigin::from(backend_callback_url.context("missing backend_callback_url")?);
 +        let transport_url = callback_transport_url
@@ -1900,12 +1918,15 @@ index 000000000..c618f5813
 +}
 diff --git a/crates/funrun_server/src/snapshot.rs b/crates/funrun_server/src/snapshot.rs
 new file mode 100644
-index 000000000..d05cb721c
+index 000000000..4685d8af7
 --- /dev/null
 +++ b/crates/funrun_server/src/snapshot.rs
-@@ -0,0 +1,808 @@
+@@ -0,0 +1,835 @@
 +use std::{
-+    collections::HashMap,
++    collections::{
++        BTreeMap,
++        HashMap,
++    },
 +    sync::{
 +        Arc,
 +        Mutex,
@@ -1928,6 +1949,7 @@ index 000000000..d05cb721c
 +    },
 +    runtime::Runtime,
 +    types::{
++        IndexId,
 +        RepeatableReason,
 +        RepeatableTimestamp,
 +    },
@@ -2431,8 +2453,15 @@ index 000000000..d05cb721c
 +            )
 +    }
 +
-+    pub async fn snapshot_inputs(&self, ts: RepeatableTimestamp) -> anyhow::Result<SnapshotInputs> {
++    pub async fn snapshot_inputs(
++        &self,
++        ts: RepeatableTimestamp,
++        backend_last_modified: &BTreeMap<IndexId, Timestamp>,
++    ) -> anyhow::Result<SnapshotInputs> {
 +        log_counter(&SNAPSHOT_REQUESTS_TOTAL, 1);
++        let tables_last_modified = backend_last_modified
++            .get(&self.database.bootstrap_metadata.tables_by_id)
++            .copied();
 +        let repeatable_persistence =
 +            RepeatablePersistence::new(self.reader.clone(), ts, self.retention_validator.clone());
 +        let index_reader: Arc<dyn IndexReader> =
@@ -2476,7 +2505,10 @@ index 000000000..d05cb721c
 +                    *ts
 +                );
 +                self.snapshot_cache
-+                    .try_get_with(*ts, self.cold_snapshot_inputs(ts, index_reader))
++                    .try_get_with(
++                        *ts,
++                        self.cold_snapshot_inputs(ts, index_reader, tables_last_modified),
++                    )
 +                    .await
 +                    .map_err(|e| match e.downcast_ref::<errors::ErrorMetadata>() {
 +                        Some(metadata) => anyhow::anyhow!("funrun snapshot inputs failed: {e:#}")
@@ -2540,9 +2572,13 @@ index 000000000..d05cb721c
 +        &self,
 +        ts: RepeatableTimestamp,
 +        index_reader: Arc<dyn IndexReader>,
++        tables_last_modified: Option<Timestamp>,
 +    ) -> anyhow::Result<SnapshotInputs> {
 +        log_counter(&SNAPSHOT_COLD_LOAD_TOTAL, 1);
-+        match self.warm_assembled_inputs(ts, index_reader.clone()).await {
++        match self
++            .warm_assembled_inputs(ts, index_reader.clone(), tables_last_modified)
++            .await
++        {
 +            Ok(inputs) => Ok(inputs),
 +            Err(e) => {
 +                tracing::warn!(
@@ -2559,8 +2595,17 @@ index 000000000..d05cb721c
 +        &self,
 +        ts: RepeatableTimestamp,
 +        index_reader: Arc<dyn IndexReader>,
++        tables_last_modified: Option<Timestamp>,
 +    ) -> anyhow::Result<SnapshotInputs> {
-+        let warm = self.database.snapshot(self.database.now_ts_for_reads())?;
++        let warm_ts = self.database.now_ts_for_reads();
++        let tables_last_modified =
++            tables_last_modified.context("funrun request carried no _tables last-modified")?;
++        anyhow::ensure!(
++            tables_last_modified <= *warm_ts,
++            "table mapping changed at {tables_last_modified}, after the warm snapshot at {}",
++            *warm_ts
++        );
++        let warm = self.database.snapshot(warm_ts)?;
 +        let counts = self
 +            .rolled_table_counts(
 +                ts,
