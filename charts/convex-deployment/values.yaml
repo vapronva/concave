@@ -153,6 +153,10 @@ dashboard:
 ingress:
   ckic:
     enabled: true
+    cors:
+      api: {}
+      site: {}
+      dashboard: {}
   usherService:
     name: usher
     namespace: convex-system

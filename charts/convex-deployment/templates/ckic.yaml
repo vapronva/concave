@@ -17,6 +17,7 @@ data:
       header * {
         X-Robots-Tag "noindex, noarchive, nofollow"
       }
+      {{- with .Values.ingress.ckic.cors.api }}{{ include "convex.ckicCors" . | nindent 6 }}{{- end }}
       import reverse-proxy-xri-hd http://{{ .Values.ingress.usherService.name }}.{{ .Values.ingress.usherService.namespace }}.svc.cluster.local:{{ .Values.ingress.usherService.port }}
     }
     {{- with .Values.hosts.site }}
@@ -26,6 +27,7 @@ data:
       header * {
         X-Robots-Tag "noindex, noarchive, nofollow"
       }
+      {{- with $.Values.ingress.ckic.cors.site }}{{ include "convex.ckicCors" . | nindent 6 }}{{- end }}
       import reverse-proxy-xri-hd http://{{ $.Values.ingress.usherService.name }}.{{ $.Values.ingress.usherService.namespace }}.svc.cluster.local:{{ $.Values.ingress.usherService.port }}
     }
     {{- end }}
@@ -36,6 +38,7 @@ data:
       header * {
         X-Robots-Tag "noindex, noarchive, nofollow"
       }
+      {{- with $.Values.ingress.ckic.cors.dashboard }}{{ include "convex.ckicCors" . | nindent 6 }}{{- end }}
       import reverse-proxy-xri-hd http://{{ include "convex.dashboardName" $ }}.{{ $.Release.Namespace }}.svc.cluster.local:{{ $.Values.dashboard.port }}
     }
     {{- end }}

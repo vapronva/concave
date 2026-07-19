@@ -43,6 +43,37 @@ app.kubernetes.io/component: {{ .component }}
 {{- define "convex.envConfigName" -}}{{ include "convex.fullname" . }}-env{{- end -}}
 {{- define "convex.ckicName" -}}{{ include "convex.fullname" . }}-ckic{{- end -}}
 
+{{- define "convex.ckicCors" -}}
+{{- $regexp := required "ingress.ckic.cors.<host>.originRegexp is required when cors is set for a host" .originRegexp -}}
+@cors_origin header_regexp Origin {{ $regexp }}
+@cors_preflight {
+  method OPTIONS
+  header_regexp Origin {{ $regexp }}
+}
+header @cors_origin {
+  Access-Control-Allow-Origin "{http.request.header.Origin}"
+{{- if .allowCredentials }}
+  Access-Control-Allow-Credentials "true"
+{{- end }}
+{{- with .exposeHeaders }}
+  Access-Control-Expose-Headers {{ . | quote }}
+{{- end }}
+  +Vary "Origin"
+  defer
+}
+header @cors_preflight {
+  Access-Control-Allow-Origin "{http.request.header.Origin}"
+  Access-Control-Allow-Methods {{ .allowMethods | default "{http.request.header.Access-Control-Request-Method}" | quote }}
+  Access-Control-Allow-Headers {{ .allowHeaders | default "{http.request.header.Access-Control-Request-Headers}" | quote }}
+{{- if .allowCredentials }}
+  Access-Control-Allow-Credentials "true"
+{{- end }}
+  Access-Control-Max-Age {{ .maxAge | default 86400 | int64 | quote }}
+  Vary "Origin, Access-Control-Request-Method, Access-Control-Request-Headers"
+}
+respond @cors_preflight 204
+{{- end -}}
+
 {{- define "convex.instanceSecretName" -}}
 {{- default (printf "%s-instance" (include "convex.fullname" .)) .Values.instance.secretRef.name -}}
 {{- end -}}
