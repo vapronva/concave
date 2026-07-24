@@ -26,15 +26,17 @@ COPY apply-patches.sh /tmp/apply-patches.sh
 
 RUN PATCHES_DIR=/tmp/patches/backend bash /tmp/apply-patches.sh /src
 
-RUN --mount=type=cache,target=/root/.npm npm install --global @microsoft/rush@5
+ARG NPM_REGISTRY=https://linux.sex/npm/
 
-WORKDIR /src/npm-packages/dashboard-self-hosted
+RUN [ -z "${NPM_REGISTRY}" ] || printf 'registry=%s\n' "${NPM_REGISTRY}" | tee /root/.npmrc >> npm-packages/.npmrc
 
-ENV PUPPETEER_SKIP_DOWNLOAD=1 PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+RUN --mount=type=cache,target=/root/.npm npm ci --prefix scripts/
 
-RUN rush update
+ENV PATH="/src/scripts/node_modules/.bin:${PATH}"
 
-ENV RUSH_BUILD_CACHE_ENABLED=0
+WORKDIR /src/npm-packages
+
+RUN --mount=type=cache,target=/root/.local/share/pnpm/store,sharing=locked pnpm install --frozen-lockfile
 
 ENV NODE_ENV=production
 ARG NEXT_PUBLIC_LOAD_MONACO_INTERNALLY="true"
@@ -42,9 +44,9 @@ ARG NEXT_PUBLIC_DISABLE_CONVEX_VERSION_CHECK=""
 ENV NEXT_PUBLIC_LOAD_MONACO_INTERNALLY=${NEXT_PUBLIC_LOAD_MONACO_INTERNALLY}
 ENV NEXT_PUBLIC_DISABLE_CONVEX_VERSION_CHECK=${NEXT_PUBLIC_DISABLE_CONVEX_VERSION_CHECK}
 
-RUN rush build --to dashboard-self-hosted
+RUN turbo run build --filter=dashboard-self-hosted...
 
-RUN rush-pnpm deploy --legacy --filter=dashboard-self-hosted --prod /tmp/deploy
+RUN pnpm --filter=dashboard-self-hosted --config.inject-workspace-packages=true deploy --prod /tmp/deploy
 
 FROM docker.io/library/node:24-trixie-slim
 
@@ -68,7 +70,7 @@ COPY --from=build --chown=nextjs:nodejs /tmp/deploy/ /app/
 
 WORKDIR /app
 
-RUN cp /app/.next/standalone/server.js .
+RUN cp /app/.next/standalone/dashboard-self-hosted/server.js .
 
 USER nextjs
 

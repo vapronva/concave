@@ -28,43 +28,8 @@ index 6c018be51..0b891fcc1 100644
        {...props}
      >
        {children}
-diff --git a/npm-packages/common/config/rush/pnpm-lock.yaml b/npm-packages/common/config/rush/pnpm-lock.yaml
-index 9eeb6981a..b771d9ead 100644
---- a/npm-packages/common/config/rush/pnpm-lock.yaml
-+++ b/npm-packages/common/config/rush/pnpm-lock.yaml
-@@ -1213,6 +1213,9 @@ importers:
-       react-resizable-panels:
-         specifier: ~2.1.1
-         version: 2.1.9(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
-+      react-sparklines:
-+        specifier: ~1.7.0
-+        version: 1.7.0(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
-       react-table:
-         specifier: 7.8.0
-         version: 7.8.0(react@18.3.1)
-@@ -1310,6 +1313,9 @@ importers:
-       '@types/react-dom':
-         specifier: ^18.0.0
-         version: 18.3.7(@types/react@18.3.26)
-+      '@types/react-sparklines':
-+        specifier: ~1.7.5
-+        version: 1.7.5
-       '@types/react-table':
-         specifier: ^7.7.2
-         version: 7.7.20
-diff --git a/npm-packages/common/config/rush/repo-state.json b/npm-packages/common/config/rush/repo-state.json
-index c99be24d9..af0016431 100644
---- a/npm-packages/common/config/rush/repo-state.json
-+++ b/npm-packages/common/config/rush/repo-state.json
-@@ -1,5 +1,5 @@
- // DO NOT MODIFY THIS FILE MANUALLY BUT DO COMMIT IT. It is generated and used by Rush.
- {
-   "preferredVersionsHash": "ddfe6c8b90159b81dbcfa41446efd1a25968dcc6",
--  "packageJsonInjectedDependenciesHash": "69e75716a1116717d7e83813a16b06a6a195d01e"
-+  "packageJsonInjectedDependenciesHash": "1a19836fbffe0ffc0ad55cea3406e592fc5fc7fe"
- }
 diff --git a/npm-packages/dashboard-common/package.json b/npm-packages/dashboard-common/package.json
-index 2ac2504e4..caa34fc85 100644
+index e582429ee..4cd4200dd 100644
 --- a/npm-packages/dashboard-common/package.json
 +++ b/npm-packages/dashboard-common/package.json
 @@ -54,6 +54,7 @@
@@ -83,6 +48,22 @@ index 2ac2504e4..caa34fc85 100644
      "@types/react-table": "^7.7.2",
      "@types/react-window": "^1.8.5",
      "@types/react-window-infinite-loader": "^1.0.4",
+diff --git a/npm-packages/dashboard-common/src/elements/Sidebar.tsx b/npm-packages/dashboard-common/src/elements/Sidebar.tsx
+index ff8a8bb79..ec66aee9a 100644
+--- a/npm-packages/dashboard-common/src/elements/Sidebar.tsx
++++ b/npm-packages/dashboard-common/src/elements/Sidebar.tsx
+@@ -171,7 +171,10 @@ export function SidebarLink({
+         />
+       )}
+       <span
+-        className={classNames("select-none flex-1", collapsed && "sm:hidden")}
++        className={classNames(
++          "select-none flex-1 text-left",
++          collapsed && "sm:hidden",
++        )}
+       >
+         {children}
+       </span>
 diff --git a/npm-packages/dashboard-common/src/features/health/components/ChartForInsight.tsx b/npm-packages/dashboard-common/src/features/health/components/ChartForInsight.tsx
 new file mode 100644
 index 000000000..8bff059c4
@@ -383,6 +364,222 @@ index 000000000..8bff059c4
 +    return "Invalid date format";
 +  }
 +};
+diff --git a/npm-packages/dashboard-common/src/features/health/components/DeploymentSummary.tsx b/npm-packages/dashboard-common/src/features/health/components/DeploymentSummary.tsx
+index 23b843041..29395395e 100644
+--- a/npm-packages/dashboard-common/src/features/health/components/DeploymentSummary.tsx
++++ b/npm-packages/dashboard-common/src/features/health/components/DeploymentSummary.tsx
+@@ -203,6 +203,9 @@ export function DeploymentSummary({
+   // ViewData-gated). When the panel is hidden, round all corners of
+   // the main panel.
+   const showUrlPanel = deployment.kind === "cloud" && canViewData;
++  const showPort = deployment.kind === "local" && deployment.port > 0;
++  const showDetailsRow =
++    deployment.kind === "cloud" || showPort || !!lastPushEvent;
+   const mainPanelRounding = showUrlPanel
+     ? "rounded-l-lg rounded-tr-lg rounded-bl-none lg:flex-1 lg:rounded-tr-none lg:rounded-bl-lg"
+     : "rounded-lg";
+@@ -243,107 +246,111 @@ export function DeploymentSummary({
+           </div>
+ 
+           {/* Row 2: Region/Port + Class + Version */}
+-          <div className="flex flex-wrap items-center gap-6">
+-            {/* Region + Class stay together when wrapping */}
+-            <div className="flex items-center gap-6">
+-              {/* Region (cloud) or Port (local) */}
+-              {deployment.kind === "cloud" && (
+-                <div className="flex items-center gap-2">
+-                  <Tooltip tip="Deployment region">
+-                    <GlobeIcon
+-                      className="size-4 shrink-0 text-content-secondary"
+-                      aria-label="Region"
+-                    />
+-                  </Tooltip>
+-                  <div className="text-sm text-content-primary">
+-                    {regionDisplayName}
+-                  </div>
+-                </div>
+-              )}
+-              {deployment.kind === "local" && (
+-                <div className="flex items-center gap-2">
+-                  <Tooltip tip="Local port">
+-                    <CodeIcon
+-                      className="size-4 shrink-0 text-content-secondary"
+-                      aria-label="Port"
+-                    />
+-                  </Tooltip>
+-                  <div className="text-sm text-content-primary">
+-                    Port {deployment.port}
+-                  </div>
++          {showDetailsRow && (
++            <div className="flex flex-wrap items-center gap-6">
++              {/* Region + Class stay together when wrapping */}
++              {(deployment.kind === "cloud" || showPort) && (
++                <div className="flex items-center gap-6">
++                  {/* Region (cloud) or Port (local) */}
++                  {deployment.kind === "cloud" && (
++                    <div className="flex items-center gap-2">
++                      <Tooltip tip="Deployment region">
++                        <GlobeIcon
++                          className="size-4 shrink-0 text-content-secondary"
++                          aria-label="Region"
++                        />
++                      </Tooltip>
++                      <div className="text-sm text-content-primary">
++                        {regionDisplayName}
++                      </div>
++                    </div>
++                  )}
++                  {showPort && (
++                    <div className="flex items-center gap-2">
++                      <Tooltip tip="Local port">
++                        <CodeIcon
++                          className="size-4 shrink-0 text-content-secondary"
++                          aria-label="Port"
++                        />
++                      </Tooltip>
++                      <div className="text-sm text-content-primary">
++                        Port {deployment.port}
++                      </div>
++                    </div>
++                  )}
++
++                  {/* Deployment Class (cloud only) */}
++                  {deployment.kind === "cloud" && (
++                    <div className="flex items-center gap-2">
++                      <Tooltip
++                        tip={
++                          <span className="flex items-center gap-1">
++                            Deployment class
++                            <Link
++                              href="https://docs.convex.dev/production/state/limits"
++                              target="_blank"
++                              rel="noopener noreferrer"
++                            >
++                              <QuestionMarkCircledIcon className="size-3.5" />
++                            </Link>
++                          </span>
++                        }
++                      >
++                        <DimensionsIcon
++                          className="size-4 shrink-0 text-content-secondary"
++                          aria-label="Deployment class"
++                        />
++                      </Tooltip>
++                      <div className="text-sm text-content-primary">
++                        {deployment.class.toUpperCase()}
++                      </div>
++                    </div>
++                  )}
+                 </div>
+               )}
+ 
+-              {/* Deployment Class (cloud only) */}
+-              {deployment.kind === "cloud" && (
++              {/* Convex Version */}
++              {lastPushEvent && (
+                 <div className="flex items-center gap-2">
+-                  <Tooltip
+-                    tip={
+-                      <span className="flex items-center gap-1">
+-                        Deployment class
+-                        <Link
+-                          href="https://docs.convex.dev/production/state/limits"
+-                          target="_blank"
+-                          rel="noopener noreferrer"
+-                        >
+-                          <QuestionMarkCircledIcon className="size-3.5" />
+-                        </Link>
+-                      </span>
+-                    }
+-                  >
+-                    <DimensionsIcon
++                  <Tooltip tip="Convex package version">
++                    <CubeIcon
+                       className="size-4 shrink-0 text-content-secondary"
+-                      aria-label="Deployment class"
++                      aria-label="Convex package version"
+                     />
+                   </Tooltip>
+-                  <div className="text-sm text-content-primary">
+-                    {deployment.class.toUpperCase()}
++                  <div className="flex items-center">
++                    <span className="text-sm text-content-primary">
++                      Convex {serverVersion}
++                    </span>
++                    {hasUpdate && (
++                      <Button
++                        tip={`A ${
++                          serverVersion && latestVersion
++                            ? latestVersion.split(".")[0] !==
++                              serverVersion.split(".")[0]
++                              ? "major"
++                              : latestVersion.split(".")[1] !==
++                                  serverVersion.split(".")[1]
++                                ? "minor"
++                                : "patch"
++                            : ""
++                        } update is available for Convex (${serverVersion} → ${latestVersion})`}
++                        size="xs"
++                        inline
++                        aria-label="Convex NPM Package Upgrade Available"
++                        href="https://github.com/get-convex/convex-js/blob/main/CHANGELOG.md#changelog"
++                        target="_blank"
++                        // eslint-disable-next-line no-restricted-syntax -- manual Link-Button hybrid implementation
++                        className="h-5 text-content-link"
++                      >
++                        <div>({latestVersion} available)</div>
++                      </Button>
++                    )}
+                   </div>
+                 </div>
+               )}
+             </div>
+-
+-            {/* Convex Version */}
+-            {lastPushEvent && (
+-              <div className="flex items-center gap-2">
+-                <Tooltip tip="Convex package version">
+-                  <CubeIcon
+-                    className="size-4 shrink-0 text-content-secondary"
+-                    aria-label="Convex package version"
+-                  />
+-                </Tooltip>
+-                <div className="flex items-center">
+-                  <span className="text-sm text-content-primary">
+-                    Convex {serverVersion}
+-                  </span>
+-                  {hasUpdate && (
+-                    <Button
+-                      tip={`A ${
+-                        serverVersion && latestVersion
+-                          ? latestVersion.split(".")[0] !==
+-                            serverVersion.split(".")[0]
+-                            ? "major"
+-                            : latestVersion.split(".")[1] !==
+-                                serverVersion.split(".")[1]
+-                              ? "minor"
+-                              : "patch"
+-                          : ""
+-                      } update is available for Convex (${serverVersion} → ${latestVersion})`}
+-                      size="xs"
+-                      inline
+-                      aria-label="Convex NPM Package Upgrade Available"
+-                      href="https://github.com/get-convex/convex-js/blob/main/CHANGELOG.md#changelog"
+-                      target="_blank"
+-                      // eslint-disable-next-line no-restricted-syntax -- manual Link-Button hybrid implementation
+-                      className="h-5 text-content-link"
+-                    >
+-                      <div>({latestVersion} available)</div>
+-                    </Button>
+-                  )}
+-                </div>
+-              </div>
+-            )}
+-          </div>
++          )}
+ 
+           {/* Row 3: Last Deployed + Last Backup */}
+           <div className="flex flex-wrap items-center gap-6 gap-y-4">
 diff --git a/npm-packages/dashboard-common/src/features/health/components/EventsForInsight.tsx b/npm-packages/dashboard-common/src/features/health/components/EventsForInsight.tsx
 new file mode 100644
 index 000000000..71eb950fa
@@ -3262,16 +3459,27 @@ index 325a49a8d..6b057855d 100644
      "build": "tsc",
      "test-relational-data-modeling": "node ./dist/relational-data-modeling.js",
      "test-users-and-auth": "node ./dist/users-and-auth.js",
-diff --git a/npm-packages/rush.json b/npm-packages/rush.json
-index c9506fcc2..fe57ab10d 100644
---- a/npm-packages/rush.json
-+++ b/npm-packages/rush.json
-@@ -15,7 +15,7 @@
-    * path segment in the "$schema" field for all your Rush config files.  This will ensure
-    * correct error-underlining and tab-completion for editors such as VS Code.
-    */
--  "rushVersion": "5.173.0",
-+  "rushVersion": "5.175.1",
-   /**
-    * The next field selects which package manager should be installed and determines its version.
-    * Rush installs its own local copy of the package manager to ensure that your build process
+diff --git a/npm-packages/pnpm-lock.yaml b/npm-packages/pnpm-lock.yaml
+index 5726ae288..41e20950e 100644
+--- a/npm-packages/pnpm-lock.yaml
++++ b/npm-packages/pnpm-lock.yaml
+@@ -1220,6 +1220,9 @@ importers:
+       react-resizable-panels:
+         specifier: ~2.1.1
+         version: 2.1.9(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
++      react-sparklines:
++        specifier: ~1.7.0
++        version: 1.7.0(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
+       react-table:
+         specifier: 7.8.0
+         version: 7.8.0(react@18.3.1)
+@@ -1317,6 +1320,9 @@ importers:
+       '@types/react-dom':
+         specifier: ^18.0.0
+         version: 18.3.7(@types/react@18.3.26)
++      '@types/react-sparklines':
++        specifier: ~1.7.5
++        version: 1.7.5
+       '@types/react-table':
+         specifier: ^7.7.2
+         version: 7.7.20

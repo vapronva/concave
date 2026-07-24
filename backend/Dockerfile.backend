@@ -59,9 +59,18 @@ rm /tmp/just.tar.gz
 just --version
 EOF
 
-ENV RUSH_BUILD_CACHE_ENABLED=0
+ARG NPM_REGISTRY=https://linux.sex/npm/
+ARG CARGO_REGISTRY=sparse+https://linux.sex/cargo/
 
-RUN --mount=type=cache,target=/root/.npm npm ci --prefix scripts/ && just rush update && just rush install
+RUN <<EOF
+set -o errexit -o nounset -o xtrace
+[ -z "${NPM_REGISTRY}" ] || printf 'registry=%s\n' "${NPM_REGISTRY}" | tee /root/.npmrc >> npm-packages/.npmrc
+[ -z "${CARGO_REGISTRY}" ] || printf '\n[source.crates-io]\nreplace-with = "proxy"\n\n[source.proxy]\nregistry = "%s"\n' "${CARGO_REGISTRY}" >> .cargo/config.toml
+EOF
+
+RUN --mount=type=cache,target=/root/.npm \
+    --mount=type=cache,target=/root/.local/share/pnpm/store,sharing=locked \
+    npm ci --prefix scripts/ && just install-js
 
 RUN --mount=type=cache,target=/convex/target/ \
     --mount=type=cache,target=/usr/local/cargo/git/db \

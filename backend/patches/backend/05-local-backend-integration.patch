@@ -124,7 +124,7 @@ index dfe80d124..4a3d1d2f9 100644
 +    }
 +}
 diff --git a/crates/local_backend/src/lib.rs b/crates/local_backend/src/lib.rs
-index 613949a98..2106b31c8 100644
+index 8fe7ce8c9..7ccd630df 100644
 --- a/crates/local_backend/src/lib.rs
 +++ b/crates/local_backend/src/lib.rs
 @@ -34,7 +34,10 @@ use common::{

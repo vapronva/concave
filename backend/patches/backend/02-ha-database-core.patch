@@ -167,7 +167,7 @@ index 1c78c855f..3c9ddf6e2 100644
  
  // Within a single transaction that writes multiple documents, this is the order
 diff --git a/crates/database/src/database.rs b/crates/database/src/database.rs
-index c685d5841..56537b688 100644
+index b90aba504..a65fe5dac 100644
 --- a/crates/database/src/database.rs
 +++ b/crates/database/src/database.rs
 @@ -59,12 +59,15 @@ use common::{
@@ -769,7 +769,7 @@ index c685d5841..56537b688 100644
      }
  
      /// Load the set of documents and tombstones in the given table between
-@@ -1658,7 +2097,7 @@ impl<RT: Runtime> Database<RT> {
+@@ -1655,7 +2094,7 @@ impl<RT: Runtime> Database<RT> {
              Arc::new(snapshot.in_memory_indexes),
              snapshot.table_registry.table_mapping().clone(),
              Arc::new(persistence_snapshot),
@@ -778,7 +778,7 @@ index c685d5841..56537b688 100644
              None,
          );
          let (results, cursor) = db_index_snapshot
-@@ -1914,11 +2353,11 @@ impl<RT: Runtime> Database<RT> {
+@@ -1911,11 +2350,11 @@ impl<RT: Runtime> Database<RT> {
                      RepeatablePersistence::new(
                          self.reader.clone(),
                          repeatable_ts,
@@ -792,7 +792,7 @@ index c685d5841..56537b688 100644
                  index_cache,
              ),
              Arc::new(TextIndexManagerSnapshot::new(
-@@ -1983,7 +2422,7 @@ impl<RT: Runtime> Database<RT> {
+@@ -1980,7 +2419,7 @@ impl<RT: Runtime> Database<RT> {
              snapshot,
              table_summaries: None,
              persistence_snapshot: repeatable_persistence.read_snapshot(ts)?,
@@ -801,7 +801,7 @@ index c685d5841..56537b688 100644
              persistence_reader: self.reader.clone(),
              retention_validator: self.retention_validator(),
          })
-@@ -2005,7 +2444,7 @@ impl<RT: Runtime> Database<RT> {
+@@ -2002,7 +2441,7 @@ impl<RT: Runtime> Database<RT> {
          task::consume_budget().await;
          let readonly = transaction.is_readonly();
          let result = self
@@ -810,7 +810,7 @@ index c685d5841..56537b688 100644
              .commit(transaction, write_source.into())
              .await?;
          if !readonly {
-@@ -2019,7 +2458,7 @@ impl<RT: Runtime> Database<RT> {
+@@ -2016,7 +2455,7 @@ impl<RT: Runtime> Database<RT> {
          &self,
          tables: BTreeSet<TableName>,
      ) -> anyhow::Result<()> {
@@ -819,7 +819,7 @@ index c685d5841..56537b688 100644
      }
  
      pub fn write_commits_since_load(&self) -> usize {
-@@ -2030,14 +2469,15 @@ impl<RT: Runtime> Database<RT> {
+@@ -2027,14 +2466,15 @@ impl<RT: Runtime> Database<RT> {
      /// N.B. Only use this function for user subscriptions. System subscriptions
      /// should use `subscribe_and_wait_for_invalidation`.
      pub async fn subscribe(&self, token: Token) -> anyhow::Result<Subscription> {
@@ -837,7 +837,7 @@ index c685d5841..56537b688 100644
          let invalid_ts = subscription.wait_for_invalidation().await;
          let current_ts = self.now_ts_for_reads();
          metrics::log_subscription_invalidation_lag(invalid_ts, *current_ts);
-@@ -2496,11 +2936,19 @@ impl<RT: Runtime> Database<RT> {
+@@ -2493,11 +2933,19 @@ impl<RT: Runtime> Database<RT> {
          ts: Timestamp,
      ) -> anyhow::Result<Result<Token, Option<Timestamp>>> {
          let _timer = metrics::refresh_token_timer();

@@ -111,7 +111,8 @@ funrun:
     arrayBufferMiB: ""
     queueSize: ""
     activeThreads: ""
-    initialPermitTimeoutMs: ""
+    queueIdleTimeoutMs: ""
+    queueCongestedTimeoutMs: ""
   cache:
     indexBytes: ""
     followerIndexBytes: ""

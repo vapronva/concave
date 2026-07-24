@@ -852,7 +852,7 @@ index 000000000..7f7732342
 +    }
 +}
 diff --git a/crates/local_backend/src/router.rs b/crates/local_backend/src/router.rs
-index 760c4fadd..baf408263 100644
+index f97a62820..eec6b035f 100644
 --- a/crates/local_backend/src/router.rs
 +++ b/crates/local_backend/src/router.rs
 @@ -1,6 +1,9 @@

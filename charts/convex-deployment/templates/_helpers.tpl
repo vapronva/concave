@@ -386,8 +386,12 @@ seccompProfile:
 - name: FUNRUN_ISOLATE_ACTIVE_THREADS
   value: {{ int64 . | quote }}
 {{- end }}
-{{- with .Values.funrun.isolate.initialPermitTimeoutMs }}
-- name: FUNRUN_INITIAL_PERMIT_TIMEOUT_MS
+{{- with .Values.funrun.isolate.queueIdleTimeoutMs }}
+- name: ISOLATE_QUEUE_IDLE_TIMEOUT_MS
+  value: {{ int64 . | quote }}
+{{- end }}
+{{- with .Values.funrun.isolate.queueCongestedTimeoutMs }}
+- name: ISOLATE_QUEUE_CONGESTED_TIMEOUT_MS
   value: {{ int64 . | quote }}
 {{- end }}
 {{- with .Values.funrun.cache.indexBytes }}
