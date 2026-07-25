@@ -148,6 +148,7 @@ func TestServeHTTP_MisdirectedResponseIsCleanAndNudgesResolve(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Length", "14")
 		w.Header().Set("X-Internal", "secret")
+		w.Header().Set(followerGateHeader, "1")
 		w.WriteHeader(http.StatusMisdirectedRequest)
 		_, _ = io.WriteString(w, "wrong backend\n")
 	}))
@@ -171,6 +172,44 @@ func TestServeHTTP_MisdirectedResponseIsCleanAndNudgesResolve(t *testing.T) {
 	case <-tr.resolveCh:
 	case <-time.After(time.Second):
 		t.Fatal("misdirected response did not nudge resolution")
+	}
+	if rr.Header().Get(followerGateHeader) != "" {
+		t.Fatal("internal follower-gate header leaked to the client")
+	}
+}
+
+func TestServeHTTP_UnmarkedMisdirectedPassesThroughUntouched(t *testing.T) {
+	t.Parallel()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-App", "keep-me")
+		w.WriteHeader(http.StatusMisdirectedRequest)
+		_, _ = io.WriteString(w, "user body\n")
+	}))
+	defer upstream.Close()
+	tr := &tracker{
+		host:           "api.example",
+		siteHost:       "site.example",
+		resolveCh:      make(chan struct{}, 1),
+		proxyTransport: newProxyTransport(),
+	}
+	if !tr.setLeader(upstream.URL) {
+		t.Fatal("setLeader should install proxy")
+	}
+	rr := httptest.NewRecorder()
+	tr.serveHTTP(rr, httptest.NewRequest(http.MethodGet, "/hook", nil), true)
+	if rr.Code != http.StatusMisdirectedRequest {
+		t.Fatalf("status=%d want 421 preserved for a user httpAction response", rr.Code)
+	}
+	if got := rr.Body.String(); got != "user body\n" {
+		t.Fatalf("body=%q want the user's body preserved", got)
+	}
+	if rr.Header().Get("X-App") != "keep-me" {
+		t.Fatal("user response header was discarded")
+	}
+	select {
+	case <-tr.resolveCh:
+		t.Fatal("a user 421 must not nudge control-plane resolution")
+	default:
 	}
 }
 

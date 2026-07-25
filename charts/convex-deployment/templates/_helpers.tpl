@@ -275,7 +275,16 @@ seccompProfile:
     {{- end }}
     {{- with include "convex.sharedTunableEnv" $ctx | trim }}{{ . | nindent 4 }}{{- end }}
     {{- with include "convex.backendTunableEnv" $ctx | trim }}{{ . | nindent 4 }}{{- end }}
-    {{- with $ctx.Values.backend.extraEnv }}
+    {{- $roleExtra := list }}
+    {{- if eq .role "follower" }}{{ $roleExtra = $ctx.Values.ha.follower.extraEnv | default list }}{{ end }}
+    {{- $overridden := dict }}
+    {{- range $roleExtra }}{{ $_ := set $overridden .name true }}{{ end }}
+    {{- range $ctx.Values.backend.extraEnv }}
+    {{- if not (hasKey $overridden .name) }}
+    {{- toYaml (list .) | nindent 4 }}
+    {{- end }}
+    {{- end }}
+    {{- with $roleExtra }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
   volumeMounts:
@@ -354,6 +363,10 @@ seccompProfile:
 {{- with .Values.backend.committerQueueSize }}
 - name: COMMITTER_QUEUE_SIZE
   value: {{ int64 . | quote }}
+{{- end }}
+{{- if .Values.backend.redactLogsToClient }}
+- name: REDACT_LOGS_TO_CLIENT
+  value: "1"
 {{- end }}
 {{- end -}}
 

@@ -779,11 +779,11 @@ index 249d63a76..6d4c6c3b5 100644
  roles = { workspace = true }
  runtime = { workspace = true }
 diff --git a/rust-toolchain b/rust-toolchain
-index 4ac917ad3..cc9c36bbc 100644
+index 4ac917ad3..4f1bc9fae 100644
 --- a/rust-toolchain
 +++ b/rust-toolchain
 @@ -1,2 +1,3 @@
  [toolchain]
 -channel = "nightly-2026-06-28"
-+channel = "nightly-2026-07-24"
++channel = "nightly-2026-07-25"
 +components = ["rustfmt"]

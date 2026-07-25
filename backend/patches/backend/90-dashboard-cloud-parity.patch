@@ -48,22 +48,6 @@ index e582429ee..4cd4200dd 100644
      "@types/react-table": "^7.7.2",
      "@types/react-window": "^1.8.5",
      "@types/react-window-infinite-loader": "^1.0.4",
-diff --git a/npm-packages/dashboard-common/src/elements/Sidebar.tsx b/npm-packages/dashboard-common/src/elements/Sidebar.tsx
-index ff8a8bb79..ec66aee9a 100644
---- a/npm-packages/dashboard-common/src/elements/Sidebar.tsx
-+++ b/npm-packages/dashboard-common/src/elements/Sidebar.tsx
-@@ -171,7 +171,10 @@ export function SidebarLink({
-         />
-       )}
-       <span
--        className={classNames("select-none flex-1", collapsed && "sm:hidden")}
-+        className={classNames(
-+          "select-none flex-1 text-left",
-+          collapsed && "sm:hidden",
-+        )}
-       >
-         {children}
-       </span>
 diff --git a/npm-packages/dashboard-common/src/features/health/components/ChartForInsight.tsx b/npm-packages/dashboard-common/src/features/health/components/ChartForInsight.tsx
 new file mode 100644
 index 000000000..8bff059c4
@@ -3460,10 +3444,10 @@ index 325a49a8d..6b057855d 100644
      "test-relational-data-modeling": "node ./dist/relational-data-modeling.js",
      "test-users-and-auth": "node ./dist/users-and-auth.js",
 diff --git a/npm-packages/pnpm-lock.yaml b/npm-packages/pnpm-lock.yaml
-index 5726ae288..41e20950e 100644
+index 0b930ea90..db78c5fba 100644
 --- a/npm-packages/pnpm-lock.yaml
 +++ b/npm-packages/pnpm-lock.yaml
-@@ -1220,6 +1220,9 @@ importers:
+@@ -1229,6 +1229,9 @@ importers:
        react-resizable-panels:
          specifier: ~2.1.1
          version: 2.1.9(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
@@ -3473,7 +3457,7 @@ index 5726ae288..41e20950e 100644
        react-table:
          specifier: 7.8.0
          version: 7.8.0(react@18.3.1)
-@@ -1317,6 +1320,9 @@ importers:
+@@ -1326,6 +1329,9 @@ importers:
        '@types/react-dom':
          specifier: ^18.0.0
          version: 18.3.7(@types/react@18.3.26)

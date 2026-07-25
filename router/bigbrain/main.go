@@ -149,7 +149,7 @@ func electionFlags(fs *flag.FlagSet) func() election.Config {
 		"how long a reachable leader may fail to verify its own lease before losing its claim (0 disables)")
 	actuationDefault, actuationSet := envDuration("BIGBRAIN_ACTUATION_TIMEOUT", election.DefaultActuationTimeout)
 	actuationTimeout := fs.Duration("actuation-timeout", actuationDefault,
-		"budget for one promote/demote actuation batch per deployment")
+		"budget for a single promote/demote call; each pod in a batch gets its own")
 	return func() election.Config {
 		passed := make(map[string]bool)
 		fs.Visit(func(f *flag.Flag) { passed[f.Name] = true })

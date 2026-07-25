@@ -31,10 +31,10 @@ index 986cfe59a..82f7a31a8 100644
  }
 diff --git a/crates/local_backend/src/leadership.rs b/crates/local_backend/src/leadership.rs
 new file mode 100644
-index 000000000..7f7732342
+index 000000000..44c9154b0
 --- /dev/null
 +++ b/crates/local_backend/src/leadership.rs
-@@ -0,0 +1,816 @@
+@@ -0,0 +1,818 @@
 +use std::sync::{
 +    atomic::{
 +        AtomicU8,
@@ -81,6 +81,7 @@ index 000000000..7f7732342
 +use crate::LocalAppState;
 +
 +const CONTROL_PLANE_TOKEN_HEADER: &str = "X-Convex-Control-Plane-Token";
++const FOLLOWER_GATE_HEADER: &str = "X-Concave-Follower-Gate";
 +
 +pub struct RoleState {
 +    role: AtomicU8,
@@ -623,6 +624,7 @@ index 000000000..7f7732342
 +    } else {
 +        (
 +            StatusCode::MISDIRECTED_REQUEST,
++            [(FOLLOWER_GATE_HEADER, "1")],
 +            "This backend is a follower (warm standby) and does not serve client traffic. Route \
 +             to the leader (or POST /instance/promote to promote it).",
 +        )

@@ -59,6 +59,7 @@ ha:
     tolerations: []
     affinity: {}
     topologySpreadConstraints: []
+    extraEnv: []
 
 insights:
   enabled: false
@@ -83,6 +84,7 @@ backend:
   httpTimeoutSeconds: ""
   maxConcurrentRequests: ""
   committerQueueSize: ""
+  redactLogsToClient: true
 
 funrun:
   enabled: true

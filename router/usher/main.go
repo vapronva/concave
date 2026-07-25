@@ -26,30 +26,34 @@ import (
 )
 
 const (
-	bodyReadLimit         = 4096
-	defaultMaxBodyBytes   = 128 * 1024 * 1024
-	streamBufferMax       = 1 << 16
-	httpClientTimeout     = 3 * time.Second
-	resolveTimeout        = 3 * time.Second
-	resolveInterval       = 60 * time.Second
-	forcedResolveInterval = 1 * time.Second
-	fastResolveInterval   = 5 * time.Second
-	readHeaderTimeout     = 10 * time.Second
-	idleTimeout           = 120 * time.Second
-	shutdownTimeout       = 10 * time.Second
-	streamBackoffInitial  = 1 * time.Second
-	streamBackoffCap      = 15 * time.Second
-	streamHealthyAfter    = 30 * time.Second
-	streamIdleTimeout     = 75 * time.Second
-	instancePrefix        = "/instance"
-	healthzPath           = "/usher/healthz"
-	readyzPath            = "/usher/readyz"
-	routesPerDeployment   = 2
-	maxHeaderBytes        = 64 * 1024
-	defaultConnIdle       = time.Hour
-	connWatchFloor        = 10 * time.Millisecond
-	connWatchCeil         = time.Minute
-	connWatchDivisor      = 4
+	bodyReadLimit           = 4096
+	defaultMaxBodyBytes     = 200_000_000
+	followerGateHeader      = "X-Concave-Follower-Gate"
+	upstreamDialTimeout     = 5 * time.Second
+	upstreamKeepAlive       = 15 * time.Second
+	upstreamKeepAliveProbes = 3
+	streamBufferMax         = 1 << 16
+	httpClientTimeout       = 3 * time.Second
+	resolveTimeout          = 3 * time.Second
+	resolveInterval         = 60 * time.Second
+	forcedResolveInterval   = 1 * time.Second
+	fastResolveInterval     = 5 * time.Second
+	readHeaderTimeout       = 10 * time.Second
+	idleTimeout             = 120 * time.Second
+	shutdownTimeout         = 10 * time.Second
+	streamBackoffInitial    = 1 * time.Second
+	streamBackoffCap        = 15 * time.Second
+	streamHealthyAfter      = 30 * time.Second
+	streamIdleTimeout       = 75 * time.Second
+	instancePrefix          = "/instance"
+	healthzPath             = "/usher/healthz"
+	readyzPath              = "/usher/readyz"
+	routesPerDeployment     = 2
+	maxHeaderBytes          = 64 * 1024
+	defaultConnIdle         = time.Hour
+	connWatchFloor          = 10 * time.Millisecond
+	connWatchCeil           = time.Minute
+	connWatchDivisor        = 4
 )
 
 type deploymentCfg struct {
@@ -122,6 +126,15 @@ func newProxyTransport() *http.Transport {
 	tr.Proxy = nil
 	tr.MaxIdleConns = 1024
 	tr.MaxIdleConnsPerHost = 512
+	tr.DialContext = (&net.Dialer{
+		Timeout: upstreamDialTimeout,
+		KeepAliveConfig: net.KeepAliveConfig{
+			Enable:   true,
+			Idle:     upstreamKeepAlive,
+			Interval: upstreamKeepAlive,
+			Count:    upstreamKeepAliveProbes,
+		},
+	}).DialContext
 	return tr
 }
 
@@ -152,7 +165,9 @@ func newReverseProxy(u *url.URL, nudge func(), tr *http.Transport) *httputil.Rev
 			http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 		},
 		ModifyResponse: func(resp *http.Response) error {
-			if resp.StatusCode != http.StatusMisdirectedRequest {
+			gated := resp.Header.Get(followerGateHeader) != ""
+			resp.Header.Del(followerGateHeader)
+			if resp.StatusCode != http.StatusMisdirectedRequest || !gated {
 				return nil
 			}
 			_ = resp.Body.Close()

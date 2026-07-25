@@ -140,10 +140,8 @@ func (c *Controller) runActions(ctx context.Context, name string, st *deployment
 	base := context.WithoutCancel(ctx)
 	c.actGo(name, func() {
 		defer c.release(&st.demoting)
-		actx, cancel := context.WithTimeout(base, c.cfg.actuationTimeout)
-		defer cancel()
 		for _, a := range actions {
-			code, err := c.backend.Demote(actx, name, a.url)
+			code, err := c.demoteOne(base, name, a.url)
 			if err != nil {
 				c.log.ErrorContext(base, "election: demote failed", "deployment", name, "pod", a.pod, "err", err)
 				continue
@@ -166,6 +164,12 @@ func (c *Controller) runActions(ctx context.Context, name string, st *deployment
 			}
 		}
 	})
+}
+
+func (c *Controller) demoteOne(base context.Context, name, url string) (int, error) {
+	actx, cancel := context.WithTimeout(base, c.cfg.actuationTimeout)
+	defer cancel()
+	return c.backend.Demote(actx, name, url)
 }
 
 func (c *Controller) setLeader(name string, st *deploymentState, pod, url string) {
