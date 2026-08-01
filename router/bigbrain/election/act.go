@@ -87,6 +87,11 @@ func (c *Controller) actLeaderless(
 	}
 	if d.promoteTarget == nil {
 		c.setLeader(name, st, "", "")
+		if d.hasTransitioning {
+			c.log.InfoContext(ctx, "election: leaderless; a pod is mid-transition",
+				"deployment", name, "streak", streak)
+			return
+		}
 		c.log.WarnContext(ctx, "election: leaderless and no promotable standby",
 			"deployment", name, "streak", streak)
 		return
