@@ -1,27 +1,40 @@
+ARG TOOLS_IMAGE=docker.horse/ci/on-alpine/tools:1
+
+FROM $TOOLS_IMAGE AS tools
+
 FROM docker.io/library/golang:1.26.5-alpine3.24 AS build
 
 WORKDIR /src
 
-RUN sed --in-place 's!https://dl-cdn.alpinelinux.org/alpine!https://linux.sex/dl-cdn.alpinelinux.org!g' /etc/apk/repositories || true && \
-    apk --verbose update && \
-    apk --no-cache --verbose upgrade --available && \
-    apk cache clean
+ARG MIRROR_ALPINE_URL=""
+
+ARG MIRROR_ALPINE_FALLBACK_URL=""
+
+ARG MIRROR_GO_URL=""
+
+COPY --from=tools /usr/local/bin/pkg-base-setup /usr/local/bin/
+
+RUN pkg-base-setup && \
+    apk add --no-cache git
 
 COPY go.mod ./
 
 COPY *.go ./
+
+RUN if [ -n "$MIRROR_GO_URL" ]; then go env -w GOPROXY="${MIRROR_GO_URL%/}|https://proxy.golang.org,direct"; fi
 
 RUN CGO_ENABLED=0 go build -ldflags="-s -w" -trimpath -o /usher . && \
     chmod +x /usher
 
 FROM docker.io/library/alpine:3.24
 
-RUN sed --in-place 's!https://dl-cdn.alpinelinux.org/alpine!https://linux.sex/dl-cdn.alpinelinux.org!g' /etc/apk/repositories || true && \
-    apk --verbose update && \
-    apk --no-cache --verbose upgrade --available && \
-    apk add --no-cache ca-certificates tzdata && \
-    update-ca-certificates && \
-    apk cache clean
+ARG MIRROR_ALPINE_URL=""
+
+ARG MIRROR_ALPINE_FALLBACK_URL=""
+
+COPY --from=tools /usr/local/bin/pkg-base-setup /usr/local/bin/
+
+RUN pkg-base-setup
 
 COPY --from=build /usher /usher
 
