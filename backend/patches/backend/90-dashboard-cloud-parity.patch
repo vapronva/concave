@@ -29,7 +29,7 @@ index 6c018be51..0b891fcc1 100644
      >
        {children}
 diff --git a/npm-packages/dashboard-common/package.json b/npm-packages/dashboard-common/package.json
-index e582429ee..4cd4200dd 100644
+index 5c945884b..b4d44a984 100644
 --- a/npm-packages/dashboard-common/package.json
 +++ b/npm-packages/dashboard-common/package.json
 @@ -54,6 +54,7 @@
@@ -3431,23 +3431,23 @@ index 000000000..054b1a708
 +
 +export default SnapshotsView;
 diff --git a/npm-packages/demo_browser_tests/package.json b/npm-packages/demo_browser_tests/package.json
-index 325a49a8d..6b057855d 100644
+index bfabb0a3f..8545dfadc 100644
 --- a/npm-packages/demo_browser_tests/package.json
 +++ b/npm-packages/demo_browser_tests/package.json
 @@ -10,7 +10,7 @@
      "commander": "^14.0.3"
    },
    "scripts": {
--    "postinstall": "puppeteer browsers install chrome",
-+    "postinstall": "puppeteer browsers install chrome || true",
+-    "postinstall": "node ./install-browser.mjs",
++    "postinstall": "node ./install-browser.mjs || true",
      "build": "tsc",
      "test-relational-data-modeling": "node ./dist/relational-data-modeling.js",
      "test-users-and-auth": "node ./dist/users-and-auth.js",
 diff --git a/npm-packages/pnpm-lock.yaml b/npm-packages/pnpm-lock.yaml
-index 0b930ea90..db78c5fba 100644
+index 2ca57baef..28c87ee4d 100644
 --- a/npm-packages/pnpm-lock.yaml
 +++ b/npm-packages/pnpm-lock.yaml
-@@ -1229,6 +1229,9 @@ importers:
+@@ -1234,6 +1234,9 @@ importers:
        react-resizable-panels:
          specifier: ~2.1.1
          version: 2.1.9(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
@@ -3457,7 +3457,7 @@ index 0b930ea90..db78c5fba 100644
        react-table:
          specifier: 7.8.0
          version: 7.8.0(react@18.3.1)
-@@ -1326,6 +1329,9 @@ importers:
+@@ -1331,6 +1334,9 @@ importers:
        '@types/react-dom':
          specifier: ^18.0.0
          version: 18.3.7(@types/react@18.3.26)

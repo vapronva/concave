@@ -11,7 +11,7 @@ index bbdcaec82..9db9f167f 100644
      module_paths::CanonicalizedComponentModulePath,
      reference::Reference,
 diff --git a/crates/common/src/http/mod.rs b/crates/common/src/http/mod.rs
-index 96e8e8795..a3c46f219 100644
+index f17aa359e..45f1c75df 100644
 --- a/crates/common/src/http/mod.rs
 +++ b/crates/common/src/http/mod.rs
 @@ -212,8 +212,7 @@ impl From<HttpRequest> for HttpRequestStream {
@@ -24,7 +24,7 @@ index 96e8e8795..a3c46f219 100644
  
  impl HeapSize for HttpRequest {
      fn heap_size(&self) -> usize {
-@@ -652,7 +651,6 @@ impl ConvexHttpService {
+@@ -626,7 +625,6 @@ impl ConvexHttpService {
              .await
          }
      }
@@ -32,7 +32,7 @@ index 96e8e8795..a3c46f219 100644
  }
  
  /// Serves an HTTP server using the given service.
-@@ -1020,6 +1018,10 @@ where
+@@ -994,6 +992,10 @@ where
  
  #[allow(clippy::declare_interior_mutable_const)]
  pub const CONVEX_REQUEST_ID_HEADER: HeaderName = HeaderName::from_static("convex-request-id");
@@ -43,7 +43,7 @@ index 96e8e8795..a3c46f219 100644
  
  pub struct ExtractRequestId(pub RequestId);
  
-@@ -1334,23 +1336,6 @@ impl<T: fmt::Display> fmt::Display for LogOptFmt<T> {
+@@ -1308,23 +1310,6 @@ impl<T: fmt::Display> fmt::Display for LogOptFmt<T> {
      }
  }
  
@@ -68,7 +68,7 @@ index 96e8e8795..a3c46f219 100644
  /// convenience) from allowing browsers to make these requests.
  pub fn platform_api_cors() -> CorsLayer {
 diff --git a/crates/common/src/knobs.rs b/crates/common/src/knobs.rs
-index e0b04682f..4fff19dd9 100644
+index edbee7b4a..910661188 100644
 --- a/crates/common/src/knobs.rs
 +++ b/crates/common/src/knobs.rs
 @@ -576,6 +576,17 @@ pub static MAX_REPEATABLE_TIMESTAMP_IDLE_FREQUENCY: LazyLock<Duration> = LazyLoc
@@ -101,7 +101,7 @@ index e0b04682f..4fff19dd9 100644
  /// The size of the pending commits in the committer queue. This is a FIFO
  /// queue, so if the queue is too large, we run into a risk of all requests
  /// waiting too long and no requests going through during overload. The size of
-@@ -1217,6 +1233,12 @@ pub static MODULE_CACHE_MAX_CONCURRENCY: LazyLock<usize> =
+@@ -1224,6 +1240,12 @@ pub static MODULE_CACHE_MAX_CONCURRENCY: LazyLock<usize> =
  pub static FUNRUN_INDEX_CACHE_SIZE: LazyLock<u64> =
      LazyLock::new(|| env_config("FUNRUN_INDEX_CACHE_SIZE", 50_000_000)); // 50 MB
  
@@ -114,7 +114,7 @@ index e0b04682f..4fff19dd9 100644
  /// The maximum number of concurrent index cache requests in Funrun.
  pub static FUNRUN_INDEX_CACHE_CONCURRENCY: LazyLock<usize> =
      LazyLock::new(|| env_config("FUNRUN_INDEX_CACHE_CONCURRENCY", 200));
-@@ -1241,28 +1263,41 @@ pub static FUNRUN_MODULE_QUEUE_SIZE: LazyLock<usize> =
+@@ -1248,28 +1270,41 @@ pub static FUNRUN_MODULE_QUEUE_SIZE: LazyLock<usize> =
  pub static FUNRUN_CODE_CACHE_SIZE: LazyLock<u64> =
      LazyLock::new(|| env_config("FUNRUN_CODE_CACHE_SIZE", 500_000_000));
  
@@ -1616,7 +1616,7 @@ index d179da871..455ff4c38 100644
          for handle in self.handles.lock().iter() {
 diff --git a/crates/keybroker/src/funrun_auth.rs b/crates/keybroker/src/funrun_auth.rs
 new file mode 100644
-index 000000000..d76e4928d
+index 000000000..3df3f1656
 --- /dev/null
 +++ b/crates/keybroker/src/funrun_auth.rs
 @@ -0,0 +1,159 @@
@@ -1647,7 +1647,7 @@ index 000000000..d76e4928d
 +    msg.push(0u8);
 +    msg.extend_from_slice(&window.to_be_bytes());
 +    let tag = hmac::sign(&key, &msg);
-+    hex::encode(tag.as_ref())
++    const_hex::encode(tag.as_ref())
 +}
 +
 +fn funrun_auth_token(secret: &DeploymentSecret, instance_name: &str, unix_seconds: u64) -> String {
