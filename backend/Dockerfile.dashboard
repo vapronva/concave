@@ -1,14 +1,18 @@
+ARG TOOLS_IMAGE=docker.horse/ci/on-alpine/tools:1
+
+FROM $TOOLS_IMAGE AS tools
+
 FROM docker.io/library/node:24-trixie-slim AS build
 
+ARG MIRROR_DEBIAN_URL=""
+
+ARG MIRROR_DEBIAN_FALLBACK_URL=""
+
+COPY --from=tools /usr/local/bin/pkg-base-setup /usr/local/bin/
+
 RUN echo 'Acquire::ForceIPv4 "true";' > /etc/apt/apt.conf.d/99force-ipv4 && \
-      sed --in-place 's!http://deb.debian.org/debian-security!http://mirror.selectel.ru/debian-security!g; s!http://deb.debian.org/debian!http://mirror.selectel.ru/debian!g' /etc/apt/sources.list.d/debian.sources && \
-      apt-get update && \
-      apt-get install --assume-yes ca-certificates && \
-      update-ca-certificates && \
-      sed --in-place 's!http://mirror.selectel.ru/debian!https://mirror.selectel.ru/debian!g' /etc/apt/sources.list.d/debian.sources && \
-      apt-get update && \
-      apt-get upgrade --assume-yes && \
-      apt-get install --assume-yes curl build-essential git python3 perl && \
+      pkg-base-setup && \
+      apt-get install --assume-yes --no-install-recommends curl build-essential git python3 perl && \
       apt-get clean && \
       rm --recursive --force /var/lib/apt/lists/*
 
@@ -22,13 +26,14 @@ RUN git init --quiet . && \
       git checkout --quiet FETCH_HEAD
 
 COPY patches/backend /tmp/patches/backend
+
 COPY apply-patches.sh /tmp/apply-patches.sh
 
 RUN PATCHES_DIR=/tmp/patches/backend bash /tmp/apply-patches.sh /src
 
-ARG NPM_REGISTRY=https://linux.sex/npm/
+ARG MIRROR_NPM_URL=""
 
-RUN [ -z "${NPM_REGISTRY}" ] || printf 'registry=%s\n' "${NPM_REGISTRY}" | tee /root/.npmrc >> npm-packages/.npmrc
+RUN [ -z "${MIRROR_NPM_URL}" ] || printf 'registry=%s\n' "${MIRROR_NPM_URL%/}/" > /root/.npmrc
 
 RUN --mount=type=cache,target=/root/.npm npm ci --prefix scripts/
 
@@ -39,9 +44,13 @@ WORKDIR /src/npm-packages
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store,sharing=locked pnpm install --frozen-lockfile
 
 ENV NODE_ENV=production
+
 ARG NEXT_PUBLIC_LOAD_MONACO_INTERNALLY="true"
+
 ARG NEXT_PUBLIC_DISABLE_CONVEX_VERSION_CHECK=""
+
 ENV NEXT_PUBLIC_LOAD_MONACO_INTERNALLY=${NEXT_PUBLIC_LOAD_MONACO_INTERNALLY}
+
 ENV NEXT_PUBLIC_DISABLE_CONVEX_VERSION_CHECK=${NEXT_PUBLIC_DISABLE_CONVEX_VERSION_CHECK}
 
 RUN turbo run build --filter=dashboard-self-hosted...
@@ -52,15 +61,15 @@ FROM docker.io/library/node:24-trixie-slim
 
 LABEL org.opencontainers.image.source=https://git.horse/vapronva/concave
 
+ARG MIRROR_DEBIAN_URL=""
+
+ARG MIRROR_DEBIAN_FALLBACK_URL=""
+
+COPY --from=tools /usr/local/bin/pkg-base-setup /usr/local/bin/
+
 RUN echo 'Acquire::ForceIPv4 "true";' > /etc/apt/apt.conf.d/99force-ipv4 && \
-      sed --in-place 's!http://deb.debian.org/debian-security!http://mirror.selectel.ru/debian-security!g; s!http://deb.debian.org/debian!http://mirror.selectel.ru/debian!g' /etc/apt/sources.list.d/debian.sources && \
-      apt-get update && \
-      apt-get install --assume-yes ca-certificates && \
-      update-ca-certificates && \
-      sed --in-place 's!http://mirror.selectel.ru/debian!https://mirror.selectel.ru/debian!g' /etc/apt/sources.list.d/debian.sources && \
-      apt-get update && \
-      apt-get upgrade --assume-yes && \
-      apt-get install --assume-yes curl && \
+      pkg-base-setup && \
+      apt-get install --assume-yes --no-install-recommends curl && \
       apt-get clean && \
       rm --recursive --force /var/lib/apt/lists/*
 

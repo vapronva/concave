@@ -1,19 +1,23 @@
 ARG RUST_IMAGE=docker.io/library/rust:1-trixie
 
+ARG TOOLS_IMAGE=docker.horse/ci/on-alpine/tools:1
+
+FROM $TOOLS_IMAGE AS tools
+
 FROM ${RUST_IMAGE} AS build
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
+ARG MIRROR_DEBIAN_URL=""
+
+ARG MIRROR_DEBIAN_FALLBACK_URL=""
+
+COPY --from=tools /usr/local/bin/pkg-base-setup /usr/local/bin/
+
 RUN --mount=type=cache,target=/var/cache/apt --mount=type=cache,target=/var/lib/apt,sharing=locked <<EOF
 set -o errexit -o nounset -o xtrace
 echo 'Acquire::ForceIPv4 "true";' > /etc/apt/apt.conf.d/99force-ipv4
-sed --in-place 's!http://deb.debian.org/debian-security!http://mirror.selectel.ru/debian-security!g; s!http://deb.debian.org/debian!http://mirror.selectel.ru/debian!g' /etc/apt/sources.list.d/debian.sources
-apt-get update
-apt-get install --assume-yes ca-certificates
-update-ca-certificates
-sed --in-place 's!http://mirror.selectel.ru/debian!https://mirror.selectel.ru/debian!g' /etc/apt/sources.list.d/debian.sources
-apt-get update
-apt-get upgrade --assume-yes
+pkg-base-setup
 apt-get install --assume-yes cmake libclang-dev clang curl pkg-config git protobuf-compiler
 EOF
 
@@ -34,7 +38,7 @@ COPY apply-patches.sh /tmp/apply-patches.sh
 
 RUN PATCHES_DIR=/tmp/patches/backend bash /tmp/apply-patches.sh /convex
 
-ARG NODE_SHA256=55aa7153f9d88f28d765fcdad5ae6945b5c0f98a36881703817e4c450fa76742
+ARG NODE_SHA256=d6c664df3f3f61458e8c277585571328522d705166723a7c7823a9253a4d15a0
 
 RUN <<EOF
 set -o errexit -o nounset -o xtrace
@@ -48,6 +52,7 @@ npm --version
 EOF
 
 ARG JUST_VERSION=1.54.0
+
 ARG JUST_SHA256=193e2b04bac8ff3568ff81cf62f8c9db08f8083e16665e28d400dd35bac47ffd
 
 RUN <<EOF
@@ -59,13 +64,14 @@ rm /tmp/just.tar.gz
 just --version
 EOF
 
-ARG NPM_REGISTRY=https://linux.sex/npm/
-ARG CARGO_REGISTRY=sparse+https://linux.sex/cargo/
+ARG MIRROR_NPM_URL=""
+
+ARG MIRROR_CARGO_URL=""
 
 RUN <<EOF
 set -o errexit -o nounset -o xtrace
-[ -z "${NPM_REGISTRY}" ] || printf 'registry=%s\n' "${NPM_REGISTRY}" | tee /root/.npmrc >> npm-packages/.npmrc
-[ -z "${CARGO_REGISTRY}" ] || printf '\n[source.crates-io]\nreplace-with = "proxy"\n\n[source.proxy]\nregistry = "%s"\n' "${CARGO_REGISTRY}" >> .cargo/config.toml
+[ -z "${MIRROR_NPM_URL}" ] || printf 'registry=%s\n' "${MIRROR_NPM_URL%/}/" > /root/.npmrc
+[ -z "${MIRROR_CARGO_URL}" ] || printf '\n[source.crates-io]\nreplace-with = "proxy"\n\n[source.proxy]\nregistry = "sparse+%s/"\n' "${MIRROR_CARGO_URL%/}" >> .cargo/config.toml
 EOF
 
 RUN --mount=type=cache,target=/root/.npm \
@@ -85,16 +91,16 @@ FROM docker.io/library/ubuntu:resolute
 
 LABEL org.opencontainers.image.source=https://git.horse/vapronva/concave
 
+ARG MIRROR_UBUNTU_URL=""
+
+ARG MIRROR_UBUNTU_FALLBACK_URL=""
+
+COPY --from=tools /usr/local/bin/pkg-base-setup /usr/local/bin/
+
 RUN --mount=type=cache,target=/var/cache/apt --mount=type=cache,target=/var/lib/apt,sharing=locked <<EOF
 set -o errexit -o nounset -o xtrace
 echo 'Acquire::ForceIPv4 "true";' > /etc/apt/apt.conf.d/99force-ipv4
-sed --in-place 's!http://archive.ubuntu.com/ubuntu!http://mirror.selectel.ru/ubuntu!g; s!http://security.ubuntu.com/ubuntu!http://mirror.selectel.ru/ubuntu!g' /etc/apt/sources.list.d/ubuntu.sources
-apt-get update
-apt-get install --assume-yes ca-certificates
-update-ca-certificates
-sed --in-place 's!http://mirror.selectel.ru/ubuntu!https://mirror.selectel.ru/ubuntu!g' /etc/apt/sources.list.d/ubuntu.sources
-apt-get update
-apt-get upgrade --assume-yes
+pkg-base-setup
 apt-get install --assume-yes curl
 apt-get clean
 rm --recursive --force /var/lib/apt/lists/*

@@ -47,7 +47,7 @@ include:
       architectures: linux/amd64
       rules_changes:
         - backend/**/*
-        - .gitlab-ci.yml
+        - $CI_CONFIG_PATH
   - component: $CI_SERVER_FQDN/ci/docker/build-and-scan@4
     inputs:
       name: dashboard
@@ -59,7 +59,7 @@ include:
       architectures: linux/amd64
       rules_changes:
         - backend/**/*
-        - .gitlab-ci.yml
+        - $CI_CONFIG_PATH
   - component: $CI_SERVER_FQDN/ci/docker/build-and-scan@4
     inputs:
       name: usher
@@ -71,7 +71,7 @@ include:
       architectures: linux/amd64
       rules_changes:
         - router/usher/**/*
-        - .gitlab-ci.yml
+        - $CI_CONFIG_PATH
   - component: $CI_SERVER_FQDN/ci/docker/build-and-scan@4
     inputs:
       name: bigbrain
@@ -83,7 +83,7 @@ include:
       architectures: linux/amd64
       rules_changes:
         - router/bigbrain/**/*
-        - .gitlab-ci.yml
+        - $CI_CONFIG_PATH
   - component: $CI_SERVER_FQDN/ci/helm-chart/lint@1
     inputs:
       job_name: validate + lint (helm charts)
