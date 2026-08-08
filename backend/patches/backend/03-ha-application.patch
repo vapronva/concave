@@ -1,8 +1,8 @@
 diff --git a/crates/application/src/function_log.rs b/crates/application/src/function_log.rs
-index 5e1ec6209..d5ce537c4 100644
+index 3b0c37331..fd56b1a7b 100644
 --- a/crates/application/src/function_log.rs
 +++ b/crates/application/src/function_log.rs
-@@ -897,6 +897,7 @@ impl<RT: Runtime> FunctionExecutionLog<RT> {
+@@ -907,6 +907,7 @@ impl<RT: Runtime> FunctionExecutionLog<RT> {
                              user_execution_time: outcome.user_execution_time,
                              memory_in_mb: outcome.memory_in_mb,
                              occ_info: occ_info.clone(),
@@ -11,7 +11,7 @@ index 5e1ec6209..d5ce537c4 100644
                          outcome.result.is_ok(),
                          usage_stats,
 diff --git a/crates/application/src/lib.rs b/crates/application/src/lib.rs
-index 9f63358ef..b5f429678 100644
+index 28fb5a196..78b62bd7b 100644
 --- a/crates/application/src/lib.rs
 +++ b/crates/application/src/lib.rs
 @@ -133,6 +133,7 @@ use common::{
@@ -22,7 +22,7 @@ index 9f63358ef..b5f429678 100644
          ConvexOrigin,
          ConvexSite,
          DeploymentMetadata,
-@@ -170,6 +171,7 @@ use database::{
+@@ -171,6 +172,7 @@ use database::{
      UserFacingModel,
      WriteSource,
      MAX_OCC_FAILURES,
@@ -30,7 +30,7 @@ index 9f63358ef..b5f429678 100644
  };
  use either::Either;
  use errors::{
-@@ -278,6 +280,7 @@ use model::{
+@@ -279,6 +281,7 @@ use model::{
          FileStorageModel,
      },
      fivetran_import::FivetranImportModel,
@@ -38,7 +38,7 @@ index 9f63358ef..b5f429678 100644
      migrations::MigrationWorker,
      modules::{
          module_versions::{
-@@ -314,7 +317,6 @@ use model::{
+@@ -315,7 +318,6 @@ use model::{
          types::UdfConfig,
          UdfConfigModel,
      },
@@ -46,7 +46,7 @@ index 9f63358ef..b5f429678 100644
  };
  use node_executor::NodeActions;
  use parking_lot::Mutex;
-@@ -376,7 +378,6 @@ use usage_gauges_tracking_worker::UsageGaugesTrackingWorker;
+@@ -378,7 +380,6 @@ use usage_gauges_tracking_worker::UsageGaugesTrackingWorker;
  use usage_limits::{
      UsageLimitNotifier,
      UsageLimitRecorder,
@@ -54,7 +54,7 @@ index 9f63358ef..b5f429678 100644
      UsageMeter,
  };
  use usage_tracking::{
-@@ -604,9 +605,10 @@ pub struct Application<RT: Runtime> {
+@@ -607,9 +608,10 @@ pub struct Application<RT: Runtime> {
      usage_counter: UsageCounter,
      usage_event_logger: Arc<dyn UsageEventLogger>,
      usage_meter: Arc<UsageMeter>,
@@ -66,7 +66,7 @@ index 9f63358ef..b5f429678 100644
      log_visibility: Arc<dyn LogVisibility<RT>>,
      module_cache: ModuleCache<RT>,
      system_env_var_names: HashSet<EnvVarName>,
-@@ -614,6 +616,10 @@ pub struct Application<RT: Runtime> {
+@@ -617,6 +619,10 @@ pub struct Application<RT: Runtime> {
      log_manager_client: LogManagerClient,
      audit_log_client: AuditLogClient,
      oidc_http_client: CachedHttpClient,
@@ -77,7 +77,7 @@ index 9f63358ef..b5f429678 100644
  }
  
  /// Create storage based on the storage type configuration
-@@ -656,29 +662,31 @@ impl<RT: Runtime> Application<RT> {
+@@ -659,29 +665,31 @@ impl<RT: Runtime> Application<RT> {
              storage_type
          };
  
@@ -123,7 +123,7 @@ index 9f63358ef..b5f429678 100644
          Ok(ApplicationStorage {
              files_storage,
              modules_storage,
-@@ -688,7 +696,34 @@ impl<RT: Runtime> Application<RT> {
+@@ -691,7 +699,34 @@ impl<RT: Runtime> Application<RT> {
          })
      }
  
@@ -158,7 +158,7 @@ index 9f63358ef..b5f429678 100644
          runtime: RT,
          database: Database<RT>,
          file_storage: FileStorage<RT>,
-@@ -702,7 +737,7 @@ impl<RT: Runtime> Application<RT> {
+@@ -705,7 +740,7 @@ impl<RT: Runtime> Application<RT> {
          convex_site: ConvexSite,
          searcher: Arc<dyn Searcher>,
          segment_term_metadata_fetcher: Arc<dyn SegmentTermMetadataFetcher>,
@@ -167,9 +167,9 @@ index 9f63358ef..b5f429678 100644
          node_actions: NodeActions<RT>,
          log_visibility: Arc<dyn LogVisibility<RT>>,
          app_auth: Arc<ApplicationAuth<RT>>,
-@@ -714,8 +749,8 @@ impl<RT: Runtime> Application<RT> {
-         deleted_tablet_receiver: tokio::sync::mpsc::Receiver<TabletId>,
+@@ -718,8 +753,8 @@ impl<RT: Runtime> Application<RT> {
          oidc_http_client: CachedHttpClient,
+         llm_gateway_jwt_minter: Option<Arc<dyn llm_gateway_jwt::LlmGatewayJwtMinter>>,
      ) -> anyhow::Result<Self> {
 -        // Wrap the usage logger so usage is recorded for enforcement before
 -        // being forwarded downstream.
@@ -178,7 +178,7 @@ index 9f63358ef..b5f429678 100644
          let usage_meter = Arc::new(UsageMeter::new(runtime.system_time())?);
          let usage_event_logger: Arc<dyn UsageEventLogger> =
              UsageLimitRecorder::new(runtime.clone(), usage_meter.clone(), usage_event_logger);
-@@ -731,6 +766,142 @@ impl<RT: Runtime> Application<RT> {
+@@ -735,6 +770,144 @@ impl<RT: Runtime> Application<RT> {
              CONVEX_SITE.clone() => convex_site.parse()?
          };
  
@@ -250,6 +250,7 @@ index 9f63358ef..b5f429678 100644
 +            audit_log_client.clone(),
 +            default_system_env_vars.clone(),
 +            cache,
++            llm_gateway_jwt_minter,
 +        ));
 +        function_runner.set_action_callbacks(runner.clone());
 +        let application = Self {
@@ -279,7 +280,8 @@ index 9f63358ef..b5f429678 100644
 +            fetch_client: fetch_client.clone(),
 +        };
 +        if role.is_leader() {
-+            let persistence = persistence.expect("leader requires a read-write Persistence handle");
++            let persistence =
++                persistence.context("leader requires a read-write Persistence handle")?;
 +            application
 +                .start_leader_workers(
 +                    persistence,
@@ -321,7 +323,7 @@ index 9f63358ef..b5f429678 100644
          let mut index_worker = Arc::new(Mutex::new(None));
          if *ENABLE_INDEX_BACKFILL {
              let index_worker_fut = IndexWorker::new(
-@@ -755,12 +926,12 @@ impl<RT: Runtime> Application<RT> {
+@@ -759,12 +932,12 @@ impl<RT: Runtime> Application<RT> {
              database.clone(),
              persistence.reader(),
              application_storage.search_storage.clone(),
@@ -337,7 +339,7 @@ index 9f63358ef..b5f429678 100644
          let table_summary_worker = TableSummaryWorker::start(
              runtime.clone(),
              database.clone(),
-@@ -782,88 +953,9 @@ impl<RT: Runtime> Application<RT> {
+@@ -786,89 +959,9 @@ impl<RT: Runtime> Application<RT> {
              runtime.spawn("system_table_cleanup_worker", system_table_cleanup_worker),
          ));
  
@@ -421,6 +423,7 @@ index 9f63358ef..b5f429678 100644
 -            audit_log_client.clone(),
 -            default_system_env_vars.clone(),
 -            cache,
+-            llm_gateway_jwt_minter,
 -        ));
 -        function_runner.set_action_callbacks(runner.clone());
 +        let usage_limit_worker = Arc::new(Mutex::new(Some(
@@ -429,7 +432,7 @@ index 9f63358ef..b5f429678 100644
  
          let scheduled_job_runner = ScheduledJobRunner::start(
              runtime.clone(),
-@@ -889,7 +981,7 @@ impl<RT: Runtime> Application<RT> {
+@@ -894,7 +987,7 @@ impl<RT: Runtime> Application<RT> {
              database.clone(),
              application_storage.exports_storage.clone(),
              application_storage.files_storage.clone(),
@@ -438,7 +441,7 @@ index 9f63358ef..b5f429678 100644
              usage_counter.clone(),
              deployment_name.clone(),
          );
-@@ -926,7 +1018,7 @@ impl<RT: Runtime> Application<RT> {
+@@ -931,7 +1024,7 @@ impl<RT: Runtime> Application<RT> {
              deployment_name.clone(),
          );
  
@@ -447,7 +450,7 @@ index 9f63358ef..b5f429678 100644
              usage_gauges_tracking_worker,
              scheduled_job_runner,
              cron_job_executor,
-@@ -941,30 +1033,78 @@ impl<RT: Runtime> Application<RT> {
+@@ -946,30 +1039,78 @@ impl<RT: Runtime> Application<RT> {
              system_table_cleanup_worker,
              migration_worker,
              usage_limit_worker,
@@ -548,7 +551,7 @@ index 9f63358ef..b5f429678 100644
      }
  
      pub fn usage_meter(&self) -> &Arc<UsageMeter> {
-@@ -975,6 +1115,10 @@ impl<RT: Runtime> Application<RT> {
+@@ -980,6 +1121,10 @@ impl<RT: Runtime> Application<RT> {
          self.runtime.clone()
      }
  
@@ -559,7 +562,7 @@ index 9f63358ef..b5f429678 100644
      pub fn modules_storage(&self) -> &Arc<dyn Storage> {
          &self.application_storage.modules_storage
      }
-@@ -3866,7 +4010,10 @@ impl<RT: Runtime> Application<RT> {
+@@ -3888,7 +4033,10 @@ impl<RT: Runtime> Application<RT> {
      }
  
      pub async fn shutdown(&self) -> anyhow::Result<()> {
@@ -572,7 +575,7 @@ index 9f63358ef..b5f429678 100644
          self.runner.shutdown().await?;
          self.database.shutdown().await?;
 diff --git a/crates/log_streaming/src/lib.rs b/crates/log_streaming/src/lib.rs
-index c6bcd73c4..c0bd07834 100644
+index 2920f258b..49094d0fd 100644
 --- a/crates/log_streaming/src/lib.rs
 +++ b/crates/log_streaming/src/lib.rs
 @@ -100,6 +100,11 @@ use crate::sinks::{

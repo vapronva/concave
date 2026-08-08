@@ -29,18 +29,18 @@ index 6c018be51..0b891fcc1 100644
      >
        {children}
 diff --git a/npm-packages/dashboard-common/package.json b/npm-packages/dashboard-common/package.json
-index 5c945884b..b4d44a984 100644
+index 28a8dbdc2..1070815e3 100644
 --- a/npm-packages/dashboard-common/package.json
 +++ b/npm-packages/dashboard-common/package.json
-@@ -54,6 +54,7 @@
+@@ -50,6 +50,7 @@
+     "react-day-picker": "~9.14.0",
      "react-hotkeys-hook": "~4.6.0",
-     "react-popper": "^2.3.0",
      "react-resizable-panels": "~2.1.1",
 +    "react-sparklines": "~1.7.0",
      "react-table": "7.8.0",
      "react-virtualized-auto-sizer": "1.0.26",
      "react-window": "1.8.11",
-@@ -87,6 +88,7 @@
+@@ -83,6 +84,7 @@
      "@types/prettier-old-sync": "npm:@types/prettier@2.7.3",
      "@types/react": "^18.0.0",
      "@types/react-dom": "^18.0.0",
@@ -3124,7 +3124,7 @@ index 000000000..1476c354a
 +  );
 +}
 diff --git a/npm-packages/dashboard-common/src/layouts/SettingsSidebar.tsx b/npm-packages/dashboard-common/src/layouts/SettingsSidebar.tsx
-index 26c497de1..5568ff688 100644
+index 28ae40fc5..01524ff9a 100644
 --- a/npm-packages/dashboard-common/src/layouts/SettingsSidebar.tsx
 +++ b/npm-packages/dashboard-common/src/layouts/SettingsSidebar.tsx
 @@ -61,8 +61,6 @@ export function SettingsSidebar({
@@ -3163,16 +3163,15 @@ index 26c497de1..5568ff688 100644
              </SidebarLink>
            );
          })}
-@@ -159,7 +149,7 @@ export function SettingsSidebar({
+@@ -159,6 +149,7 @@ export function SettingsSidebar({
  
  function useAllowedPages() {
    const { nents } = useNents();
--  const { usageLimitsEnabled } = useContext(DeploymentInfoContext);
-+  const { isSelfHosted, usageLimitsEnabled } = useContext(DeploymentInfoContext);
++  const { isSelfHosted } = useContext(DeploymentInfoContext);
  
    let pages = DEPLOYMENT_SETTINGS_PAGES;
  
-@@ -167,7 +157,9 @@ function useAllowedPages() {
+@@ -166,7 +157,9 @@ function useAllowedPages() {
      pages = pages.filter((d) => d !== "components");
    }
  
@@ -3181,8 +3180,8 @@ index 26c497de1..5568ff688 100644
 +    isSelfHosted ? d !== "backups" : d !== "snapshots",
 +  );
  
-   // Usage limits is feature-flagged; hide it from the sidebar when off.
-   if (!usageLimitsEnabled) {
+   return pages;
+ }
 diff --git a/npm-packages/dashboard-common/src/lib/deploymentApi.ts b/npm-packages/dashboard-common/src/lib/deploymentApi.ts
 index 3d3625939..125128092 100644
 --- a/npm-packages/dashboard-common/src/lib/deploymentApi.ts
@@ -3444,10 +3443,10 @@ index bfabb0a3f..8545dfadc 100644
      "test-relational-data-modeling": "node ./dist/relational-data-modeling.js",
      "test-users-and-auth": "node ./dist/users-and-auth.js",
 diff --git a/npm-packages/pnpm-lock.yaml b/npm-packages/pnpm-lock.yaml
-index 2ca57baef..28c87ee4d 100644
+index f36c17e29..a6fc05960 100644
 --- a/npm-packages/pnpm-lock.yaml
 +++ b/npm-packages/pnpm-lock.yaml
-@@ -1234,6 +1234,9 @@ importers:
+@@ -1183,6 +1183,9 @@ importers:
        react-resizable-panels:
          specifier: ~2.1.1
          version: 2.1.9(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
@@ -3457,7 +3456,7 @@ index 2ca57baef..28c87ee4d 100644
        react-table:
          specifier: 7.8.0
          version: 7.8.0(react@18.3.1)
-@@ -1331,6 +1334,9 @@ importers:
+@@ -1280,6 +1283,9 @@ importers:
        '@types/react-dom':
          specifier: ^18.0.0
          version: 18.3.7(@types/react@18.3.26)

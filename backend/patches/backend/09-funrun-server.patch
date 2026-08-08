@@ -1,9 +1,9 @@
 diff --git a/crates/funrun_server/Cargo.toml b/crates/funrun_server/Cargo.toml
 new file mode 100644
-index 000000000..8375eb65c
+index 000000000..fee975de7
 --- /dev/null
 +++ b/crates/funrun_server/Cargo.toml
-@@ -0,0 +1,51 @@
+@@ -0,0 +1,52 @@
 +[package]
 +name = "funrun_server"
 +version = "0.1.0"
@@ -22,6 +22,7 @@ index 000000000..8375eb65c
 +axum = { workspace = true }
 +bytes = { workspace = true }
 +clusters = { workspace = true }
++cmd_util = { workspace = true }
 +common = { workspace = true }
 +database = { workspace = true }
 +db_connection = { workspace = true }
@@ -34,6 +35,7 @@ index 000000000..8375eb65c
 +model = { workspace = true }
 +metrics = { workspace = true }
 +moka = { workspace = true }
++parking_lot = { workspace = true }
 +pb = { workspace = true }
 +prost = { workspace = true }
 +reqwest = { workspace = true }
@@ -47,7 +49,6 @@ index 000000000..8375eb65c
 +tokio-stream = { workspace = true }
 +tonic = { workspace = true }
 +tracing = { workspace = true }
-+tracing-subscriber = { workspace = true, features = ["env-filter"] }
 +udf = { workspace = true }
 +usage_tracking = { workspace = true }
 +value = { workspace = true }
@@ -57,10 +58,10 @@ index 000000000..8375eb65c
 +workspace = true
 diff --git a/crates/funrun_server/src/callbacks.rs b/crates/funrun_server/src/callbacks.rs
 new file mode 100644
-index 000000000..2ce86c184
+index 000000000..cc7cc2485
 --- /dev/null
 +++ b/crates/funrun_server/src/callbacks.rs
-@@ -0,0 +1,625 @@
+@@ -0,0 +1,629 @@
 +use anyhow::Context;
 +use async_trait::async_trait;
 +use common::{
@@ -386,6 +387,10 @@ index 000000000..2ce86c184
 +
 +#[async_trait]
 +impl ActionCallbacks for HttpActionCallbacks {
++    async fn issue_llm_gateway_jwt(&self) -> anyhow::Result<String> {
++        anyhow::bail!("LLM gateway JWT minting is not configured")
++    }
++
 +    async fn execute_query(
 +        &self,
 +        identity: Identity,
@@ -688,15 +693,19 @@ index 000000000..2ce86c184
 +}
 diff --git a/crates/funrun_server/src/config.rs b/crates/funrun_server/src/config.rs
 new file mode 100644
-index 000000000..6eaebb1e2
+index 000000000..2900baf6e
 --- /dev/null
 +++ b/crates/funrun_server/src/config.rs
-@@ -0,0 +1,280 @@
+@@ -0,0 +1,289 @@
 +use std::net::SocketAddr;
 +
++use anyhow::Context;
 +use clusters::DbDriverTag;
 +use common::types::PersistenceVersion;
-+use function_runner::remote::funrun_tls_pem_from_env;
++use function_runner::remote::{
++    funrun_tls_pem_from_env,
++    FunrunTlsPem,
++};
 +use keybroker::DeploymentSecret;
 +
 +#[derive(Clone)]
@@ -708,7 +717,12 @@ index 000000000..6eaebb1e2
 +
 +impl FunrunTlsConfig {
 +    pub fn from_env() -> anyhow::Result<Option<Self>> {
-+        let Some((cert_pem, key_pem, ca_pem)) = funrun_tls_pem_from_env()? else {
++        let Some(FunrunTlsPem {
++            cert_pem,
++            key_pem,
++            ca_pem,
++        }) = funrun_tls_pem_from_env()?
++        else {
 +            return Ok(None);
 +        };
 +        Ok(Some(Self {
@@ -753,11 +767,11 @@ index 000000000..6eaebb1e2
 +        let listen = std::env::var("FUNRUN_LISTEN")
 +            .unwrap_or_else(|_| "0.0.0.0:8090".to_string())
 +            .parse()
-+            .map_err(|e| anyhow::anyhow!("Invalid FUNRUN_LISTEN: {e}"))?;
++            .context("Invalid FUNRUN_LISTEN")?;
 +        let health_listen = std::env::var("FUNRUN_HEALTH_LISTEN")
 +            .unwrap_or_else(|_| "0.0.0.0:8091".to_string())
 +            .parse()
-+            .map_err(|e| anyhow::anyhow!("Invalid FUNRUN_HEALTH_LISTEN: {e}"))?;
++            .context("Invalid FUNRUN_HEALTH_LISTEN")?;
 +        fn duration_secs_from_env(
 +            key: &str,
 +            default_secs: u64,
@@ -767,7 +781,7 @@ index 000000000..6eaebb1e2
 +                .map(|v| {
 +                    v.parse::<u64>()
 +                        .map(std::time::Duration::from_secs)
-+                        .map_err(|e| anyhow::anyhow!("Invalid {key}: {e}"))
++                        .with_context(|| format!("Invalid {key}"))
 +                })
 +                .transpose()?
 +                .unwrap_or(std::time::Duration::from_secs(default_secs)))
@@ -777,7 +791,7 @@ index 000000000..6eaebb1e2
 +        let db = match std::env::var("FUNRUN_DB").ok() {
 +            Some(s) => s
 +                .parse::<DbDriverTag>()
-+                .map_err(|e| anyhow::anyhow!("Invalid FUNRUN_DB {s}: {e}"))?,
++                .with_context(|| format!("Invalid FUNRUN_DB {s}"))?,
 +            None => DbDriverTag::Postgres(PersistenceVersion::V5),
 +        };
 +        let require_ssl = std::env::var("FUNRUN_DO_NOT_REQUIRE_SSL")
@@ -974,10 +988,10 @@ index 000000000..6eaebb1e2
 +}
 diff --git a/crates/funrun_server/src/main.rs b/crates/funrun_server/src/main.rs
 new file mode 100644
-index 000000000..8eae9692e
+index 000000000..28ce53226
 --- /dev/null
 +++ b/crates/funrun_server/src/main.rs
-@@ -0,0 +1,278 @@
+@@ -0,0 +1,279 @@
 +use std::sync::{
 +    atomic::{
 +        AtomicBool,
@@ -995,11 +1009,14 @@ index 000000000..8eae9692e
 +    Json,
 +    Router,
 +};
++use cmd_util::env::config_service;
++use common::runtime::Runtime;
 +use runtime::prod::ProdRuntime;
 +use tokio::sync::watch;
 +
 +mod callbacks;
 +mod config;
++mod metrics;
 +mod service;
 +mod snapshot;
 +
@@ -1009,12 +1026,7 @@ index 000000000..8eae9692e
 +use snapshot::InstanceRegistry;
 +
 +fn main() -> anyhow::Result<()> {
-+    tracing_subscriber::fmt()
-+        .with_env_filter(
-+            tracing_subscriber::EnvFilter::try_from_default_env()
-+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-+        )
-+        .init();
++    let _guard = config_service();
 +    let config = FunrunConfig::from_env()?;
 +    let tokio = ProdRuntime::init_tokio()?;
 +    let runtime = ProdRuntime::new(&tokio);
@@ -1040,7 +1052,7 @@ index 000000000..8eae9692e
 +    );
 +    let registry = Arc::new(InstanceRegistry::new(runtime.clone(), &config)?);
 +    registry.prewarm_all().await;
-+    spawn_pod_deletion_cost_updater(registry.clone());
++    spawn_pod_deletion_cost_updater(&runtime, registry.clone());
 +    let service = FunrunService::new(runtime.clone(), registry.clone())?;
 +    let server = pb::funrun::funrun_server::FunrunServer::new(service)
 +        .max_decoding_message_size(*MAX_GRPC_MESSAGE_BYTES)
@@ -1068,7 +1080,7 @@ index 000000000..8eae9692e
 +    {
 +        let shutting_down = shutting_down.clone();
 +        let drain_delay = config.drain_delay;
-+        tokio::spawn(async move {
++        runtime.spawn_background("funrun_shutdown_watcher", async move {
 +            shutdown_signal().await;
 +            shutting_down.store(true, Ordering::Release);
 +            tokio::time::sleep(drain_delay).await;
@@ -1148,7 +1160,10 @@ index 000000000..8eae9692e
 +        .context("convex-funrun health server exited")
 +}
 +
-+fn spawn_pod_deletion_cost_updater(registry: Arc<InstanceRegistry<ProdRuntime>>) {
++fn spawn_pod_deletion_cost_updater(
++    runtime: &ProdRuntime,
++    registry: Arc<InstanceRegistry<ProdRuntime>>,
++) {
 +    let enabled = std::env::var("CONVEX_FUNRUN_POD_DELETION_COST")
 +        .map(|v| v == "true" || v == "1")
 +        .unwrap_or(false);
@@ -1163,10 +1178,10 @@ index 000000000..8eae9692e
 +        return;
 +    };
 +    let url = format!("https://kubernetes.default.svc/api/v1/namespaces/{namespace}/pods/{pod}");
-+    tokio::spawn(async move {
++    runtime.spawn_background("funrun_pod_deletion_cost", async move {
 +        let client = match tokio::fs::read("/var/run/secrets/kubernetes.io/serviceaccount/ca.crt")
 +            .await
-+            .map_err(|e| anyhow::anyhow!("{e}"))
++            .context("reading the in-cluster serviceaccount CA certificate")
 +            .and_then(|ca| Ok(reqwest::Certificate::from_pem(&ca)?))
 +            .and_then(|cert| {
 +                Ok(reqwest::Client::builder()
@@ -1176,7 +1191,7 @@ index 000000000..8eae9692e
 +            Ok(client) => client,
 +            Err(e) => {
 +                tracing::warn!(
-+                    "[convex-funrun] pod-deletion-cost: no in-cluster API client ({e}); disabled"
++                    "[convex-funrun] pod-deletion-cost: no in-cluster API client ({e:#}); disabled"
 +                );
 +                return;
 +            },
@@ -1256,12 +1271,84 @@ index 000000000..8eae9692e
 +    }
 +    tracing::info!("[convex-funrun] shutdown signal; readiness now 503, draining before gRPC stop");
 +}
+diff --git a/crates/funrun_server/src/metrics.rs b/crates/funrun_server/src/metrics.rs
+new file mode 100644
+index 000000000..4a5754360
+--- /dev/null
++++ b/crates/funrun_server/src/metrics.rs
+@@ -0,0 +1,66 @@
++use metrics::{
++    log_counter,
++    log_counter_with_labels,
++    log_gauge,
++    register_convex_counter,
++    register_convex_gauge,
++    StaticMetricLabel,
++};
++
++register_convex_counter!(
++    SNAPSHOT_WARM_HIT_TOTAL,
++    "Funrun requests served from the warm follower snapshot"
++);
++pub(crate) fn log_snapshot_warm_hit() {
++    log_counter(&SNAPSHOT_WARM_HIT_TOTAL, 1);
++}
++
++register_convex_counter!(
++    SNAPSHOT_COLD_TOTAL,
++    "Funrun requests that missed the warm snapshot and entered the cold-load path"
++);
++pub(crate) fn log_snapshot_cold() {
++    log_counter(&SNAPSHOT_COLD_TOTAL, 1);
++}
++
++register_convex_counter!(
++    SNAPSHOT_COLD_LOAD_TOTAL,
++    "Funrun cold snapshot loads executed against Postgres (snapshot cache misses)"
++);
++pub(crate) fn log_snapshot_cold_load() {
++    log_counter(&SNAPSHOT_COLD_LOAD_TOTAL, 1);
++}
++
++register_convex_counter!(
++    SNAPSHOT_REQUESTS_TOTAL,
++    "Funrun snapshot_inputs calls; cache hit rate = 1 - cold_load / requests"
++);
++pub(crate) fn log_snapshot_request() {
++    log_counter(&SNAPSHOT_REQUESTS_TOTAL, 1);
++}
++
++register_convex_gauge!(
++    ISOLATE_BUSY_THREADS,
++    "Busy funrun V8 isolate worker threads (servicing a request) across the shared pool"
++);
++register_convex_gauge!(
++    ISOLATE_TOTAL_THREADS,
++    "Total funrun V8 isolate worker threads in the shared pool (MAX_ISOLATE_WORKERS)"
++);
++pub(crate) fn log_isolate_pool(busy: usize, total: usize) {
++    log_gauge(&ISOLATE_BUSY_THREADS, busy as f64);
++    log_gauge(&ISOLATE_TOTAL_THREADS, total as f64);
++}
++
++register_convex_counter!(
++    REJECTED_BEFORE_EXECUTION_TOTAL,
++    "Funrun requests rejected before execution started, by rejection reason",
++    &["reason"]
++);
++pub(crate) fn log_rejected_before_execution(reason: String) {
++    log_counter_with_labels(
++        &REJECTED_BEFORE_EXECUTION_TOTAL,
++        1,
++        vec![StaticMetricLabel::new("reason", reason)],
++    );
++}
 diff --git a/crates/funrun_server/src/service.rs b/crates/funrun_server/src/service.rs
 new file mode 100644
-index 000000000..a9fa4c85f
+index 000000000..f704694dc
 --- /dev/null
 +++ b/crates/funrun_server/src/service.rs
-@@ -0,0 +1,654 @@
+@@ -0,0 +1,650 @@
 +use std::{
 +    collections::BTreeMap,
 +    pin::Pin,
@@ -1314,10 +1401,6 @@ index 000000000..a9fa4c85f
 +    Identity,
 +    FUNRUN_AUTH_METADATA_KEY,
 +};
-+use metrics::{
-+    log_counter_with_labels,
-+    StaticMetricLabel,
-+};
 +use model::environment_variables::types::{
 +    EnvVarName,
 +    EnvVarValue,
@@ -1347,6 +1430,7 @@ index 000000000..a9fa4c85f
 +
 +use crate::{
 +    callbacks::HttpActionCallbacks,
++    metrics::log_rejected_before_execution,
 +    snapshot::{
 +        InstanceRegistry,
 +        InstanceState,
@@ -1455,10 +1539,16 @@ index 000000000..a9fa4c85f
 +        self.registry
 +            .get_or_create(instance_name)
 +            .await
-+            .map_err(|e| Status::unavailable(format!("funrun: {e:#}")))
++            .map_err(|e| {
++                let e = e.context(ErrorMetadata::rejected_before_execution(
++                    "InstanceLoadFailed",
++                    "funrun: instance snapshot load failed",
++                ));
++                count_rejected_before_execution(&e);
++                Status::from_anyhow(e)
++            })
 +    }
 +
-+    #[allow(clippy::too_many_arguments)]
 +    async fn decode_common_run_inputs(
 +        instance: &Arc<InstanceState<RT>>,
 +        callback_client: reqwest::Client,
@@ -1824,14 +1914,7 @@ index 000000000..a9fa4c85f
 +    if !metadata.is_rejected_before_execution() {
 +        return;
 +    }
-+    log_counter_with_labels(
-+        &crate::snapshot::REJECTED_BEFORE_EXECUTION_TOTAL,
-+        1,
-+        vec![StaticMetricLabel::new(
-+            "reason",
-+            metadata.short_msg.to_string(),
-+        )],
-+    );
++    log_rejected_before_execution(metadata.short_msg.to_string());
 +}
 +
 +pub struct ResponseStream<T> {
@@ -1918,10 +2001,10 @@ index 000000000..a9fa4c85f
 +}
 diff --git a/crates/funrun_server/src/snapshot.rs b/crates/funrun_server/src/snapshot.rs
 new file mode 100644
-index 000000000..4685d8af7
+index 000000000..d7f868d32
 --- /dev/null
 +++ b/crates/funrun_server/src/snapshot.rs
-@@ -0,0 +1,835 @@
+@@ -0,0 +1,796 @@
 +use std::{
 +    collections::{
 +        BTreeMap,
@@ -1929,7 +2012,6 @@ index 000000000..4685d8af7
 +    },
 +    sync::{
 +        Arc,
-+        Mutex,
 +        OnceLock,
 +    },
 +    time::{
@@ -1975,12 +2057,6 @@ index 000000000..4685d8af7
 +    index_reader::IndexReader,
 +};
 +use keybroker::FunctionRunnerKeyBroker;
-+use metrics::{
-+    log_counter,
-+    log_gauge,
-+    register_convex_counter,
-+    register_convex_gauge,
-+};
 +use model::{
 +    database_globals::{
 +        types::StorageType,
@@ -1989,45 +2065,25 @@ index 000000000..4685d8af7
 +    virtual_system_mapping,
 +};
 +use moka::future::Cache;
++use parking_lot::Mutex;
 +use search::searcher::InProcessSearcher;
 +use storage::Storage;
 +use sync_types::Timestamp;
 +use tokio::sync::OnceCell;
 +
-+use crate::config::{
-+    FunrunConfig,
-+    FunrunInstanceConfig,
++use crate::{
++    config::{
++        FunrunConfig,
++        FunrunInstanceConfig,
++    },
++    metrics::{
++        log_isolate_pool,
++        log_snapshot_cold,
++        log_snapshot_cold_load,
++        log_snapshot_request,
++        log_snapshot_warm_hit,
++    },
 +};
-+
-+register_convex_counter!(
-+    SNAPSHOT_WARM_HIT_TOTAL,
-+    "Funrun requests served from the warm follower snapshot"
-+);
-+register_convex_counter!(
-+    SNAPSHOT_COLD_TOTAL,
-+    "Funrun requests that missed the warm snapshot and entered the cold-load path"
-+);
-+register_convex_counter!(
-+    SNAPSHOT_COLD_LOAD_TOTAL,
-+    "Funrun cold snapshot loads executed against Postgres (snapshot cache misses)"
-+);
-+register_convex_counter!(
-+    SNAPSHOT_REQUESTS_TOTAL,
-+    "Funrun snapshot_inputs calls; cache hit rate = 1 - cold_load / requests"
-+);
-+register_convex_gauge!(
-+    ISOLATE_BUSY_THREADS,
-+    "Busy funrun V8 isolate worker threads (servicing a request) across the shared pool"
-+);
-+register_convex_gauge!(
-+    ISOLATE_TOTAL_THREADS,
-+    "Total funrun V8 isolate worker threads in the shared pool (MAX_ISOLATE_WORKERS)"
-+);
-+register_convex_counter!(
-+    pub(crate) REJECTED_BEFORE_EXECUTION_TOTAL,
-+    "Funrun requests rejected before execution started, by rejection reason",
-+    &["reason"]
-+);
 +
 +fn max_percent_per_client(num_tenants: usize) -> usize {
 +    let tenants = num_tenants.max(1);
@@ -2138,7 +2194,7 @@ index 000000000..4685d8af7
 +            let state = InstanceState::load(rt, &config, db, require_ssl, shared_isolate, searcher)
 +                .await
 +                .map(Arc::new);
-+            let mut errors = load_errors.lock().expect("InstanceRegistry lock poisoned");
++            let mut errors = load_errors.lock();
 +            match &state {
 +                Ok(_) => {
 +                    errors.remove(&name);
@@ -2172,16 +2228,8 @@ index 000000000..4685d8af7
 +    }
 +
 +    pub fn health_report(&self, max_lag: Duration) -> HealthReport {
-+        let samples = self
-+            .lag_samples
-+            .lock()
-+            .expect("InstanceRegistry lock poisoned")
-+            .clone();
-+        let load_errors = self
-+            .load_errors
-+            .lock()
-+            .expect("InstanceRegistry lock poisoned")
-+            .clone();
++        let samples = self.lag_samples.lock().clone();
++        let load_errors = self.load_errors.lock().clone();
 +        let instances = self
 +            .instances
 +            .keys()
@@ -2236,16 +2284,12 @@ index 000000000..4685d8af7
 +        let worker_rt = rt.clone();
 +        rt.spawn_background("funrun_isolate_pool_sampler", async move {
 +            loop {
-+                log_gauge(
-+                    &ISOLATE_TOTAL_THREADS,
-+                    shared_isolate.max_isolate_workers() as f64,
-+                );
-+                log_gauge(
-+                    &ISOLATE_BUSY_THREADS,
-+                    shared_isolate.active_isolate_workers() as f64,
++                log_isolate_pool(
++                    shared_isolate.active_isolate_workers(),
++                    shared_isolate.max_isolate_workers(),
 +                );
 +                let loaded: Vec<(String, Arc<InstanceState<RT>>)> = {
-+                    let guard = states.lock().expect("InstanceRegistry lock poisoned");
++                    let guard = states.lock();
 +                    guard
 +                        .iter()
 +                        .filter_map(|(name, entry)| {
@@ -2257,7 +2301,7 @@ index 000000000..4685d8af7
 +                for (name, state) in loaded {
 +                    fresh.insert(name, sample_instance_lag(&state).await);
 +                }
-+                *lag_samples.lock().expect("InstanceRegistry lock poisoned") = fresh;
++                *lag_samples.lock() = fresh;
 +                worker_rt.wait(Duration::from_secs(2)).await;
 +            }
 +        });
@@ -2304,7 +2348,7 @@ index 000000000..4685d8af7
 +    Fut: std::future::Future<Output = anyhow::Result<Arc<InstanceState<RT>>>>,
 +{
 +    let (cell, existing) = {
-+        let mut guard = states.lock().expect("InstanceRegistry lock poisoned");
++        let mut guard = states.lock();
 +        let entry = guard
 +            .entry(key.to_owned())
 +            .or_insert_with(|| RegistryEntry {
@@ -2328,7 +2372,7 @@ index 000000000..4685d8af7
 +    let now = Instant::now();
 +    let mut evicted = Vec::new();
 +    {
-+        let mut guard = states.lock().expect("InstanceRegistry lock poisoned");
++        let mut guard = states.lock();
 +        let stale: Vec<(String, Arc<InstanceState<RT>>)> = guard
 +            .iter()
 +            .filter_map(|(name, entry)| {
@@ -2458,7 +2502,7 @@ index 000000000..4685d8af7
 +        ts: RepeatableTimestamp,
 +        backend_last_modified: &BTreeMap<IndexId, Timestamp>,
 +    ) -> anyhow::Result<SnapshotInputs> {
-+        log_counter(&SNAPSHOT_REQUESTS_TOTAL, 1);
++        log_snapshot_request();
 +        let tables_last_modified = backend_last_modified
 +            .get(&self.database.bootstrap_metadata.tables_by_id)
 +            .copied();
@@ -2468,7 +2512,7 @@ index 000000000..4685d8af7
 +            Arc::new(repeatable_persistence.read_snapshot(ts)?);
 +        match self.database.snapshot(ts) {
 +            Ok(snapshot) => {
-+                log_counter(&SNAPSHOT_WARM_HIT_TOTAL, 1);
++                log_snapshot_warm_hit();
 +                let bootstrap_metadata = self.database.bootstrap_metadata.clone();
 +                let table_count_snapshot: Arc<dyn TableCountSnapshot> =
 +                    match snapshot.table_counts.clone() {
@@ -2499,7 +2543,7 @@ index 000000000..4685d8af7
 +                })
 +            },
 +            Err(warm_err) => {
-+                log_counter(&SNAPSHOT_COLD_TOTAL, 1);
++                log_snapshot_cold();
 +                tracing::debug!(
 +                    "[convex-funrun] warm snapshot miss at ts {} ({warm_err:#}); cold-loading",
 +                    *ts
@@ -2574,7 +2618,7 @@ index 000000000..4685d8af7
 +        index_reader: Arc<dyn IndexReader>,
 +        tables_last_modified: Option<Timestamp>,
 +    ) -> anyhow::Result<SnapshotInputs> {
-+        log_counter(&SNAPSHOT_COLD_LOAD_TOTAL, 1);
++        log_snapshot_cold_load();
 +        match self
 +            .warm_assembled_inputs(ts, index_reader.clone(), tables_last_modified)
 +            .await

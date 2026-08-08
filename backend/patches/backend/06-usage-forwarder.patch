@@ -38,7 +38,7 @@ index e66741039..762516c78 100644
 +}
 diff --git a/crates/local_backend/src/usage_forwarder.rs b/crates/local_backend/src/usage_forwarder.rs
 new file mode 100644
-index 000000000..d9206c6c2
+index 000000000..40be94f34
 --- /dev/null
 +++ b/crates/local_backend/src/usage_forwarder.rs
 @@ -0,0 +1,352 @@
@@ -254,7 +254,7 @@ index 000000000..d9206c6c2
 +    }
 +}
 +
-+#[derive(Clone, Debug)]
++#[derive(Clone)]
 +pub struct InsightsProxy {
 +    base_url: reqwest::Url,
 +    token: Option<String>,

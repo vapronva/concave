@@ -157,7 +157,7 @@ index 000000000..93e7fe12b
 +  uint64 rows_read = 2;
 +}
 diff --git a/crates/pb/src/error_metadata.rs b/crates/pb/src/error_metadata.rs
-index a465e35e8..7bc82abec 100644
+index a465e35e8..db44559e5 100644
 --- a/crates/pb/src/error_metadata.rs
 +++ b/crates/pb/src/error_metadata.rs
 @@ -141,11 +141,23 @@ impl TryFrom<ErrorMetadataProto> for ErrorMetadata {
@@ -228,6 +228,83 @@ index a465e35e8..7bc82abec 100644
      fn context<C>(self, context: C) -> anyhow::Error
      where
          C: Display + Send + Sync + 'static,
+@@ -199,3 +212,76 @@ impl ErrorMetadataStatusExt for tonic::Status {
+         self.into_anyhow().context(context)
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use errors::{
++        ErrorMetadata,
++        OccInfo,
++        INTERNAL_SERVER_ERROR,
++        INTERNAL_SERVER_ERROR_MSG,
++    };
++
++    use super::ErrorMetadataStatusExt;
++
++    #[test]
++    fn plain_metadata_round_trips() {
++        let metadata = ErrorMetadata::bad_request("BadRobot", "robot was bad");
++        let status = tonic::Status::from_anyhow(metadata.clone().into());
++        assert_eq!(status.code(), tonic::Code::InvalidArgument);
++        assert_eq!(status.error_metadata(), Some(metadata.clone()));
++        let error = status.into_anyhow();
++        assert_eq!(error.downcast_ref::<ErrorMetadata>(), Some(&metadata));
++    }
++
++    #[test]
++    fn occ_info_round_trips() {
++        let metadata = ErrorMetadata::user_occ(
++            Some(OccInfo {
++                table_name: Some("messages".to_owned()),
++                document_id: Some("doc123".to_owned()),
++                write_source: Some("sendMessage".to_owned()),
++                component_path: Some("waitlist".to_owned()),
++                retry_count: None,
++            }),
++            Some("another mutation".to_owned()),
++            Some(42),
++        );
++        let status = tonic::Status::from_anyhow(metadata.clone().into());
++        assert_eq!(status.code(), tonic::Code::ResourceExhausted);
++        let error = status.into_anyhow();
++        assert_eq!(error.downcast_ref::<ErrorMetadata>(), Some(&metadata));
++    }
++
++    #[test]
++    fn rejected_before_execution_survives_the_wire() {
++        let metadata = ErrorMetadata::rejected_before_execution("FunrunRejected", "try elsewhere");
++        let status = tonic::Status::from_anyhow(metadata.clone().into());
++        assert_eq!(status.code(), tonic::Code::ResourceExhausted);
++        let decoded = status.error_metadata().unwrap();
++        assert!(decoded.is_rejected_before_execution());
++        assert_eq!(decoded, metadata);
++    }
++
++    #[test]
++    fn bare_resource_exhausted_decodes_as_overloaded() {
++        let error = tonic::Status::resource_exhausted("quota exhausted").into_anyhow();
++        assert_eq!(
++            error.downcast_ref::<ErrorMetadata>(),
++            Some(&ErrorMetadata::overloaded(
++                INTERNAL_SERVER_ERROR,
++                INTERNAL_SERVER_ERROR_MSG
++            ))
++        );
++    }
++
++    #[test]
++    fn statuses_without_details_carry_no_metadata() {
++        let status = tonic::Status::internal("plain failure");
++        assert_eq!(status.error_metadata(), None);
++        assert!(status
++            .into_anyhow()
++            .downcast_ref::<ErrorMetadata>()
++            .is_none());
++    }
++}
 diff --git a/crates/pb/src/lib.rs b/crates/pb/src/lib.rs
 index 0a2d279b4..30da5ac90 100644
 --- a/crates/pb/src/lib.rs

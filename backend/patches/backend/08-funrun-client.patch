@@ -68,10 +68,10 @@ index f17aa359e..45f1c75df 100644
  /// convenience) from allowing browsers to make these requests.
  pub fn platform_api_cors() -> CorsLayer {
 diff --git a/crates/common/src/knobs.rs b/crates/common/src/knobs.rs
-index edbee7b4a..910661188 100644
+index 703764359..4cb599a98 100644
 --- a/crates/common/src/knobs.rs
 +++ b/crates/common/src/knobs.rs
-@@ -576,6 +576,17 @@ pub static MAX_REPEATABLE_TIMESTAMP_IDLE_FREQUENCY: LazyLock<Duration> = LazyLoc
+@@ -604,6 +604,17 @@ pub static MAX_REPEATABLE_TIMESTAMP_IDLE_FREQUENCY: LazyLock<Duration> = LazyLoc
  pub static MAX_REPEATABLE_TIMESTAMP_COMMIT_DELAY: LazyLock<Duration> =
      LazyLock::new(|| Duration::from_secs(env_config("MAX_REPEATABLE_TIMESTAMP_COMMIT_DELAY", 5)));
  
@@ -89,7 +89,7 @@ index edbee7b4a..910661188 100644
  /// The maximum delay between runs of retention, this is now only used for error
  /// backoff and the initial delay when backend is started.
  pub static MAX_RETENTION_DELAY_SECONDS: LazyLock<Duration> =
-@@ -902,6 +913,11 @@ pub static ISOLATE_QUEUE_CONGESTED_TIMEOUT: LazyLock<Duration> =
+@@ -930,6 +941,11 @@ pub static ISOLATE_QUEUE_CONGESTED_TIMEOUT: LazyLock<Duration> =
  pub static MAX_ISOLATE_WORKERS: LazyLock<usize> =
      LazyLock::new(|| env_config("MAX_ISOLATE_WORKERS", 300));
  
@@ -101,7 +101,7 @@ index edbee7b4a..910661188 100644
  /// The size of the pending commits in the committer queue. This is a FIFO
  /// queue, so if the queue is too large, we run into a risk of all requests
  /// waiting too long and no requests going through during overload. The size of
-@@ -1224,6 +1240,12 @@ pub static MODULE_CACHE_MAX_CONCURRENCY: LazyLock<usize> =
+@@ -1254,6 +1270,12 @@ pub static MODULE_CACHE_MAX_CONCURRENCY: LazyLock<usize> =
  pub static FUNRUN_INDEX_CACHE_SIZE: LazyLock<u64> =
      LazyLock::new(|| env_config("FUNRUN_INDEX_CACHE_SIZE", 50_000_000)); // 50 MB
  
@@ -114,7 +114,7 @@ index edbee7b4a..910661188 100644
  /// The maximum number of concurrent index cache requests in Funrun.
  pub static FUNRUN_INDEX_CACHE_CONCURRENCY: LazyLock<usize> =
      LazyLock::new(|| env_config("FUNRUN_INDEX_CACHE_CONCURRENCY", 200));
-@@ -1248,28 +1270,41 @@ pub static FUNRUN_MODULE_QUEUE_SIZE: LazyLock<usize> =
+@@ -1278,28 +1300,41 @@ pub static FUNRUN_MODULE_QUEUE_SIZE: LazyLock<usize> =
  pub static FUNRUN_CODE_CACHE_SIZE: LazyLock<u64> =
      LazyLock::new(|| env_config("FUNRUN_CODE_CACHE_SIZE", 500_000_000));
  
@@ -218,6 +218,53 @@ index 27ec38f32..fd51481a0 100644
  pub mod server;
  
  #[async_trait]
+diff --git a/crates/function_runner/src/metrics.rs b/crates/function_runner/src/metrics.rs
+index 64a4c9068..998b61d70 100644
+--- a/crates/function_runner/src/metrics.rs
++++ b/crates/function_runner/src/metrics.rs
+@@ -1,3 +1,4 @@
++use common::types::UdfType;
+ use fastrace::{
+     local::LocalSpan,
+     Event,
+@@ -12,7 +13,9 @@ use metrics::{
+     register_convex_histogram,
+     MetricLabel,
+     StaticMetricLabel,
++    StatusTimer,
+     Timer,
++    STATUS_LABEL,
+ };
+ use prometheus::{
+     VMHistogram,
+@@ -109,3 +112,27 @@ register_convex_gauge!(
+ pub fn record_code_cache_size(size: u64) {
+     log_gauge(&CODE_CACHE_SIZE_BYTES_TOTAL, size as f64);
+ }
++
++register_convex_histogram!(
++    FUNRUN_CLIENT_RPC_SECONDS,
++    "Client-observed duration of a funrun RunFunction RPC attempt",
++    &[STATUS_LABEL[0], "udf_type"]
++);
++pub fn funrun_client_rpc_timer(udf_type: UdfType) -> StatusTimer {
++    let mut timer = StatusTimer::new(&FUNRUN_CLIENT_RPC_SECONDS);
++    timer.add_label(udf_type.metric_label());
++    timer
++}
++
++register_convex_counter!(
++    FUNRUN_CLIENT_RETRY_TOTAL,
++    "Funrun client RPC attempt retries, by reason",
++    &["reason"]
++);
++pub fn log_funrun_client_retry(reason: &'static str) {
++    log_counter_with_labels(
++        &FUNRUN_CLIENT_RETRY_TOTAL,
++        1,
++        vec![StaticMetricLabel::new_const("reason", reason)],
++    );
++}
 diff --git a/crates/function_runner/src/proto.rs b/crates/function_runner/src/proto.rs
 new file mode 100644
 index 000000000..9bda993e2
@@ -439,10 +486,10 @@ index 000000000..9bda993e2
 +}
 diff --git a/crates/function_runner/src/remote.rs b/crates/function_runner/src/remote.rs
 new file mode 100644
-index 000000000..ba1502c28
+index 000000000..e3fa3cf44
 --- /dev/null
 +++ b/crates/function_runner/src/remote.rs
-@@ -0,0 +1,909 @@
+@@ -0,0 +1,945 @@
 +use std::{
 +    collections::{
 +        BTreeMap,
@@ -545,6 +592,10 @@ index 000000000..ba1502c28
 +use value::identifier::Identifier;
 +
 +use crate::{
++    metrics::{
++        funrun_client_rpc_timer,
++        log_funrun_client_retry,
++    },
 +    server::{
 +        DeploymentStorage,
 +        FunctionMetadata,
@@ -565,7 +616,13 @@ index 000000000..ba1502c28
 +    (writes + result + udf::HTTP_ACTION_BODY_LIMIT) + (4 << 20)
 +});
 +
-+pub fn funrun_tls_pem_from_env() -> anyhow::Result<Option<(Vec<u8>, Vec<u8>, Vec<u8>)>> {
++pub struct FunrunTlsPem {
++    pub cert_pem: Vec<u8>,
++    pub key_pem: Vec<u8>,
++    pub ca_pem: Vec<u8>,
++}
++
++pub fn funrun_tls_pem_from_env() -> anyhow::Result<Option<FunrunTlsPem>> {
 +    let cert = std::env::var_os("CONVEX_FUNRUN_TLS_CERT");
 +    let key = std::env::var_os("CONVEX_FUNRUN_TLS_KEY");
 +    let ca = std::env::var_os("CONVEX_FUNRUN_TLS_CA");
@@ -573,12 +630,16 @@ index 000000000..ba1502c28
 +        (None, None, None) => Ok(None),
 +        (Some(cert), Some(key), Some(ca)) => {
 +            let cert_pem = std::fs::read(&cert)
-+                .map_err(|e| anyhow::anyhow!("reading CONVEX_FUNRUN_TLS_CERT {cert:?}: {e}"))?;
++                .with_context(|| format!("reading CONVEX_FUNRUN_TLS_CERT {cert:?}"))?;
 +            let key_pem = std::fs::read(&key)
-+                .map_err(|e| anyhow::anyhow!("reading CONVEX_FUNRUN_TLS_KEY {key:?}: {e}"))?;
++                .with_context(|| format!("reading CONVEX_FUNRUN_TLS_KEY {key:?}"))?;
 +            let ca_pem = std::fs::read(&ca)
-+                .map_err(|e| anyhow::anyhow!("reading CONVEX_FUNRUN_TLS_CA {ca:?}: {e}"))?;
-+            Ok(Some((cert_pem, key_pem, ca_pem)))
++                .with_context(|| format!("reading CONVEX_FUNRUN_TLS_CA {ca:?}"))?;
++            Ok(Some(FunrunTlsPem {
++                cert_pem,
++                key_pem,
++                ca_pem,
++            }))
 +        },
 +        _ => anyhow::bail!(
 +            "funrun mTLS misconfigured: set ALL of CONVEX_FUNRUN_TLS_CERT, CONVEX_FUNRUN_TLS_KEY, \
@@ -588,7 +649,12 @@ index 000000000..ba1502c28
 +}
 +
 +fn funrun_client_tls_config() -> anyhow::Result<Option<ClientTlsConfig>> {
-+    let Some((cert_pem, key_pem, ca_pem)) = funrun_tls_pem_from_env()? else {
++    let Some(FunrunTlsPem {
++        cert_pem,
++        key_pem,
++        ca_pem,
++    }) = funrun_tls_pem_from_env()?
++    else {
 +        return Ok(None);
 +    };
 +    let domain = std::env::var("CONVEX_FUNRUN_TLS_DOMAIN").unwrap_or_else(|_| "funrun".to_string());
@@ -630,7 +696,7 @@ index 000000000..ba1502c28
 +
 +fn funrun_endpoint(uri: &str, tls_config: &Option<ClientTlsConfig>) -> anyhow::Result<Endpoint> {
 +    let mut endpoint = Endpoint::from_shared(uri.to_string())
-+        .map_err(|e| anyhow::anyhow!("invalid funrun endpoint {uri}: {e}"))?
++        .with_context(|| format!("invalid funrun endpoint {uri}"))?
 +        .tcp_nodelay(true)
 +        .connect_timeout(FUNRUN_CONNECT_TIMEOUT)
 +        .http2_keep_alive_interval(FUNRUN_KEEPALIVE_INTERVAL)
@@ -639,7 +705,7 @@ index 000000000..ba1502c28
 +    if let Some(tls_config) = tls_config {
 +        endpoint = endpoint
 +            .tls_config(tls_config.clone())
-+            .map_err(|e| anyhow::anyhow!("invalid funrun client TLS configuration: {e}"))?;
++            .context("invalid funrun client TLS configuration")?;
 +    }
 +    Ok(endpoint)
 +}
@@ -703,30 +769,34 @@ index 000000000..ba1502c28
 +                        Ok(addrs) => {
 +                            let unique: BTreeSet<SocketAddr> = addrs.collect();
 +                            if !unique.is_empty() {
++                                let mut next: BTreeSet<SocketAddr> =
++                                    unique.intersection(&current).copied().collect();
 +                                for addr in unique.difference(&current) {
 +                                    if let Ok(endpoint) =
 +                                        funrun_endpoint(&format!("{scheme}://{addr}"), &refresh_tls)
 +                                    {
-+                                        let _ = tx.send(Change::Insert(*addr, endpoint)).await;
++                                        if tx.send(Change::Insert(*addr, endpoint)).await.is_ok() {
++                                            next.insert(*addr);
++                                        }
 +                                    }
 +                                }
 +                                for addr in current.difference(&unique) {
 +                                    let _ = tx.send(Change::Remove(*addr)).await;
 +                                }
-+                                if unique != current {
-+                                    if unique.len() <= 1 {
++                                if next != current {
++                                    if next.len() <= 1 {
 +                                        tracing::warn!(
 +                                            "[funrun-lb] {} endpoint(s) for {host}:{port}; need a \
 +                                             headless Service",
-+                                            unique.len()
++                                            next.len()
 +                                        );
 +                                    } else {
 +                                        tracing::info!(
 +                                            "[funrun-lb] p2c across {} endpoint(s)",
-+                                            unique.len()
++                                            next.len()
 +                                        );
 +                                    }
-+                                    current = unique;
++                                    current = next;
 +                                }
 +                            }
 +                        },
@@ -790,7 +860,7 @@ index 000000000..ba1502c28
 +            FUNRUN_AUTH_METADATA_KEY,
 +            self.funrun_auth_header()
 +                .parse()
-+                .map_err(|e| anyhow::anyhow!("invalid funrun auth header: {e}"))?,
++                .context("invalid funrun auth header")?,
 +        );
 +        Ok(request)
 +    }
@@ -953,62 +1023,75 @@ index 000000000..ba1502c28
 +        let has_deadline = matches!(udf_type, UdfType::Query | UdfType::Mutation);
 +        let mut attempt: u32 = 0;
 +        let mut request = Some(request);
-+        let result =
-+            'attempts: loop {
-+                let last_attempt = attempt + 1 >= max_attempts;
-+                let mut parts_forwarded = false;
-+                let failure = 'attempt: {
-+                    if let Err(e) = self.ensure_endpoints_available() {
-+                        break 'attempt RunFunctionAttemptError::NoEndpoints(e);
-+                    }
-+                    let req = if last_attempt {
-+                        request.take().expect("funrun request already consumed")
-+                    } else {
-+                        request.clone().expect("funrun request missing")
-+                    };
-+                    let req = self.authenticated_request(req)?;
-+                    let attempt_fut =
-+                        self.run_function_attempt(req, &log_line_sender, &mut parts_forwarded);
-+                    let outcome = if has_deadline {
-+                        timeout(*common::knobs::FUNRUN_RESPONSE_TIMEOUT, attempt_fut).await
-+                    } else {
-+                        Ok(attempt_fut.await)
-+                    };
-+                    match outcome {
-+                        Ok(Ok(result)) => break 'attempts result,
-+                        Ok(Err(failure)) => failure,
-+                        Err(_) => RunFunctionAttemptError::TimedOut,
-+                    }
-+                };
-+                let retry = !last_attempt
-+                    && !parts_forwarded
-+                    && match &failure {
-+                        RunFunctionAttemptError::NoEndpoints(_)
-+                        | RunFunctionAttemptError::TimedOut => true,
-+                        RunFunctionAttemptError::Rpc(status) => {
-+                            Self::is_retryable_rpc(udf_type, status)
-+                        },
-+                        RunFunctionAttemptError::Internal(_) => false,
-+                    };
-+                if retry {
-+                    attempt += 1;
-+                    self.rt
-+                        .wait(Duration::from_millis(50 * u64::from(attempt)))
-+                        .await;
-+                    continue;
++        let result = 'attempts: loop {
++            let last_attempt = attempt + 1 >= max_attempts;
++            let mut parts_forwarded = false;
++            let failure = 'attempt: {
++                if let Err(e) = self.ensure_endpoints_available() {
++                    break 'attempt RunFunctionAttemptError::NoEndpoints(e);
 +                }
-+                return match failure {
-+                    RunFunctionAttemptError::NoEndpoints(e)
-+                    | RunFunctionAttemptError::Internal(e) => Err(e),
-+                    RunFunctionAttemptError::Rpc(status) => {
-+                        Err(status.into_anyhow()).context("funrun RunFunction failed")
-+                    },
-+                    RunFunctionAttemptError::TimedOut => {
-+                        Err(anyhow::anyhow!("funrun response timed out"))
-+                            .context("funrun RunFunction failed")
-+                    },
++                let req = if last_attempt {
++                    request.take().expect("funrun request already consumed")
++                } else {
++                    request.clone().expect("funrun request missing")
 +                };
++                let req = self.authenticated_request(req)?;
++                let timer = funrun_client_rpc_timer(udf_type);
++                let attempt_fut =
++                    self.run_function_attempt(req, &log_line_sender, &mut parts_forwarded);
++                let outcome = if has_deadline {
++                    timeout(*common::knobs::FUNRUN_RESPONSE_TIMEOUT, attempt_fut).await
++                } else {
++                    Ok(attempt_fut.await)
++                };
++                match outcome {
++                    Ok(Ok(result)) => {
++                        timer.finish();
++                        break 'attempts result;
++                    },
++                    Ok(Err(failure)) => failure,
++                    Err(_) => RunFunctionAttemptError::TimedOut,
++                }
 +            };
++            let retry_reason = match &failure {
++                RunFunctionAttemptError::NoEndpoints(_) => Some("no_endpoints"),
++                RunFunctionAttemptError::TimedOut => Some("timeout"),
++                RunFunctionAttemptError::Rpc(status)
++                    if Self::is_retryable_rpc(udf_type, status) =>
++                {
++                    Some(match status.code() {
++                        tonic::Code::Unavailable
++                        | tonic::Code::Cancelled
++                        | tonic::Code::Unknown => "transport",
++                        _ => "rejected_before_execution",
++                    })
++                },
++                RunFunctionAttemptError::Rpc(_) | RunFunctionAttemptError::Internal(_) => None,
++            };
++            if let Some(reason) = retry_reason
++                && !last_attempt
++                && !parts_forwarded
++            {
++                log_funrun_client_retry(reason);
++                attempt += 1;
++                self.rt
++                    .wait(Duration::from_millis(50 * u64::from(attempt)))
++                    .await;
++                continue;
++            }
++            return match failure {
++                RunFunctionAttemptError::NoEndpoints(e) | RunFunctionAttemptError::Internal(e) => {
++                    Err(e)
++                },
++                RunFunctionAttemptError::Rpc(status) => {
++                    Err(status.into_anyhow()).context("funrun RunFunction failed")
++                },
++                RunFunctionAttemptError::TimedOut => {
++                    Err(anyhow::anyhow!("funrun response timed out"))
++                        .context("funrun RunFunction failed")
++                },
++            };
++        };
 +        let pb::funrun::RunFunctionResult {
 +            outcome,
 +            final_transaction,

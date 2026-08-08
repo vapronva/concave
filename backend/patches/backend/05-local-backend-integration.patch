@@ -124,7 +124,7 @@ index dfe80d124..4a3d1d2f9 100644
 +    }
 +}
 diff --git a/crates/local_backend/src/lib.rs b/crates/local_backend/src/lib.rs
-index 8fe7ce8c9..7ccd630df 100644
+index 669e0e608..3d24c3a92 100644
 --- a/crates/local_backend/src/lib.rs
 +++ b/crates/local_backend/src/lib.rs
 @@ -34,7 +34,10 @@ use common::{
@@ -372,7 +372,7 @@ index 8fe7ce8c9..7ccd630df 100644
          node_actions,
          Arc::new(RedactLogsToClient::new(config.redact_logs_to_client)),
          Arc::new(ApplicationAuth::new(
-@@ -278,7 +373,7 @@ pub async fn make_app(
+@@ -279,7 +374,7 @@ pub async fn make_app(
      let origin = config.convex_origin_url()?;
      let instance_name = config.name();
  
@@ -381,7 +381,7 @@ index 8fe7ce8c9..7ccd630df 100644
          let beacon_future = beacon::start_beacon(
              runtime.clone(),
              database.clone(),
-@@ -288,14 +383,100 @@ pub async fn make_app(
+@@ -289,14 +384,100 @@ pub async fn make_app(
          runtime.spawn_background("beacon_worker", beacon_future);
      }
  
@@ -667,7 +667,7 @@ index 4217d331d..b508e24e8 100644
                  tracing::warn!("Forcibly shutting down!");
                  break;
 diff --git a/crates/local_backend/src/node_action_callbacks.rs b/crates/local_backend/src/node_action_callbacks.rs
-index efba00700..37f21fd74 100644
+index ee07682fd..76b3aeed9 100644
 --- a/crates/local_backend/src/node_action_callbacks.rs
 +++ b/crates/local_backend/src/node_action_callbacks.rs
 @@ -10,10 +10,14 @@ use axum::{
@@ -697,7 +697,7 @@ index efba00700..37f21fd74 100644
      },
      knobs::V8_ACTION_USER_TIMEOUT,
      runtime::UnixTimestamp,
-@@ -50,7 +59,11 @@ use errors::ErrorMetadata;
+@@ -51,7 +60,11 @@ use errors::ErrorMetadata;
  use fastrace::future::FutureExt;
  use http::HeaderMap;
  use keybroker::Identity;
@@ -710,7 +710,7 @@ index efba00700..37f21fd74 100644
  use serde::{
      Deserialize,
      Serialize,
-@@ -90,6 +103,7 @@ use crate::{
+@@ -91,6 +104,7 @@ use crate::{
  #[serde(rename_all = "camelCase")]
  pub struct NodeCallbackUdfPostRequest {
      pub path: Option<String>,
@@ -718,7 +718,7 @@ index efba00700..37f21fd74 100644
      pub reference: Option<String>,
      pub function_handle: Option<String>,
      pub args: UdfArgsJson,
-@@ -120,6 +134,38 @@ impl TryFrom<MutationIdentifierJson> for SessionRequestIdentifier {
+@@ -134,6 +148,38 @@ impl TryFrom<MutationIdentifierJson> for SessionRequestIdentifier {
      }
  }
  
@@ -757,7 +757,7 @@ index efba00700..37f21fd74 100644
  /// This is like `public_query_post`, except it allows calling internal
  /// functions as well. This should not be used for any publicly accessible
  /// endpoints, and should only be used to support Convex functions calling into
-@@ -135,16 +181,16 @@ pub async fn internal_query_post(
+@@ -149,16 +195,16 @@ pub async fn internal_query_post(
      ExtractExecutionContext(context): ExtractExecutionContext,
      Json(req): Json<NodeCallbackUdfPostRequest>,
  ) -> Result<impl IntoResponse, HttpResponseError> {
@@ -784,7 +784,7 @@ index efba00700..37f21fd74 100644
      let udf_return = st
          .application
          .read_only_udf(
-@@ -193,16 +239,16 @@ pub async fn internal_mutation_post(
+@@ -208,16 +254,16 @@ pub async fn internal_mutation_post(
          .mutation_identifier
          .map(SessionRequestIdentifier::try_from)
          .transpose()?;
@@ -811,7 +811,7 @@ index efba00700..37f21fd74 100644
      let udf_result = st
          .application
          .mutation_udf(
-@@ -252,16 +298,16 @@ pub async fn internal_action_post(
+@@ -267,16 +313,16 @@ pub async fn internal_action_post(
      ExtractExecutionContext(context): ExtractExecutionContext,
      Json(req): Json<NodeCallbackUdfPostRequest>,
  ) -> Result<impl IntoResponse, HttpResponseError> {
@@ -838,7 +838,7 @@ index efba00700..37f21fd74 100644
      let udf_result = st
          .application
          .action_udf(
-@@ -300,6 +346,7 @@ pub struct ScheduleJobRequest {
+@@ -315,6 +361,7 @@ pub struct ScheduleJobRequest {
      reference: Option<String>,
      function_handle: Option<String>,
      udf_path: Option<String>,
@@ -846,7 +846,7 @@ index efba00700..37f21fd74 100644
      udf_args: UdfArgsJson,
      scheduled_ts: f64,
  }
-@@ -323,19 +370,17 @@ pub async fn schedule_job(
+@@ -338,19 +385,17 @@ pub async fn schedule_job(
          ErrorMetadata::bad_request("InvalidTimestamp", "Requested scheduled_ts is invalid")
      })?;
      // User might have entered an invalid path, so this is a developer error.
@@ -877,7 +877,7 @@ index efba00700..37f21fd74 100644
      let udf_args = req.udf_args.into_serialized_args()?;
      let job_id = st
          .application
-@@ -383,6 +428,7 @@ pub async fn cancel_developer_job(
+@@ -398,6 +443,7 @@ pub async fn cancel_developer_job(
  #[serde(rename_all = "camelCase")]
  pub struct CreateFunctionHandleRequest {
      udf_path: Option<String>,
@@ -885,7 +885,7 @@ index efba00700..37f21fd74 100644
      reference: Option<String>,
  }
  
-@@ -400,19 +446,17 @@ pub async fn create_function_handle(
+@@ -415,19 +461,17 @@ pub async fn create_function_handle(
      }: ExtractActionIdentity,
      Json(req): Json<CreateFunctionHandleRequest>,
  ) -> Result<impl IntoResponse, HttpResponseError> {
@@ -916,7 +916,7 @@ index efba00700..37f21fd74 100644
      let handle = st
          .application
          .runner()
-@@ -570,6 +614,95 @@ pub async fn storage_delete(
+@@ -585,6 +629,95 @@ pub async fn storage_delete(
      Ok(Json(json!(null)))
  }
  
@@ -1012,7 +1012,7 @@ index efba00700..37f21fd74 100644
  #[derive(Deserialize)]
  pub struct AuditLogParams {
      #[allow(dead_code)]
-@@ -587,14 +720,12 @@ pub async fn audit_log(
+@@ -602,14 +735,12 @@ pub async fn audit_log(
      .into())
  }
  
@@ -1028,7 +1028,7 @@ index efba00700..37f21fd74 100644
          .context("Missing callback token - is the call from actions?")?;
  
      let token = value
-@@ -686,7 +817,7 @@ impl<S: Sync> FromRequestParts<S> for ExtractActionName {
+@@ -701,7 +832,7 @@ impl<S: Sync> FromRequestParts<S> for ExtractActionName {
      ) -> Result<Self, Self::Rejection> {
          let action_name = parts
              .headers
@@ -1037,7 +1037,7 @@ index efba00700..37f21fd74 100644
              .map(|value| value.to_str())
              .transpose()
              .context("Convex-Action-Function-Name must be a string")?
-@@ -707,7 +838,7 @@ impl<T: Sync> FromRequestParts<T> for ExtractExecutionContext {
+@@ -722,7 +853,7 @@ impl<T: Sync> FromRequestParts<T> for ExtractExecutionContext {
      ) -> Result<Self, Self::Rejection> {
          let request_id: RequestId = parts
              .headers
@@ -1046,7 +1046,7 @@ index efba00700..37f21fd74 100644
              .map(|v| v.to_str())
              .transpose()
              .context("Request id must be a string")?
-@@ -717,7 +848,7 @@ impl<T: Sync> FromRequestParts<T> for ExtractExecutionContext {
+@@ -732,7 +863,7 @@ impl<T: Sync> FromRequestParts<T> for ExtractExecutionContext {
              .unwrap_or(RequestId::new());
          let execution_id: ExecutionId = parts
              .headers
@@ -1055,7 +1055,7 @@ index efba00700..37f21fd74 100644
              .map(|v| v.to_str())
              .transpose()
              .context("Execution id must be a string")?
-@@ -726,7 +857,7 @@ impl<T: Sync> FromRequestParts<T> for ExtractExecutionContext {
+@@ -741,7 +872,7 @@ impl<T: Sync> FromRequestParts<T> for ExtractExecutionContext {
              // For backwards compatibility
              .unwrap_or(ExecutionId::new());
  

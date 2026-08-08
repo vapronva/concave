@@ -1,8 +1,8 @@
 diff --git a/crates/database/src/committer.rs b/crates/database/src/committer.rs
-index af1513b12..a502ba305 100644
+index 61fb98c8f..689021a9c 100644
 --- a/crates/database/src/committer.rs
 +++ b/crates/database/src/committer.rs
-@@ -38,6 +38,7 @@ use common::{
+@@ -37,6 +37,7 @@ use common::{
          COMMITTER_MAX_CONCURRENT_PERSISTENCE_WRITES,
          COMMITTER_QUEUE_SIZE,
          COMMIT_TRACE_THRESHOLD,
@@ -10,7 +10,7 @@ index af1513b12..a502ba305 100644
          INITIAL_PERSISTENCE_WRITES_BACKOFF,
          MAX_PERSISTENCE_WRITES_BACKOFF,
          MAX_REPEATABLE_TIMESTAMP_COMMIT_DELAY,
-@@ -449,12 +450,99 @@ impl<RT: Runtime> Committer<RT> {
+@@ -461,12 +462,99 @@ impl<RT: Runtime> Committer<RT> {
                              let response = self.load_indexes_into_memory(tables).await;
                              let _ = result.send(response);
                          },
@@ -110,7 +110,7 @@ index af1513b12..a502ba305 100644
      async fn update_indexes_since_bootstrap(
          BootstrappedSearchIndexes {
              text_index_manager,
-@@ -683,6 +771,12 @@ impl<RT: Runtime> Committer<RT> {
+@@ -695,6 +783,12 @@ impl<RT: Runtime> Committer<RT> {
                              break;
                          },
                          Err(mut e) => {
@@ -123,7 +123,7 @@ index af1513b12..a502ba305 100644
                              let delay = backoff.fail(&mut runtime.rng());
                              report_error(&mut e).await;
                              tracing::error!(
-@@ -1353,7 +1447,10 @@ impl CommitterClient {
+@@ -1321,7 +1415,10 @@ impl CommitterClient {
          // This makes it resilient to the committer being full.
          select_biased! {
              result = self.sender.send(message).fuse() => {
@@ -135,7 +135,7 @@ index af1513b12..a502ba305 100644
              },
              _ = rt.wait(*SEND_COMMIT_MESSAGE_TIMEOUT_MILLIS) => {
                  anyhow::bail!(metrics::committer_full_error());
-@@ -1373,6 +1470,20 @@ impl CommitterClient {
+@@ -1341,6 +1438,20 @@ impl CommitterClient {
          self.handle.lock().shutdown();
      }
  
@@ -156,7 +156,7 @@ index af1513b12..a502ba305 100644
      async fn check_generated_ids<RT: Runtime>(
          &self,
          transaction: &Transaction<RT>,
-@@ -1453,6 +1564,9 @@ enum CommitterMessage {
+@@ -1421,6 +1532,9 @@ enum CommitterMessage {
      FinishTableSummaryBootstrap {
          result: oneshot::Sender<anyhow::Result<()>>,
      },
@@ -1304,7 +1304,7 @@ index 000000000..ccaa28c46
 +    }
 +}
 diff --git a/crates/database/src/lib.rs b/crates/database/src/lib.rs
-index f7ed752aa..caafe7fbc 100644
+index f50c23e52..fae9b5a56 100644
 --- a/crates/database/src/lib.rs
 +++ b/crates/database/src/lib.rs
 @@ -16,6 +16,7 @@ mod committer;
@@ -1409,15 +1409,10 @@ index edfbddabe..581f0b3f6 100644
      }
  }
 diff --git a/crates/database/src/table_summary.rs b/crates/database/src/table_summary.rs
-index 8b99fb5ca..527a03528 100644
+index 9d5b7d483..4d1368bec 100644
 --- a/crates/database/src/table_summary.rs
 +++ b/crates/database/src/table_summary.rs
-@@ -560,42 +560,66 @@ pub async fn bootstrap<RT: Runtime>(
-     target_ts: RepeatableTimestamp,
-     bootstrap_kind: BootstrapKind,
- ) -> anyhow::Result<(TableSummarySnapshot, usize)> {
--    let _timer = metrics::bootstrap_table_summaries_timer();
-     let stored_snapshot = match bootstrap_kind {
+@@ -573,37 +573,61 @@ pub async fn bootstrap<RT: Runtime>(
          BootstrapKind::FromScratch => None,
          BootstrapKind::FromCheckpoint => TableSummarySnapshot::load(persistence.as_ref()).await?,
      };
@@ -1461,7 +1456,6 @@ index 8b99fb5ca..527a03528 100644
 +    base: Option<(TableSummarySnapshot, RepeatableTimestamp)>,
 +    table_mapping_hint: Option<TableMapping>,
 +) -> anyhow::Result<(TableSummarySnapshot, usize)> {
-+    let _timer = metrics::bootstrap_table_summaries_timer();
 +    let (base_snapshot, base_snapshot_ts, table_mapping) = match (base, table_mapping_hint) {
 +        (Some((snapshot, snapshot_ts)), Some(mapping)) => (snapshot, snapshot_ts, mapping),
 +        (base, _) => {
@@ -1508,10 +1502,10 @@ index 8b99fb5ca..527a03528 100644
      };
      let bootstrap_tables = BootstrapTableIds::new(&table_mapping);
 diff --git a/crates/indexing/src/index_cache/mod.rs b/crates/indexing/src/index_cache/mod.rs
-index 859fb4603..8886c3626 100644
+index 179474a69..05daf9b0e 100644
 --- a/crates/indexing/src/index_cache/mod.rs
 +++ b/crates/indexing/src/index_cache/mod.rs
-@@ -385,6 +385,10 @@ impl IndexCacheHandle {
+@@ -376,6 +376,10 @@ impl IndexCacheHandle {
          self.shared_cache.remove_deployment(self.deployment_id);
      }
  
