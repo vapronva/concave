@@ -68,10 +68,10 @@ index f17aa359e..45f1c75df 100644
  /// convenience) from allowing browsers to make these requests.
  pub fn platform_api_cors() -> CorsLayer {
 diff --git a/crates/common/src/knobs.rs b/crates/common/src/knobs.rs
-index 703764359..4cb599a98 100644
+index 2cf74c0fd..281cd8f9e 100644
 --- a/crates/common/src/knobs.rs
 +++ b/crates/common/src/knobs.rs
-@@ -604,6 +604,17 @@ pub static MAX_REPEATABLE_TIMESTAMP_IDLE_FREQUENCY: LazyLock<Duration> = LazyLoc
+@@ -612,6 +612,17 @@ pub static MAX_REPEATABLE_TIMESTAMP_IDLE_FREQUENCY: LazyLock<Duration> = LazyLoc
  pub static MAX_REPEATABLE_TIMESTAMP_COMMIT_DELAY: LazyLock<Duration> =
      LazyLock::new(|| Duration::from_secs(env_config("MAX_REPEATABLE_TIMESTAMP_COMMIT_DELAY", 5)));
  
@@ -89,7 +89,7 @@ index 703764359..4cb599a98 100644
  /// The maximum delay between runs of retention, this is now only used for error
  /// backoff and the initial delay when backend is started.
  pub static MAX_RETENTION_DELAY_SECONDS: LazyLock<Duration> =
-@@ -930,6 +941,11 @@ pub static ISOLATE_QUEUE_CONGESTED_TIMEOUT: LazyLock<Duration> =
+@@ -938,6 +949,11 @@ pub static ISOLATE_QUEUE_CONGESTED_TIMEOUT: LazyLock<Duration> =
  pub static MAX_ISOLATE_WORKERS: LazyLock<usize> =
      LazyLock::new(|| env_config("MAX_ISOLATE_WORKERS", 300));
  
@@ -101,7 +101,7 @@ index 703764359..4cb599a98 100644
  /// The size of the pending commits in the committer queue. This is a FIFO
  /// queue, so if the queue is too large, we run into a risk of all requests
  /// waiting too long and no requests going through during overload. The size of
-@@ -1254,6 +1270,12 @@ pub static MODULE_CACHE_MAX_CONCURRENCY: LazyLock<usize> =
+@@ -1264,6 +1280,12 @@ pub static SOURCE_MAP_CACHE_QUEUE_SIZE: LazyLock<usize> =
  pub static FUNRUN_INDEX_CACHE_SIZE: LazyLock<u64> =
      LazyLock::new(|| env_config("FUNRUN_INDEX_CACHE_SIZE", 50_000_000)); // 50 MB
  
@@ -114,7 +114,7 @@ index 703764359..4cb599a98 100644
  /// The maximum number of concurrent index cache requests in Funrun.
  pub static FUNRUN_INDEX_CACHE_CONCURRENCY: LazyLock<usize> =
      LazyLock::new(|| env_config("FUNRUN_INDEX_CACHE_CONCURRENCY", 200));
-@@ -1278,28 +1300,41 @@ pub static FUNRUN_MODULE_QUEUE_SIZE: LazyLock<usize> =
+@@ -1288,28 +1310,41 @@ pub static FUNRUN_MODULE_QUEUE_SIZE: LazyLock<usize> =
  pub static FUNRUN_CODE_CACHE_SIZE: LazyLock<u64> =
      LazyLock::new(|| env_config("FUNRUN_CODE_CACHE_SIZE", 500_000_000));
  
@@ -486,10 +486,10 @@ index 000000000..9bda993e2
 +}
 diff --git a/crates/function_runner/src/remote.rs b/crates/function_runner/src/remote.rs
 new file mode 100644
-index 000000000..e3fa3cf44
+index 000000000..1d16612e1
 --- /dev/null
 +++ b/crates/function_runner/src/remote.rs
-@@ -0,0 +1,945 @@
+@@ -0,0 +1,946 @@
 +use std::{
 +    collections::{
 +        BTreeMap,
@@ -597,6 +597,7 @@ index 000000000..e3fa3cf44
 +        log_funrun_client_retry,
 +    },
 +    server::{
++        funrun_isolate_worker,
 +        DeploymentStorage,
 +        FunctionMetadata,
 +        FunctionRunnerCore,
@@ -823,7 +824,7 @@ index 000000000..e3fa3cf44
 +            });
 +            channel
 +        };
-+        let local = FunctionRunnerCore::new(rt.clone(), storage, 100)?;
++        let local = FunctionRunnerCore::new(rt.clone(), storage, 100, funrun_isolate_worker(&rt))?;
 +        let callback_transport_url = std::env::var("CONVEX_FUNRUN_CALLBACK_URL")
 +            .ok()
 +            .filter(|v| !v.is_empty());
@@ -1436,13 +1437,62 @@ index 000000000..e3fa3cf44
 +    fn set_action_callbacks(&self, _action_callbacks: Arc<dyn ActionCallbacks>) {}
 +}
 diff --git a/crates/function_runner/src/server.rs b/crates/function_runner/src/server.rs
-index 221942023..791376711 100644
+index 8710c2e45..db1020ab1 100644
 --- a/crates/function_runner/src/server.rs
 +++ b/crates/function_runner/src/server.rs
-@@ -188,6 +188,51 @@ pub struct FunctionRunnerCore<RT: Runtime, S: StorageForDeployment<RT>> {
+@@ -5,6 +5,7 @@ use std::{
+     },
+     fmt::Debug,
+     sync::Arc,
++    time::Duration,
+ };
+ 
+ use anyhow::Context;
+@@ -23,7 +24,10 @@ use common::{
+         fetch::FetchClient,
+         RoutedHttpPath,
+     },
+-    knobs::MAX_ISOLATE_WORKERS,
++    knobs::{
++        FUNRUN_ISOLATE_ACTIVE_THREADS,
++        MAX_ISOLATE_WORKERS,
++    },
+     log_lines::LogLine,
+     persistence::RetentionValidator,
+     query_journal::QueryJournal,
+@@ -54,7 +58,10 @@ use isolate::{
+         EnvironmentData,
+         IsolateWorker,
+     },
++    isolate_worker::FunctionRunnerIsolateWorker,
++    ConcurrencyLimiter,
+     IsolateClient,
++    IsolateConfig,
+ };
+ use keybroker::{
+     FunctionRunnerKeyBroker,
+@@ -191,6 +198,66 @@ pub struct FunctionRunnerCore<RT: Runtime, S: StorageForDeployment<RT>> {
      isolate_client: IsolateClient<RT>,
  }
  
++const ACTIVE_CONCURRENCY_PERMITS_LOG_FREQUENCY: Duration = Duration::from_secs(10);
++
++pub fn funrun_isolate_worker<RT: Runtime>(rt: &RT) -> FunctionRunnerIsolateWorker<RT> {
++    let concurrency_limiter = if *FUNRUN_ISOLATE_ACTIVE_THREADS > 0 {
++        ConcurrencyLimiter::new(*FUNRUN_ISOLATE_ACTIVE_THREADS)
++    } else {
++        ConcurrencyLimiter::unlimited()
++    };
++    rt.spawn_background(
++        "concurrency_logger",
++        concurrency_limiter.go_log(rt.clone(), ACTIVE_CONCURRENCY_PERMITS_LOG_FREQUENCY),
++    );
++    FunctionRunnerIsolateWorker::new(
++        rt.clone(),
++        IsolateConfig::new("funrun", concurrency_limiter),
++    )
++}
++
 +#[derive(Clone)]
 +pub struct SharedIsolateResources<RT: Runtime> {
 +    isolate_client: IsolateClient<RT>,
@@ -1451,20 +1501,17 @@ index 221942023..791376711 100644
 +}
 +
 +impl<RT: Runtime> SharedIsolateResources<RT> {
-+    pub fn new(rt: RT, max_percent_per_client: usize) -> anyhow::Result<Self> {
-+        Self::new_with_max_workers(rt, max_percent_per_client, *MAX_ISOLATE_WORKERS)
-+    }
-+
-+    fn new_with_max_workers(
++    pub fn new_with_max_workers<W: IsolateWorker<RT>>(
 +        rt: RT,
 +        max_percent_per_client: usize,
 +        max_isolate_workers: usize,
++        isolate_worker: W,
 +    ) -> anyhow::Result<Self> {
 +        let isolate_client = IsolateClient::new(
 +            rt.clone(),
 +            max_percent_per_client,
 +            max_isolate_workers,
-+            None,
++            isolate_worker,
 +        )?;
 +        let module_cache = ModuleCache::new(rt.clone());
 +        let code_cache = CodeCache::new();
@@ -1491,16 +1538,16 @@ index 221942023..791376711 100644
  impl<RT: Runtime, S: StorageForDeployment<RT>> Clone for FunctionRunnerCore<RT, S> {
      fn clone(&self) -> Self {
          Self {
-@@ -232,24 +277,29 @@ impl<RT: Runtime, S: StorageForDeployment<RT>> FunctionRunnerCore<RT, S> {
-         max_percent_per_client: usize,
-         max_isolate_workers: usize,
+@@ -232,24 +299,30 @@ impl<RT: Runtime, S: StorageForDeployment<RT>> FunctionRunnerCore<RT, S> {
+         isolate_worker: W,
      ) -> anyhow::Result<Self> {
+         let max_isolate_workers = *MAX_ISOLATE_WORKERS;
 -        let isolate_client = IsolateClient::new(
 +        let shared = SharedIsolateResources::new_with_max_workers(
              rt.clone(),
              max_percent_per_client,
              max_isolate_workers,
--            None,
+             isolate_worker,
          )?;
 -        let index_cache = InMemoryIndexCache::new(rt.clone());
 -        let module_cache = ModuleCache::new(rt.clone());
@@ -1527,9 +1574,9 @@ index 221942023..791376711 100644
 +        }
      }
  
-     pub fn concurrency_limiter(&self) -> &isolate::ConcurrencyLimiter {
+     pub fn active_isolate_workers(&self) -> usize {
 diff --git a/crates/isolate/src/client.rs b/crates/isolate/src/client.rs
-index d179da871..455ff4c38 100644
+index f61cf3c92..0f8e16946 100644
 --- a/crates/isolate/src/client.rs
 +++ b/crates/isolate/src/client.rs
 @@ -9,6 +9,7 @@ use std::{
@@ -1540,7 +1587,7 @@ index d179da871..455ff4c38 100644
              AtomicUsize,
              Ordering,
          },
-@@ -60,6 +61,7 @@ use common::{
+@@ -59,6 +60,7 @@ use common::{
          ISOLATE_IDLE_TIMEOUT,
          ISOLATE_MAX_LIFETIME,
          ISOLATE_MAX_USER_HEAP_SIZE,
@@ -1548,7 +1595,7 @@ index d179da871..455ff4c38 100644
          ISOLATE_QUEUE_CONGESTED_TIMEOUT,
          ISOLATE_QUEUE_IDLE_TIMEOUT,
          ISOLATE_QUEUE_SIZE,
-@@ -217,7 +219,6 @@ impl IsolateConfig {
+@@ -212,7 +214,6 @@ impl IsolateConfig {
              limiter,
          }
      }
@@ -1556,15 +1603,15 @@ index d179da871..455ff4c38 100644
  }
  
  pub struct UdfRequest<RT: Runtime> {
-@@ -482,6 +483,7 @@ impl<RT: Runtime> Clone for IsolateClient<RT> {
-             concurrency_logger: self.concurrency_logger.clone(),
-             concurrency_limiter: self.concurrency_limiter.clone(),
+@@ -461,6 +462,7 @@ impl<RT: Runtime> Clone for IsolateClient<RT> {
+             sender: self.sender.clone(),
+             internal_sender: self.internal_sender.clone(),
              active_workers: self.active_workers.clone(),
 +            scheduler_exited: self.scheduler_exited.clone(),
              max_workers: self.max_workers,
          }
      }
-@@ -571,6 +573,7 @@ pub struct IsolateClient<RT: Runtime> {
+@@ -548,6 +550,7 @@ pub struct IsolateClient<RT: Runtime> {
      /// Shared with the scheduler. Tracks the total number of in-progress
      /// workers across all clients.
      active_workers: Arc<AtomicUsize>,
@@ -1572,7 +1619,7 @@ index d179da871..455ff4c38 100644
      max_workers: usize,
  }
  
-@@ -610,6 +613,9 @@ impl<RT: Runtime> IsolateClient<RT> {
+@@ -575,6 +578,9 @@ impl<RT: Runtime> IsolateClient<RT> {
          let active_workers = Arc::new(AtomicUsize::new(0));
          let _active_workers = active_workers.clone();
          let rt_clone = rt.clone();
@@ -1582,7 +1629,7 @@ index d179da871..455ff4c38 100644
          let scheduler = rt.spawn("shared_isolate_scheduler", async move {
              // The scheduler thread pops a worker from available_workers and
              // pops a request from the CoDelQueueReceiver. Then it sends the request
-@@ -623,7 +629,9 @@ impl<RT: Runtime> IsolateClient<RT> {
+@@ -587,7 +593,9 @@ impl<RT: Runtime> IsolateClient<RT> {
                  max_percent_per_client,
                  _active_workers,
              );
@@ -1593,15 +1640,15 @@ index d179da871..455ff4c38 100644
          });
          Ok(Self {
              rt,
-@@ -634,6 +642,7 @@ impl<RT: Runtime> IsolateClient<RT> {
+@@ -596,6 +604,7 @@ impl<RT: Runtime> IsolateClient<RT> {
+             scheduler: Arc::new(Mutex::new(Some(scheduler))),
              handles,
-             concurrency_limiter,
              active_workers,
 +            scheduler_exited,
              max_workers: max_isolate_workers,
          })
      }
-@@ -654,6 +663,10 @@ impl<RT: Runtime> IsolateClient<RT> {
+@@ -612,6 +621,10 @@ impl<RT: Runtime> IsolateClient<RT> {
          self.max_workers
      }
  
@@ -1612,7 +1659,7 @@ index d179da871..455ff4c38 100644
      pub fn aggregate_heap_stats(&self) -> IsolateHeapStats {
          let mut total = IsolateHeapStats::default();
          for handle in self.handles.lock().iter() {
-@@ -1202,6 +1215,7 @@ pub struct SharedIsolateScheduler<RT: Runtime, W: IsolateWorker<RT>> {
+@@ -1155,6 +1168,7 @@ pub struct SharedIsolateScheduler<RT: Runtime, W: IsolateWorker<RT>> {
      /// recreated and there will be no penalty for reassigning this worker to a
      /// new client.
      available_workers: HashMap<String, VecDeque<IdleWorkerState>>,
@@ -1620,7 +1667,7 @@ index d179da871..455ff4c38 100644
      /// Set of futures awaiting a response from an active worker.
      in_progress_workers:
          FuturesUnordered<Join<oneshot::Receiver<IdleWorkerInfo>, Ready<ActiveWorkerState>>>,
-@@ -1248,6 +1262,7 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
+@@ -1201,6 +1215,7 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
              in_progress_count: HashMap::new(),
              active_workers,
              available_workers: HashMap::new(),
@@ -1628,7 +1675,7 @@ index d179da871..455ff4c38 100644
              max_workers,
              handles,
              max_active_workers_per_client: (max_workers * max_percent_per_client)
-@@ -1302,6 +1317,10 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
+@@ -1255,6 +1270,10 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
          internal_receiver: mpsc::UnboundedReceiver<Request<RT>>,
      ) {
          log_pool_max(self.worker.config().name, self.max_workers);
@@ -1639,7 +1686,7 @@ index d179da871..455ff4c38 100644
          let mut report_stats = self.rt.wait(*HEAP_WORKER_REPORT_INTERVAL_SECONDS);
          let mut expired_receiver = receiver.expired_receiver();
          let limiter = self.worker.config().limiter.clone();
-@@ -1480,26 +1499,13 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
+@@ -1433,26 +1452,13 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
              // It's possible that one of our own workers will end up being the
              // least-recently-used one.
          }
@@ -1670,7 +1717,7 @@ index d179da871..455ff4c38 100644
          }
          // No existing worker for this client and we've already started the max number
          // of workers -- just grab the least recently used worker. This worker is least
-@@ -1532,6 +1538,26 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
+@@ -1485,6 +1491,26 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
          Ok(worker.worker_id)
      }
  

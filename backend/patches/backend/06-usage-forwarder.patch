@@ -395,7 +395,7 @@ index 000000000..40be94f34
 +    }
 +}
 diff --git a/crates/usage_tracking/src/lib.rs b/crates/usage_tracking/src/lib.rs
-index cfa8f9257..7ad9aeef0 100644
+index c54fd30ae..7b4509c0f 100644
 --- a/crates/usage_tracking/src/lib.rs
 +++ b/crates/usage_tracking/src/lib.rs
 @@ -5,7 +5,11 @@ use std::{

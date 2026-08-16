@@ -854,7 +854,7 @@ index 000000000..44c9154b0
 +    }
 +}
 diff --git a/crates/local_backend/src/router.rs b/crates/local_backend/src/router.rs
-index 09e460665..2a9bd1af1 100644
+index 37943d3e2..1366d1397 100644
 --- a/crates/local_backend/src/router.rs
 +++ b/crates/local_backend/src/router.rs
 @@ -1,6 +1,9 @@
@@ -920,7 +920,7 @@ index 09e460665..2a9bd1af1 100644
          .nest("/v1", platform_routes);
  
      // Endpoints migrated to use the RouterState trait instead of application.
-@@ -417,6 +423,9 @@ pub fn router(st: LocalAppState) -> Router {
+@@ -418,6 +424,9 @@ pub fn router(st: LocalAppState) -> Router {
      Router::new()
          .nest("/api", api_routes)
          .merge(health_check_routes(version))
@@ -930,7 +930,7 @@ index 09e460665..2a9bd1af1 100644
          .layer(cors())
          .with_state(st)
          .merge(migrated)
-@@ -461,6 +470,9 @@ where
+@@ -462,6 +471,9 @@ where
          .route("/storage_get_url", post(storage_get_url))
          .route("/storage_get_metadata", post(storage_get_metadata))
          .route("/storage_delete", post(storage_delete))
@@ -940,7 +940,7 @@ index 09e460665..2a9bd1af1 100644
          .route("/audit_log", post(audit_log))
          // All routes above this line get the increased limit
          .layer(DefaultBodyLimit::max(*MAX_BACKEND_RPC_REQUEST_SIZE))
-@@ -541,6 +553,7 @@ where
+@@ -542,6 +554,7 @@ where
              get(|MtState(st): MtState<LocalAppState>| async move { st.instance_name.clone() }),
          )
          .route("/instance_version", get(|| async move { version }))
@@ -948,7 +948,7 @@ index 09e460665..2a9bd1af1 100644
          .route(
              "/",
              get(|| async { "This Convex deployment is running. See https://docs.convex.dev/." }),
-@@ -603,10 +616,15 @@ where
+@@ -604,10 +617,15 @@ where
          .route("/get_table_column_names", get(get_table_column_names))
  }
  
@@ -966,7 +966,7 @@ index 09e460665..2a9bd1af1 100644
          .allow_methods(vec![
              Method::GET,
              Method::POST,
-@@ -615,6 +633,51 @@ pub fn cors() -> CorsLayer {
+@@ -616,6 +634,51 @@ pub fn cors() -> CorsLayer {
              Method::DELETE,
              Method::PUT,
          ])

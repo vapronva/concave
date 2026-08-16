@@ -1,8 +1,8 @@
 diff --git a/crates/db_connection/src/lib.rs b/crates/db_connection/src/lib.rs
-index 16d0aea04..6b49a4cb0 100644
+index 1ef338439..127f18830 100644
 --- a/crates/db_connection/src/lib.rs
 +++ b/crates/db_connection/src/lib.rs
-@@ -232,6 +232,39 @@ pub async fn connect_persistence_reader<RT: Runtime>(
+@@ -226,6 +226,39 @@ pub async fn connect_persistence_reader<RT: Runtime>(
      }
  }
  
@@ -124,10 +124,10 @@ index dfe80d124..4a3d1d2f9 100644
 +    }
 +}
 diff --git a/crates/local_backend/src/lib.rs b/crates/local_backend/src/lib.rs
-index 669e0e608..3d24c3a92 100644
+index 9ad08230d..ae88c89b3 100644
 --- a/crates/local_backend/src/lib.rs
 +++ b/crates/local_backend/src/lib.rs
-@@ -34,7 +34,10 @@ use common::{
+@@ -35,7 +35,10 @@ use common::{
          NODE_ACTION_USER_TIMEOUT,
          UDF_CACHE_MAX_SIZE,
      },
@@ -139,7 +139,7 @@ index 669e0e608..3d24c3a92 100644
      runtime::{
          new_rate_limiter,
          Runtime,
-@@ -50,6 +53,10 @@ use common::{
+@@ -51,6 +54,10 @@ use common::{
  };
  use config::LocalConfig;
  use database::Database;
@@ -150,7 +150,7 @@ index 669e0e608..3d24c3a92 100644
  use events::usage::NoOpUsageEventLogger;
  use exports::interface::InProcessExportProvider;
  use file_storage::{
-@@ -96,6 +103,7 @@ pub mod deployment_info;
+@@ -98,6 +105,7 @@ pub mod deployment_info;
  pub mod deployment_state;
  pub mod environment_variables;
  pub mod http_actions;
@@ -158,7 +158,7 @@ index 669e0e608..3d24c3a92 100644
  pub mod log_sinks;
  pub mod logs;
  pub mod node_action_callbacks;
-@@ -111,10 +119,9 @@ pub mod storage;
+@@ -113,10 +121,9 @@ pub mod storage;
  pub mod streaming_export;
  pub mod streaming_import;
  pub mod subs;
@@ -170,7 +170,7 @@ index 669e0e608..3d24c3a92 100644
  #[derive(Clone)]
  pub struct LocalAppState {
      // Origin for the server (e.g. http://127.0.0.1:3210, https://demo.convex.cloud)
-@@ -123,6 +130,12 @@ pub struct LocalAppState {
+@@ -125,6 +132,12 @@ pub struct LocalAppState {
      pub site_origin: ConvexSite,
      // Name of the instance. (e.g. crazy-giraffe-123)
      pub instance_name: String,
@@ -183,7 +183,7 @@ index 669e0e608..3d24c3a92 100644
      pub application: Application<ProdRuntime>,
      pub zombify_rx: async_broadcast::Receiver<()>,
  }
-@@ -147,10 +160,31 @@ pub struct RouterState {
+@@ -150,10 +163,31 @@ pub struct RouterState {
  #[derive(Serialize)]
  pub struct EmptyResponse {}
  
@@ -216,7 +216,7 @@ index 669e0e608..3d24c3a92 100644
      zombify_rx: async_broadcast::Receiver<()>,
      preempt_tx: ShutdownSignal,
  ) -> anyhow::Result<LocalAppState> {
-@@ -160,29 +194,70 @@ pub async fn make_app(
+@@ -163,30 +197,71 @@ pub async fn make_app(
      // TODO(CX-6572) Separate `SegmentMetadataFetcher` from `SearcherImpl`
      let segment_metadata_fetcher: Arc<dyn SegmentTermMetadataFetcher> = in_process_searcher;
      let (deleted_tablet_sender, deleted_tablet_receiver) = tokio::sync::mpsc::channel(100);
@@ -258,6 +258,7 @@ index 669e0e608..3d24c3a92 100644
 +                    Quota::per_second(*DOCUMENT_RETENTION_RATE_LIMIT),
 +                )),
 +                deleted_tablet_sender,
++                config.name(),
 +            )
 +            .await?
 +        },
@@ -288,6 +289,7 @@ index 669e0e608..3d24c3a92 100644
 -            Quota::per_second(*DOCUMENT_RETENTION_RATE_LIMIT),
 -        )),
 -        deleted_tablet_sender,
+-        config.name(),
 -    )
 -    .await?;
 -    initialize_application_system_tables(&database).await?;
@@ -309,7 +311,7 @@ index 669e0e608..3d24c3a92 100644
  
      let file_storage = FileStorage {
          transactional_file_storage: TransactionalFileStorage::new(
-@@ -225,21 +300,41 @@ pub async fn make_app(
+@@ -229,21 +304,41 @@ pub async fn make_app(
          reqwest::redirect::Policy::default(),
      );
      let function_runner: Arc<dyn FunctionRunner<ProdRuntime>> =
@@ -363,7 +365,7 @@ index 669e0e608..3d24c3a92 100644
          runtime.clone(),
          database.clone(),
          file_storage.clone(),
-@@ -257,7 +352,7 @@ pub async fn make_app(
+@@ -261,7 +356,7 @@ pub async fn make_app(
          config.convex_site_url()?,
          searcher.clone(),
          segment_metadata_fetcher,
@@ -372,7 +374,7 @@ index 669e0e608..3d24c3a92 100644
          node_actions,
          Arc::new(RedactLogsToClient::new(config.redact_logs_to_client)),
          Arc::new(ApplicationAuth::new(
-@@ -279,7 +374,7 @@ pub async fn make_app(
+@@ -284,7 +379,7 @@ pub async fn make_app(
      let origin = config.convex_origin_url()?;
      let instance_name = config.name();
  
@@ -381,7 +383,7 @@ index 669e0e608..3d24c3a92 100644
          let beacon_future = beacon::start_beacon(
              runtime.clone(),
              database.clone(),
-@@ -289,14 +384,100 @@ pub async fn make_app(
+@@ -294,14 +389,100 @@ pub async fn make_app(
          runtime.spawn_background("beacon_worker", beacon_future);
      }
  
@@ -483,7 +485,7 @@ index 669e0e608..3d24c3a92 100644
  }
  
 diff --git a/crates/local_backend/src/main.rs b/crates/local_backend/src/main.rs
-index 4217d331d..b508e24e8 100644
+index 4217d331d..24807680c 100644
 --- a/crates/local_backend/src/main.rs
 +++ b/crates/local_backend/src/main.rs
 @@ -12,11 +12,16 @@ use common::{
@@ -540,7 +542,7 @@ index 4217d331d..b508e24e8 100644
  fn main() -> Result<(), MainError> {
      let config = LocalConfig::parse();
      if let Some(subcommand) = &config.subcommand {
-@@ -137,24 +157,74 @@ async fn run_server(runtime: ProdRuntime, config: LocalConfig) -> anyhow::Result
+@@ -137,24 +157,71 @@ async fn run_server(runtime: ProdRuntime, config: LocalConfig) -> anyhow::Result
  }
  
  async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::Result<()> {
@@ -548,10 +550,7 @@ index 4217d331d..b508e24e8 100644
 +        || std::env::var("CONVEX_CONTROL_PLANE_TOKEN").is_ok_and(|token| !token.is_empty());
 +    if dynamic_roles_enabled {
 +        anyhow::ensure!(
-+            matches!(
-+                config.db,
-+                clusters::DbDriverTag::Postgres(_) | clusters::DbDriverTag::PostgresMultitenant(_)
-+            ),
++            matches!(config.db, clusters::DbDriverTag::Postgres(_)),
 +            "dynamic backend roles require Postgres because MySQL/SQLite do not implement the HA \
 +             lease fencing contract"
 +        );
@@ -628,7 +627,7 @@ index 4217d331d..b508e24e8 100644
      let st = make_app(
          runtime.clone(),
          config.clone(),
-@@ -163,13 +233,13 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
+@@ -163,13 +230,13 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
          preempt_signal.clone(),
      )
      .await?;
@@ -644,7 +643,7 @@ index 4217d331d..b508e24e8 100644
          *HTTP_SERVER_TIMEOUT_DURATION,
          HttpActionRouteMapper,
      );
-@@ -199,8 +269,8 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
+@@ -199,8 +266,8 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
              force_exit_duration = Some(Duration::from_secs(0));
              let _: Result<_, _> = shutdown_tx.broadcast(()).await;
          }
@@ -655,7 +654,7 @@ index 4217d331d..b508e24e8 100644
              r?;
              let _: Result<_, _> = shutdown_tx.broadcast(()).await;
          },
-@@ -242,8 +312,8 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
+@@ -242,8 +309,8 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
                  tracing::info!("Cool down expired. Shutting down");
                  break;
              }
@@ -667,7 +666,7 @@ index 4217d331d..b508e24e8 100644
                  tracing::warn!("Forcibly shutting down!");
                  break;
 diff --git a/crates/local_backend/src/node_action_callbacks.rs b/crates/local_backend/src/node_action_callbacks.rs
-index ee07682fd..76b3aeed9 100644
+index 1c9793bfa..d9e7ad1ad 100644
 --- a/crates/local_backend/src/node_action_callbacks.rs
 +++ b/crates/local_backend/src/node_action_callbacks.rs
 @@ -10,10 +10,14 @@ use axum::{
@@ -697,7 +696,7 @@ index ee07682fd..76b3aeed9 100644
      },
      knobs::V8_ACTION_USER_TIMEOUT,
      runtime::UnixTimestamp,
-@@ -51,7 +60,11 @@ use errors::ErrorMetadata;
+@@ -53,7 +62,11 @@ use errors::ErrorMetadata;
  use fastrace::future::FutureExt;
  use http::HeaderMap;
  use keybroker::Identity;
@@ -710,7 +709,7 @@ index ee07682fd..76b3aeed9 100644
  use serde::{
      Deserialize,
      Serialize,
-@@ -91,6 +104,7 @@ use crate::{
+@@ -93,6 +106,7 @@ use crate::{
  #[serde(rename_all = "camelCase")]
  pub struct NodeCallbackUdfPostRequest {
      pub path: Option<String>,
@@ -718,7 +717,7 @@ index ee07682fd..76b3aeed9 100644
      pub reference: Option<String>,
      pub function_handle: Option<String>,
      pub args: UdfArgsJson,
-@@ -134,6 +148,38 @@ impl TryFrom<MutationIdentifierJson> for SessionRequestIdentifier {
+@@ -151,6 +165,38 @@ impl TryFrom<MutationIdentifierJson> for SessionRequestIdentifier {
      }
  }
  
@@ -757,7 +756,7 @@ index ee07682fd..76b3aeed9 100644
  /// This is like `public_query_post`, except it allows calling internal
  /// functions as well. This should not be used for any publicly accessible
  /// endpoints, and should only be used to support Convex functions calling into
-@@ -149,16 +195,16 @@ pub async fn internal_query_post(
+@@ -166,16 +212,16 @@ pub async fn internal_query_post(
      ExtractExecutionContext(context): ExtractExecutionContext,
      Json(req): Json<NodeCallbackUdfPostRequest>,
  ) -> Result<impl IntoResponse, HttpResponseError> {
@@ -784,7 +783,7 @@ index ee07682fd..76b3aeed9 100644
      let udf_return = st
          .application
          .read_only_udf(
-@@ -208,16 +254,16 @@ pub async fn internal_mutation_post(
+@@ -225,16 +271,16 @@ pub async fn internal_mutation_post(
          .mutation_identifier
          .map(SessionRequestIdentifier::try_from)
          .transpose()?;
@@ -811,7 +810,7 @@ index ee07682fd..76b3aeed9 100644
      let udf_result = st
          .application
          .mutation_udf(
-@@ -267,16 +313,16 @@ pub async fn internal_action_post(
+@@ -284,16 +330,16 @@ pub async fn internal_action_post(
      ExtractExecutionContext(context): ExtractExecutionContext,
      Json(req): Json<NodeCallbackUdfPostRequest>,
  ) -> Result<impl IntoResponse, HttpResponseError> {
@@ -838,7 +837,7 @@ index ee07682fd..76b3aeed9 100644
      let udf_result = st
          .application
          .action_udf(
-@@ -315,6 +361,7 @@ pub struct ScheduleJobRequest {
+@@ -332,6 +378,7 @@ pub struct ScheduleJobRequest {
      reference: Option<String>,
      function_handle: Option<String>,
      udf_path: Option<String>,
@@ -846,7 +845,7 @@ index ee07682fd..76b3aeed9 100644
      udf_args: UdfArgsJson,
      scheduled_ts: f64,
  }
-@@ -338,19 +385,17 @@ pub async fn schedule_job(
+@@ -355,19 +402,17 @@ pub async fn schedule_job(
          ErrorMetadata::bad_request("InvalidTimestamp", "Requested scheduled_ts is invalid")
      })?;
      // User might have entered an invalid path, so this is a developer error.
@@ -877,7 +876,7 @@ index ee07682fd..76b3aeed9 100644
      let udf_args = req.udf_args.into_serialized_args()?;
      let job_id = st
          .application
-@@ -398,6 +443,7 @@ pub async fn cancel_developer_job(
+@@ -415,6 +460,7 @@ pub async fn cancel_developer_job(
  #[serde(rename_all = "camelCase")]
  pub struct CreateFunctionHandleRequest {
      udf_path: Option<String>,
@@ -885,7 +884,7 @@ index ee07682fd..76b3aeed9 100644
      reference: Option<String>,
  }
  
-@@ -415,19 +461,17 @@ pub async fn create_function_handle(
+@@ -432,19 +478,17 @@ pub async fn create_function_handle(
      }: ExtractActionIdentity,
      Json(req): Json<CreateFunctionHandleRequest>,
  ) -> Result<impl IntoResponse, HttpResponseError> {
@@ -916,7 +915,7 @@ index ee07682fd..76b3aeed9 100644
      let handle = st
          .application
          .runner()
-@@ -585,6 +629,95 @@ pub async fn storage_delete(
+@@ -602,6 +646,95 @@ pub async fn storage_delete(
      Ok(Json(json!(null)))
  }
  
@@ -1012,7 +1011,7 @@ index ee07682fd..76b3aeed9 100644
  #[derive(Deserialize)]
  pub struct AuditLogParams {
      #[allow(dead_code)]
-@@ -602,14 +735,12 @@ pub async fn audit_log(
+@@ -619,14 +752,12 @@ pub async fn audit_log(
      .into())
  }
  
@@ -1028,7 +1027,7 @@ index ee07682fd..76b3aeed9 100644
          .context("Missing callback token - is the call from actions?")?;
  
      let token = value
-@@ -701,7 +832,7 @@ impl<S: Sync> FromRequestParts<S> for ExtractActionName {
+@@ -718,7 +849,7 @@ impl<S: Sync> FromRequestParts<S> for ExtractActionName {
      ) -> Result<Self, Self::Rejection> {
          let action_name = parts
              .headers
@@ -1037,7 +1036,7 @@ index ee07682fd..76b3aeed9 100644
              .map(|value| value.to_str())
              .transpose()
              .context("Convex-Action-Function-Name must be a string")?
-@@ -722,7 +853,7 @@ impl<T: Sync> FromRequestParts<T> for ExtractExecutionContext {
+@@ -739,7 +870,7 @@ impl<T: Sync> FromRequestParts<T> for ExtractExecutionContext {
      ) -> Result<Self, Self::Rejection> {
          let request_id: RequestId = parts
              .headers
@@ -1046,7 +1045,7 @@ index ee07682fd..76b3aeed9 100644
              .map(|v| v.to_str())
              .transpose()
              .context("Request id must be a string")?
-@@ -732,7 +863,7 @@ impl<T: Sync> FromRequestParts<T> for ExtractExecutionContext {
+@@ -749,7 +880,7 @@ impl<T: Sync> FromRequestParts<T> for ExtractExecutionContext {
              .unwrap_or(RequestId::new());
          let execution_id: ExecutionId = parts
              .headers
@@ -1055,7 +1054,7 @@ index ee07682fd..76b3aeed9 100644
              .map(|v| v.to_str())
              .transpose()
              .context("Execution id must be a string")?
-@@ -741,7 +872,7 @@ impl<T: Sync> FromRequestParts<T> for ExtractExecutionContext {
+@@ -758,7 +889,7 @@ impl<T: Sync> FromRequestParts<T> for ExtractExecutionContext {
              // For backwards compatibility
              .unwrap_or(ExecutionId::new());
  

@@ -1,3 +1,3 @@
 module git.horse/vapronva/concave/router/usher
 
-go 1.26.5
+go 1.26.6

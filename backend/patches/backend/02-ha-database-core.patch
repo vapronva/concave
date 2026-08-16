@@ -1,25 +1,55 @@
 diff --git a/crates/database/src/committer.rs b/crates/database/src/committer.rs
-index 61fb98c8f..689021a9c 100644
+index e9167505f..247e12fac 100644
 --- a/crates/database/src/committer.rs
 +++ b/crates/database/src/committer.rs
-@@ -37,6 +37,7 @@ use common::{
-         COMMITTER_MAX_CONCURRENT_PERSISTENCE_WRITES,
+@@ -42,6 +42,7 @@ use common::{
+         COMMITTER_MAX_PRE_VALIDATE_BATCH_SIZE,
          COMMITTER_QUEUE_SIZE,
          COMMIT_TRACE_THRESHOLD,
 +        DEMOTION_DRAIN_TIMEOUT,
          INITIAL_PERSISTENCE_WRITES_BACKOFF,
          MAX_PERSISTENCE_WRITES_BACKOFF,
          MAX_REPEATABLE_TIMESTAMP_COMMIT_DELAY,
-@@ -461,12 +462,99 @@ impl<RT: Runtime> Committer<RT> {
+@@ -612,12 +613,129 @@ impl<RT: Runtime> Committer<RT> {
                              let response = self.load_indexes_into_memory(tables).await;
                              let _ = result.send(response);
                          },
 +                        Some(CommitterMessage::RecoverWriter { result }) => {
 +                            rx.close();
 +                            Self::reject_queued_messages(&mut rx);
++                            for request in awaiting_pre_validation.drain(..) {
++                                let _ = request.result.send(Err(anyhow::anyhow!(
++                                    ErrorMetadata::misdirected_request()
++                                )
++                                .context("leader is stepping down; retry the commit")));
++                            }
 +                            let drain_timeout = self.runtime.wait(*DEMOTION_DRAIN_TIMEOUT);
 +                            let drained = select_biased! {
-+                                drained = self.drain_in_flight_writes().fuse() => drained,
++                                drained = async {
++                                    while let Some(batch) = pre_validations.next().await {
++                                        let Ok(batch) = batch else { continue };
++                                        for pre_validated in batch {
++                                            let (request, error) = match pre_validated {
++                                                PreValidation::Passed { request, .. } => (
++                                                    request,
++                                                    anyhow::anyhow!(
++                                                        ErrorMetadata::misdirected_request()
++                                                    )
++                                                    .context(
++                                                        "leader is stepping down; retry the \
++                                                         commit",
++                                                    ),
++                                                ),
++                                                PreValidation::Failed { request, error } => {
++                                                    (request, error)
++                                                },
++                                            };
++                                            let _ = request.result.send(Err(error));
++                                        }
++                                    }
++                                    self.drain_in_flight_writes().await
++                                }
++                                .fuse() => drained,
 +                                _ = drain_timeout.fuse() => Err(anyhow::anyhow!(
 +                                    "demotion drain timed out after {:?}; persistence may be down",
 +                                    *DEMOTION_DRAIN_TIMEOUT
@@ -110,7 +140,7 @@ index 61fb98c8f..689021a9c 100644
      async fn update_indexes_since_bootstrap(
          BootstrappedSearchIndexes {
              text_index_manager,
-@@ -695,6 +783,12 @@ impl<RT: Runtime> Committer<RT> {
+@@ -846,6 +964,12 @@ impl<RT: Runtime> Committer<RT> {
                              break;
                          },
                          Err(mut e) => {
@@ -123,7 +153,7 @@ index 61fb98c8f..689021a9c 100644
                              let delay = backoff.fail(&mut runtime.rng());
                              report_error(&mut e).await;
                              tracing::error!(
-@@ -1321,7 +1415,10 @@ impl CommitterClient {
+@@ -1536,7 +1660,10 @@ impl CommitterClient {
          // This makes it resilient to the committer being full.
          select_biased! {
              result = self.sender.send(message).fuse() => {
@@ -135,7 +165,7 @@ index 61fb98c8f..689021a9c 100644
              },
              _ = rt.wait(*SEND_COMMIT_MESSAGE_TIMEOUT_MILLIS) => {
                  anyhow::bail!(metrics::committer_full_error());
-@@ -1341,6 +1438,20 @@ impl CommitterClient {
+@@ -1556,6 +1683,20 @@ impl CommitterClient {
          self.handle.lock().shutdown();
      }
  
@@ -156,7 +186,7 @@ index 61fb98c8f..689021a9c 100644
      async fn check_generated_ids<RT: Runtime>(
          &self,
          transaction: &Transaction<RT>,
-@@ -1421,6 +1532,9 @@ enum CommitterMessage {
+@@ -1636,6 +1777,9 @@ enum CommitterMessage {
      FinishTableSummaryBootstrap {
          result: oneshot::Sender<anyhow::Result<()>>,
      },
@@ -167,7 +197,7 @@ index 61fb98c8f..689021a9c 100644
  
  // Within a single transaction that writes multiple documents, this is the order
 diff --git a/crates/database/src/database.rs b/crates/database/src/database.rs
-index f7231ffd9..d9846aebc 100644
+index 88e0bb708..619e54eaa 100644
 --- a/crates/database/src/database.rs
 +++ b/crates/database/src/database.rs
 @@ -59,12 +59,15 @@ use common::{
@@ -250,7 +280,7 @@ index f7231ffd9..d9846aebc 100644
  }
  
  struct ListSnapshotTableIteratorCacheEntry<RT: Runtime> {
-@@ -1089,19 +1107,21 @@ impl<RT: Runtime> Database<RT> {
+@@ -1091,19 +1109,21 @@ impl<RT: Runtime> Database<RT> {
              AsyncLru::new(runtime.clone(), 20, 2, 200, "component_paths_snapshot");
          let list_snapshot_table_iterator_cache = Arc::new(tokio::sync::Mutex::new(None));
          let database = Self {
@@ -278,7 +308,7 @@ index f7231ffd9..d9846aebc 100644
              virtual_system_mapping,
              bootstrap_metadata,
              invalidation_callback,
-@@ -1109,11 +1129,404 @@ impl<RT: Runtime> Database<RT> {
+@@ -1111,11 +1131,406 @@ impl<RT: Runtime> Database<RT> {
              by_id_indexes_snapshot_cache,
              component_paths_snapshot_cache,
              list_snapshot_table_iterator_cache,
@@ -381,6 +411,7 @@ index f7231ffd9..d9846aebc 100644
 +        rw_persistence: Arc<dyn Persistence>,
 +        retention_rate_limiter: Arc<RateLimiter<RT>>,
 +        preempt_signal: ShutdownSignal,
++        deployment_name: String,
 +    ) -> anyhow::Result<mpsc::Receiver<TabletId>> {
 +        let promoted = {
 +            let handle = self
@@ -456,6 +487,7 @@ index f7231ffd9..d9846aebc 100644
 +            preempt_signal,
 +            virtual_system_mapping,
 +            index_cache_handle.clone(),
++            deployment_name,
 +        );
 +        let old_subscriptions = {
 +            let mut leader_state = self.leader_state.write();
@@ -683,7 +715,7 @@ index f7231ffd9..d9846aebc 100644
      /// Sets the invalidation callback for tracking which mutations invalidate
      /// subscriptions. Must be called after `load` and before any subscriptions
      /// are invalidated.
-@@ -1180,45 +1593,71 @@ impl<RT: Runtime> Database<RT> {
+@@ -1182,45 +1597,71 @@ impl<RT: Runtime> Database<RT> {
          Ok(Some(Arc::new(snapshot.into())))
      }
  
@@ -769,7 +801,7 @@ index f7231ffd9..d9846aebc 100644
      }
  
      /// Load the set of documents and tombstones in the given table between
-@@ -1686,7 +2125,7 @@ impl<RT: Runtime> Database<RT> {
+@@ -1695,7 +2136,7 @@ impl<RT: Runtime> Database<RT> {
                      .read_snapshot(ts)?;
              let mut reader = Arc::new(persistence_snapshot) as Arc<dyn IndexReader>;
              if let Some(snapshot) = snapshot
@@ -778,7 +810,7 @@ index f7231ffd9..d9846aebc 100644
              {
                  // TODO: it is probably OK to still use the index cache even if
                  // we don't have an index_registry at the same timestamp.
-@@ -1950,11 +2389,11 @@ impl<RT: Runtime> Database<RT> {
+@@ -1959,11 +2400,11 @@ impl<RT: Runtime> Database<RT> {
                      RepeatablePersistence::new(
                          self.reader.clone(),
                          repeatable_ts,
@@ -792,7 +824,7 @@ index f7231ffd9..d9846aebc 100644
                  index_cache,
              ),
              Arc::new(TextIndexManagerSnapshot::new(
-@@ -2019,7 +2458,7 @@ impl<RT: Runtime> Database<RT> {
+@@ -2028,7 +2469,7 @@ impl<RT: Runtime> Database<RT> {
              snapshot,
              table_summaries: None,
              persistence_snapshot: repeatable_persistence.read_snapshot(ts)?,
@@ -801,7 +833,7 @@ index f7231ffd9..d9846aebc 100644
              persistence_reader: self.reader.clone(),
              retention_validator: self.retention_validator(),
          })
-@@ -2041,7 +2480,7 @@ impl<RT: Runtime> Database<RT> {
+@@ -2050,7 +2491,7 @@ impl<RT: Runtime> Database<RT> {
          task::consume_budget().await;
          let readonly = transaction.is_readonly();
          let result = self
@@ -810,7 +842,7 @@ index f7231ffd9..d9846aebc 100644
              .commit(transaction, write_source.into())
              .await?;
          if !readonly {
-@@ -2055,7 +2494,7 @@ impl<RT: Runtime> Database<RT> {
+@@ -2064,7 +2505,7 @@ impl<RT: Runtime> Database<RT> {
          &self,
          tables: BTreeSet<TableName>,
      ) -> anyhow::Result<()> {
@@ -819,7 +851,7 @@ index f7231ffd9..d9846aebc 100644
      }
  
      pub fn write_commits_since_load(&self) -> usize {
-@@ -2066,14 +2505,15 @@ impl<RT: Runtime> Database<RT> {
+@@ -2075,14 +2516,15 @@ impl<RT: Runtime> Database<RT> {
      /// N.B. Only use this function for user subscriptions. System subscriptions
      /// should use `subscribe_and_wait_for_invalidation`.
      pub async fn subscribe(&self, token: Token) -> anyhow::Result<Subscription> {
@@ -837,7 +869,7 @@ index f7231ffd9..d9846aebc 100644
          let invalid_ts = subscription.wait_for_invalidation().await;
          let current_ts = self.now_ts_for_reads();
          metrics::log_subscription_invalidation_lag(invalid_ts, *current_ts);
-@@ -2532,11 +2972,19 @@ impl<RT: Runtime> Database<RT> {
+@@ -2536,11 +2978,19 @@ impl<RT: Runtime> Database<RT> {
          ts: Timestamp,
      ) -> anyhow::Result<Result<Token, Option<Timestamp>>> {
          let _timer = metrics::refresh_token_timer();

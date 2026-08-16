@@ -3443,10 +3443,10 @@ index bfabb0a3f..8545dfadc 100644
      "test-relational-data-modeling": "node ./dist/relational-data-modeling.js",
      "test-users-and-auth": "node ./dist/users-and-auth.js",
 diff --git a/npm-packages/pnpm-lock.yaml b/npm-packages/pnpm-lock.yaml
-index f36c17e29..a6fc05960 100644
+index 2fb9eec70..630f2dd09 100644
 --- a/npm-packages/pnpm-lock.yaml
 +++ b/npm-packages/pnpm-lock.yaml
-@@ -1183,6 +1183,9 @@ importers:
+@@ -1209,6 +1209,9 @@ importers:
        react-resizable-panels:
          specifier: ~2.1.1
          version: 2.1.9(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
@@ -3456,7 +3456,7 @@ index f36c17e29..a6fc05960 100644
        react-table:
          specifier: 7.8.0
          version: 7.8.0(react@18.3.1)
-@@ -1280,6 +1283,9 @@ importers:
+@@ -1306,6 +1309,9 @@ importers:
        '@types/react-dom':
          specifier: ^18.0.0
          version: 18.3.7(@types/react@18.3.26)
