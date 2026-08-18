@@ -2009,10 +2009,10 @@ index 000000000..f704694dc
 +}
 diff --git a/crates/funrun_server/src/snapshot.rs b/crates/funrun_server/src/snapshot.rs
 new file mode 100644
-index 000000000..a29ee030b
+index 000000000..8054b17a5
 --- /dev/null
 +++ b/crates/funrun_server/src/snapshot.rs
-@@ -0,0 +1,803 @@
+@@ -0,0 +1,806 @@
 +use std::{
 +    collections::{
 +        BTreeMap,
@@ -2592,24 +2592,28 @@ index 000000000..a29ee030b
 +            );
 +            (snapshot, base_ts)
 +        });
-+        let had_base = base.is_some();
-+        let mapping_hint = had_base.then(|| table_mapping.clone());
-+        let rolled = database::table_summary::bootstrap_from_base(
-+            self.rt.clone(),
-+            self.reader.clone(),
-+            self.retention_validator.clone(),
-+            ts,
-+            base,
-+            mapping_hint,
-+        )
-+        .await;
-+        let (snapshot, _rows) = match rolled {
-+            Ok(result) => result,
-+            Err(e) if had_base => {
++        let rolled = match base {
++            Some(base) => database::table_summary::bootstrap_from_base(
++                self.rt.clone(),
++                self.reader.clone(),
++                self.retention_validator.clone(),
++                ts,
++                Some(base),
++                Some(table_mapping.clone()),
++            )
++            .await
++            .inspect_err(|e| {
 +                tracing::warn!(
 +                    "[convex-funrun] summary roll from cached base failed ({e:#}); \
 +                     re-bootstrapping from checkpoint"
-+                );
++                )
++            })
++            .ok(),
++            None => None,
++        };
++        let (snapshot, _rows) = match rolled {
++            Some(rolled) => rolled,
++            None => {
 +                *cached = None;
 +                database::table_summary::bootstrap(
 +                    self.rt.clone(),
@@ -2620,7 +2624,6 @@ index 000000000..a29ee030b
 +                )
 +                .await?
 +            },
-+            Err(e) => return Err(e),
 +        };
 +        *cached = Some(snapshot.clone());
 +        drop(cached);
