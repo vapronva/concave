@@ -33,7 +33,7 @@ RUN PATCHES_DIR=/tmp/patches/backend bash /tmp/apply-patches.sh /src
 
 ARG MIRROR_NPM_URL=""
 
-RUN [ -z "${MIRROR_NPM_URL}" ] || printf 'registry=%s\n' "${MIRROR_NPM_URL%/}/" > /root/.npmrc
+RUN [ -z "${MIRROR_NPM_URL}" ] || printf 'registry=%s\n' "${MIRROR_NPM_URL%/}/" | tee /root/.npmrc >> npm-packages/.npmrc
 
 RUN --mount=type=cache,target=/root/.npm npm ci --prefix scripts/
 

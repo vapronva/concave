@@ -70,7 +70,7 @@ ARG MIRROR_CARGO_URL=""
 
 RUN <<EOF
 set -o errexit -o nounset -o xtrace
-[ -z "${MIRROR_NPM_URL}" ] || printf 'registry=%s\n' "${MIRROR_NPM_URL%/}/" > /root/.npmrc
+[ -z "${MIRROR_NPM_URL}" ] || printf 'registry=%s\n' "${MIRROR_NPM_URL%/}/" | tee /root/.npmrc >> npm-packages/.npmrc
 [ -z "${MIRROR_CARGO_URL}" ] || printf '\n[source.crates-io]\nreplace-with = "proxy"\n\n[source.proxy]\nregistry = "sparse+%s/"\n' "${MIRROR_CARGO_URL%/}" >> .cargo/config.toml
 EOF
 
