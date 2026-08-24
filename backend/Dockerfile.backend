@@ -124,7 +124,7 @@ COPY --from=build --chmod=755 \
     /convex/self-hosted/docker-build/generate_admin_key.sh ./
 
 RUN groupadd --system --gid 1001 convex && \
-    useradd --system --uid 1001 --gid convex convex && \
+    useradd --system --uid 1001 --gid convex --create-home convex && \
     mkdir --parents /convex/data && \
     chown --recursive convex:convex /convex
 
