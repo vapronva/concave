@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 
 	"git.horse/vapronva/concave/router/bigbrain/k8sclient"
@@ -30,7 +29,7 @@ func pod(prefix, name, role, component, priority, ip string, ready bool) *corev1
 		cond = corev1.ConditionTrue
 	}
 	return &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "acme", Labels: labels},
+		Name: name, Namespace: "acme", Labels: labels,
 		Status: corev1.PodStatus{
 			Phase:      corev1.PodRunning,
 			PodIP:      ip,

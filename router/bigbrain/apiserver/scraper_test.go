@@ -14,7 +14,6 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
@@ -23,11 +22,9 @@ import (
 
 func funrunPod(ns, name string, port int) *corev1.Pod {
 	return &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: ns,
-			Labels:    map[string]string{"convex/component": "funrun"},
-		},
+		Name:      name,
+		Namespace: ns,
+		Labels:    map[string]string{"convex/component": "funrun"},
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{{
 				Ports: []corev1.ContainerPort{{Name: healthPortName, ContainerPort: int32(port)}},

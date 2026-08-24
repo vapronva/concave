@@ -11,7 +11,7 @@ index bbdcaec82..9db9f167f 100644
      module_paths::CanonicalizedComponentModulePath,
      reference::Reference,
 diff --git a/crates/common/src/http/mod.rs b/crates/common/src/http/mod.rs
-index f17aa359e..45f1c75df 100644
+index 6a04b99b3..0b94dd858 100644
 --- a/crates/common/src/http/mod.rs
 +++ b/crates/common/src/http/mod.rs
 @@ -212,8 +212,7 @@ impl From<HttpRequest> for HttpRequestStream {
@@ -43,7 +43,7 @@ index f17aa359e..45f1c75df 100644
  
  pub struct ExtractRequestId(pub RequestId);
  
-@@ -1308,23 +1310,6 @@ impl<T: fmt::Display> fmt::Display for LogOptFmt<T> {
+@@ -1309,23 +1311,6 @@ impl<T: fmt::Display> fmt::Display for LogOptFmt<T> {
      }
  }
  
@@ -68,10 +68,10 @@ index f17aa359e..45f1c75df 100644
  /// convenience) from allowing browsers to make these requests.
  pub fn platform_api_cors() -> CorsLayer {
 diff --git a/crates/common/src/knobs.rs b/crates/common/src/knobs.rs
-index 2cf74c0fd..281cd8f9e 100644
+index e85e16a0e..74bf68077 100644
 --- a/crates/common/src/knobs.rs
 +++ b/crates/common/src/knobs.rs
-@@ -612,6 +612,17 @@ pub static MAX_REPEATABLE_TIMESTAMP_IDLE_FREQUENCY: LazyLock<Duration> = LazyLoc
+@@ -618,6 +618,17 @@ pub static MAX_REPEATABLE_TIMESTAMP_IDLE_FREQUENCY: LazyLock<Duration> = LazyLoc
  pub static MAX_REPEATABLE_TIMESTAMP_COMMIT_DELAY: LazyLock<Duration> =
      LazyLock::new(|| Duration::from_secs(env_config("MAX_REPEATABLE_TIMESTAMP_COMMIT_DELAY", 5)));
  
@@ -89,7 +89,7 @@ index 2cf74c0fd..281cd8f9e 100644
  /// The maximum delay between runs of retention, this is now only used for error
  /// backoff and the initial delay when backend is started.
  pub static MAX_RETENTION_DELAY_SECONDS: LazyLock<Duration> =
-@@ -938,6 +949,11 @@ pub static ISOLATE_QUEUE_CONGESTED_TIMEOUT: LazyLock<Duration> =
+@@ -944,6 +955,11 @@ pub static ISOLATE_QUEUE_CONGESTED_TIMEOUT: LazyLock<Duration> =
  pub static MAX_ISOLATE_WORKERS: LazyLock<usize> =
      LazyLock::new(|| env_config("MAX_ISOLATE_WORKERS", 300));
  
@@ -101,7 +101,7 @@ index 2cf74c0fd..281cd8f9e 100644
  /// The size of the pending commits in the committer queue. This is a FIFO
  /// queue, so if the queue is too large, we run into a risk of all requests
  /// waiting too long and no requests going through during overload. The size of
-@@ -1264,6 +1280,12 @@ pub static SOURCE_MAP_CACHE_QUEUE_SIZE: LazyLock<usize> =
+@@ -1270,6 +1286,12 @@ pub static SOURCE_MAP_CACHE_QUEUE_SIZE: LazyLock<usize> =
  pub static FUNRUN_INDEX_CACHE_SIZE: LazyLock<u64> =
      LazyLock::new(|| env_config("FUNRUN_INDEX_CACHE_SIZE", 50_000_000)); // 50 MB
  
@@ -114,7 +114,7 @@ index 2cf74c0fd..281cd8f9e 100644
  /// The maximum number of concurrent index cache requests in Funrun.
  pub static FUNRUN_INDEX_CACHE_CONCURRENCY: LazyLock<usize> =
      LazyLock::new(|| env_config("FUNRUN_INDEX_CACHE_CONCURRENCY", 200));
-@@ -1288,28 +1310,41 @@ pub static FUNRUN_MODULE_QUEUE_SIZE: LazyLock<usize> =
+@@ -1294,28 +1316,41 @@ pub static FUNRUN_MODULE_QUEUE_SIZE: LazyLock<usize> =
  pub static FUNRUN_CODE_CACHE_SIZE: LazyLock<u64> =
      LazyLock::new(|| env_config("FUNRUN_CODE_CACHE_SIZE", 500_000_000));
  
@@ -1576,7 +1576,7 @@ index 8710c2e45..db1020ab1 100644
  
      pub fn active_isolate_workers(&self) -> usize {
 diff --git a/crates/isolate/src/client.rs b/crates/isolate/src/client.rs
-index f61cf3c92..0f8e16946 100644
+index 68beae10e..71651f64c 100644
 --- a/crates/isolate/src/client.rs
 +++ b/crates/isolate/src/client.rs
 @@ -9,6 +9,7 @@ use std::{

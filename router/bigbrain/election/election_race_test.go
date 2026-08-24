@@ -15,7 +15,6 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 
 	"git.horse/vapronva/concave/router/bigbrain/backend"
@@ -29,15 +28,13 @@ func quietLogger() *slog.Logger {
 
 func racePod(name, ip string) *corev1.Pod {
 	return &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: "race",
-			Labels: map[string]string{
-				"convex/instance":        "race",
-				"convex/role":            "follower",
-				"convex/component":       "backend",
-				"convex/leader-priority": "10",
-			},
+		Name:      name,
+		Namespace: "race",
+		Labels: map[string]string{
+			"convex/instance":        "race",
+			"convex/role":            "follower",
+			"convex/component":       "backend",
+			"convex/leader-priority": "10",
 		},
 		Status: corev1.PodStatus{
 			Phase:      corev1.PodRunning,
