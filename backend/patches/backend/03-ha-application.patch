@@ -1,8 +1,8 @@
 diff --git a/crates/application/src/function_log.rs b/crates/application/src/function_log.rs
-index 64c750406..53e9c715f 100644
+index bceb6b977..f2f937c1f 100644
 --- a/crates/application/src/function_log.rs
 +++ b/crates/application/src/function_log.rs
-@@ -915,6 +915,7 @@ impl<RT: Runtime> FunctionExecutionLog<RT> {
+@@ -916,6 +916,7 @@ impl<RT: Runtime> FunctionExecutionLog<RT> {
                              user_execution_time: outcome.user_execution_time,
                              memory_in_mb: outcome.memory_in_mb,
                              occ_info: occ_info.clone(),
@@ -11,7 +11,7 @@ index 64c750406..53e9c715f 100644
                          outcome.result.is_ok(),
                          usage_stats,
 diff --git a/crates/application/src/lib.rs b/crates/application/src/lib.rs
-index ebb1b044c..12ed64571 100644
+index 8e25e0668..f0f3fdb64 100644
 --- a/crates/application/src/lib.rs
 +++ b/crates/application/src/lib.rs
 @@ -135,6 +135,7 @@ use common::{

@@ -68,7 +68,7 @@ index 6a04b99b3..0b94dd858 100644
  /// convenience) from allowing browsers to make these requests.
  pub fn platform_api_cors() -> CorsLayer {
 diff --git a/crates/common/src/knobs.rs b/crates/common/src/knobs.rs
-index e85e16a0e..74bf68077 100644
+index d08620d39..ee28bf3b0 100644
 --- a/crates/common/src/knobs.rs
 +++ b/crates/common/src/knobs.rs
 @@ -618,6 +618,17 @@ pub static MAX_REPEATABLE_TIMESTAMP_IDLE_FREQUENCY: LazyLock<Duration> = LazyLoc
@@ -174,10 +174,10 @@ index e85e16a0e..74bf68077 100644
  /// Value between 1 and 100 representing the percent of a the shared scheduler's
  /// worker pool that a single client can use.
 diff --git a/crates/function_runner/Cargo.toml b/crates/function_runner/Cargo.toml
-index e02daa22b..d1d9b6348 100644
+index 5bc866196..669e86699 100644
 --- a/crates/function_runner/Cargo.toml
 +++ b/crates/function_runner/Cargo.toml
-@@ -32,6 +32,7 @@ tracy-tracing = ["common/tracy-tracing"]
+@@ -28,6 +28,7 @@ tracy-tracing = ["common/tracy-tracing"]
  anyhow = { workspace = true }
  async-trait = { workspace = true }
  async_lru = { workspace = true }
@@ -185,7 +185,7 @@ index e02daa22b..d1d9b6348 100644
  common = { workspace = true }
  database = { workspace = true }
  errors = { workspace = true }
-@@ -45,15 +46,19 @@ metrics = { workspace = true }
+@@ -41,15 +42,19 @@ metrics = { workspace = true }
  model = { workspace = true }
  moka = { workspace = true }
  parking_lot = { workspace = true }
@@ -1910,7 +1910,7 @@ index 000000000..3df3f1656
 +    }
 +}
 diff --git a/crates/keybroker/src/lib.rs b/crates/keybroker/src/lib.rs
-index f538ebe6f..2fae9bb6d 100644
+index 42f33efca..00e020949 100644
 --- a/crates/keybroker/src/lib.rs
 +++ b/crates/keybroker/src/lib.rs
 @@ -2,6 +2,7 @@
@@ -1921,7 +1921,7 @@ index f538ebe6f..2fae9bb6d 100644
  mod legacy_encryptor;
  mod metrics;
  mod operations;
-@@ -28,6 +29,12 @@ pub use self::{
+@@ -29,6 +30,12 @@ pub use self::{
          Encryptor,
          RandomEncryptor,
      },

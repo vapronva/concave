@@ -666,7 +666,7 @@ index 4217d331d..24807680c 100644
                  tracing::warn!("Forcibly shutting down!");
                  break;
 diff --git a/crates/local_backend/src/node_action_callbacks.rs b/crates/local_backend/src/node_action_callbacks.rs
-index 1c9793bfa..d9e7ad1ad 100644
+index 427497fc2..53940ca07 100644
 --- a/crates/local_backend/src/node_action_callbacks.rs
 +++ b/crates/local_backend/src/node_action_callbacks.rs
 @@ -10,10 +10,14 @@ use axum::{
@@ -717,7 +717,7 @@ index 1c9793bfa..d9e7ad1ad 100644
      pub reference: Option<String>,
      pub function_handle: Option<String>,
      pub args: UdfArgsJson,
-@@ -151,6 +165,38 @@ impl TryFrom<MutationIdentifierJson> for SessionRequestIdentifier {
+@@ -154,6 +168,38 @@ impl TryFrom<MutationIdentifierJson> for SessionRequestIdentifier {
      }
  }
  
@@ -756,7 +756,7 @@ index 1c9793bfa..d9e7ad1ad 100644
  /// This is like `public_query_post`, except it allows calling internal
  /// functions as well. This should not be used for any publicly accessible
  /// endpoints, and should only be used to support Convex functions calling into
-@@ -166,16 +212,16 @@ pub async fn internal_query_post(
+@@ -169,16 +215,16 @@ pub async fn internal_query_post(
      ExtractExecutionContext(context): ExtractExecutionContext,
      Json(req): Json<NodeCallbackUdfPostRequest>,
  ) -> Result<impl IntoResponse, HttpResponseError> {
@@ -783,7 +783,7 @@ index 1c9793bfa..d9e7ad1ad 100644
      let udf_return = st
          .application
          .read_only_udf(
-@@ -225,16 +271,16 @@ pub async fn internal_mutation_post(
+@@ -228,16 +274,16 @@ pub async fn internal_mutation_post(
          .mutation_identifier
          .map(SessionRequestIdentifier::try_from)
          .transpose()?;
@@ -810,7 +810,7 @@ index 1c9793bfa..d9e7ad1ad 100644
      let udf_result = st
          .application
          .mutation_udf(
-@@ -284,16 +330,16 @@ pub async fn internal_action_post(
+@@ -287,16 +333,16 @@ pub async fn internal_action_post(
      ExtractExecutionContext(context): ExtractExecutionContext,
      Json(req): Json<NodeCallbackUdfPostRequest>,
  ) -> Result<impl IntoResponse, HttpResponseError> {
@@ -837,7 +837,7 @@ index 1c9793bfa..d9e7ad1ad 100644
      let udf_result = st
          .application
          .action_udf(
-@@ -332,6 +378,7 @@ pub struct ScheduleJobRequest {
+@@ -335,6 +381,7 @@ pub struct ScheduleJobRequest {
      reference: Option<String>,
      function_handle: Option<String>,
      udf_path: Option<String>,
@@ -845,7 +845,7 @@ index 1c9793bfa..d9e7ad1ad 100644
      udf_args: UdfArgsJson,
      scheduled_ts: f64,
  }
-@@ -355,19 +402,17 @@ pub async fn schedule_job(
+@@ -358,19 +405,17 @@ pub async fn schedule_job(
          ErrorMetadata::bad_request("InvalidTimestamp", "Requested scheduled_ts is invalid")
      })?;
      // User might have entered an invalid path, so this is a developer error.
@@ -876,7 +876,7 @@ index 1c9793bfa..d9e7ad1ad 100644
      let udf_args = req.udf_args.into_serialized_args()?;
      let job_id = st
          .application
-@@ -415,6 +460,7 @@ pub async fn cancel_developer_job(
+@@ -418,6 +463,7 @@ pub async fn cancel_developer_job(
  #[serde(rename_all = "camelCase")]
  pub struct CreateFunctionHandleRequest {
      udf_path: Option<String>,
@@ -884,7 +884,7 @@ index 1c9793bfa..d9e7ad1ad 100644
      reference: Option<String>,
  }
  
-@@ -432,19 +478,17 @@ pub async fn create_function_handle(
+@@ -435,19 +481,17 @@ pub async fn create_function_handle(
      }: ExtractActionIdentity,
      Json(req): Json<CreateFunctionHandleRequest>,
  ) -> Result<impl IntoResponse, HttpResponseError> {
@@ -915,7 +915,7 @@ index 1c9793bfa..d9e7ad1ad 100644
      let handle = st
          .application
          .runner()
-@@ -602,6 +646,95 @@ pub async fn storage_delete(
+@@ -605,6 +649,95 @@ pub async fn storage_delete(
      Ok(Json(json!(null)))
  }
  
@@ -1011,7 +1011,7 @@ index 1c9793bfa..d9e7ad1ad 100644
  #[derive(Deserialize)]
  pub struct AuditLogParams {
      #[allow(dead_code)]
-@@ -619,14 +752,12 @@ pub async fn audit_log(
+@@ -622,14 +755,12 @@ pub async fn audit_log(
      .into())
  }
  
@@ -1027,7 +1027,7 @@ index 1c9793bfa..d9e7ad1ad 100644
          .context("Missing callback token - is the call from actions?")?;
  
      let token = value
-@@ -718,7 +849,7 @@ impl<S: Sync> FromRequestParts<S> for ExtractActionName {
+@@ -721,7 +852,7 @@ impl<S: Sync> FromRequestParts<S> for ExtractActionName {
      ) -> Result<Self, Self::Rejection> {
          let action_name = parts
              .headers
@@ -1036,7 +1036,7 @@ index 1c9793bfa..d9e7ad1ad 100644
              .map(|value| value.to_str())
              .transpose()
              .context("Convex-Action-Function-Name must be a string")?
-@@ -739,7 +870,7 @@ impl<T: Sync> FromRequestParts<T> for ExtractExecutionContext {
+@@ -742,7 +873,7 @@ impl<T: Sync> FromRequestParts<T> for ExtractExecutionContext {
      ) -> Result<Self, Self::Rejection> {
          let request_id: RequestId = parts
              .headers
@@ -1045,7 +1045,7 @@ index 1c9793bfa..d9e7ad1ad 100644
              .map(|v| v.to_str())
              .transpose()
              .context("Request id must be a string")?
-@@ -749,7 +880,7 @@ impl<T: Sync> FromRequestParts<T> for ExtractExecutionContext {
+@@ -752,7 +883,7 @@ impl<T: Sync> FromRequestParts<T> for ExtractExecutionContext {
              .unwrap_or(RequestId::new());
          let execution_id: ExecutionId = parts
              .headers
@@ -1054,7 +1054,7 @@ index 1c9793bfa..d9e7ad1ad 100644
              .map(|v| v.to_str())
              .transpose()
              .context("Execution id must be a string")?
-@@ -758,7 +889,7 @@ impl<T: Sync> FromRequestParts<T> for ExtractExecutionContext {
+@@ -761,7 +892,7 @@ impl<T: Sync> FromRequestParts<T> for ExtractExecutionContext {
              // For backwards compatibility
              .unwrap_or(ExecutionId::new());
  
