@@ -42,7 +42,6 @@ hosts:
 
 ha:
   standbyReplicas: 1
-  preferredNode: ""
   leaderPriority: 100
   followerPriority: 0
   requireNodeSpread: true

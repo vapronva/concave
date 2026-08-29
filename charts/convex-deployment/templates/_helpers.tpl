@@ -121,6 +121,21 @@ imagePullSecrets:
 {{- join "\n" $out -}}
 {{- end -}}
 
+{{- define "convex.nodeAffinity" -}}
+{{- with .nodes -}}
+nodeAffinity:
+  requiredDuringSchedulingIgnoredDuringExecution:
+    nodeSelectorTerms:
+      - matchExpressions:
+          - key: kubernetes.io/hostname
+            operator: In
+            values:
+              {{- range . }}
+              - {{ . }}
+              {{- end }}
+{{- end }}
+{{- end -}}
+
 {{- define "convex.updateStrategy" -}}
 {{- $s := .strategy | default dict -}}
 {{- $type := $s.type | default .type -}}
@@ -300,7 +315,6 @@ seccompProfile:
     failureThreshold: 3
   livenessProbe:
     tcpSocket: { port: cloud }
-    initialDelaySeconds: 120
     periodSeconds: 20
   {{- with (index $ctx.Values.resources .resourcesKey) }}
   resources:

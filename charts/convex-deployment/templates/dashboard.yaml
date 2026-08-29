@@ -27,16 +27,7 @@ spec:
         {{- toYaml .Values.dashboard.affinity | nindent 8 }}
       {{- else if .Values.dashboard.nodes }}
       affinity:
-        nodeAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            nodeSelectorTerms:
-              - matchExpressions:
-                  - key: kubernetes.io/hostname
-                    operator: In
-                    values:
-                      {{- range .Values.dashboard.nodes }}
-                      - {{ . }}
-                      {{- end }}
+        {{- include "convex.nodeAffinity" .Values.dashboard | nindent 8 }}
       {{- end }}
       automountServiceAccountToken: false
       containers:

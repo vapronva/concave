@@ -74,6 +74,33 @@ imagePullSecrets:
 {{- join "\n" $out -}}
 {{- end -}}
 
+{{- define "convex.nodeAffinity" -}}
+{{- if or .preferredNode .nodes -}}
+nodeAffinity:
+  {{- with .preferredNode }}
+  preferredDuringSchedulingIgnoredDuringExecution:
+    - weight: 1
+      preference:
+        matchExpressions:
+          - key: kubernetes.io/hostname
+            operator: In
+            values:
+              - {{ . }}
+  {{- end }}
+  {{- with .nodes }}
+  requiredDuringSchedulingIgnoredDuringExecution:
+    nodeSelectorTerms:
+      - matchExpressions:
+          - key: kubernetes.io/hostname
+            operator: In
+            values:
+              {{- range . }}
+              - {{ . }}
+              {{- end }}
+  {{- end }}
+{{- end }}
+{{- end -}}
+
 {{- define "convex.updateStrategy" -}}
 {{- $s := .strategy | default dict -}}
 {{- $type := $s.type | default .type -}}

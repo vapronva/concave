@@ -20,8 +20,7 @@ data:
       {{- with .Values.ingress.ckic.cors.api }}{{ include "convex.ckicCors" . | nindent 6 }}{{- end }}
       import reverse-proxy-xri-hd http://{{ .Values.ingress.usherService.name }}.{{ .Values.ingress.usherService.namespace }}.svc.cluster.local:{{ .Values.ingress.usherService.port }}
     }
-    {{- with .Values.hosts.site }}
-    {{ . }}:443 {
+    {{ .Values.hosts.site }}:443 {
       import basic-compression-set
       import default-headers-set-custom
       header * {
@@ -30,7 +29,6 @@ data:
       {{- with $.Values.ingress.ckic.cors.site }}{{ include "convex.ckicCors" . | nindent 6 }}{{- end }}
       import reverse-proxy-xri-hd http://{{ $.Values.ingress.usherService.name }}.{{ $.Values.ingress.usherService.namespace }}.svc.cluster.local:{{ $.Values.ingress.usherService.port }}
     }
-    {{- end }}
     {{- if and .Values.dashboard.enabled .Values.hosts.dashboard }}
     {{ .Values.hosts.dashboard }}:443 {
       import basic-compression-set

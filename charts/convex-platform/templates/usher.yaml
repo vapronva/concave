@@ -59,30 +59,7 @@ spec:
         {{- toYaml $u.affinity | nindent 8 }}
       {{- else }}
       affinity:
-        {{- if or $u.preferredNode $u.nodes }}
-        nodeAffinity:
-          {{- with $u.preferredNode }}
-          preferredDuringSchedulingIgnoredDuringExecution:
-            - weight: 1
-              preference:
-                matchExpressions:
-                  - key: kubernetes.io/hostname
-                    operator: In
-                    values:
-                      - {{ . }}
-          {{- end }}
-          {{- if $u.nodes }}
-          requiredDuringSchedulingIgnoredDuringExecution:
-            nodeSelectorTerms:
-              - matchExpressions:
-                  - key: kubernetes.io/hostname
-                    operator: In
-                    values:
-                      {{- range $u.nodes }}
-                      - {{ . }}
-                      {{- end }}
-          {{- end }}
-        {{- end }}
+        {{- with include "convex.nodeAffinity" $u }}{{ . | nindent 8 }}{{- end }}
         podAntiAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
             - weight: 1

@@ -5,9 +5,6 @@
 {{- if eq (len $deployments) 0 -}}
 {{- fail "deployments must contain at least one entry when bigbrain.enabled" -}}
 {{- end -}}
-{{- if ne (int $b.replicas) 1 -}}
-{{- fail "bigbrain.replicas must equal 1 because controller leader election is not implemented" -}}
-{{- end -}}
 {{- $bbShutdownNeed := add 10 30 5 -}}
 {{- if gt $bbShutdownNeed (int $b.terminationGracePeriodSeconds) -}}
 {{- fail (printf "bigbrain.terminationGracePeriodSeconds=%d is below the %d seconds a clean shutdown needs: 10 (http drain) + 30 (default actuation budget, BIGBRAIN_ACTUATION_TIMEOUT) + 5 (slack); raise bigbrain.terminationGracePeriodSeconds (and raise it further if you raise BIGBRAIN_ACTUATION_TIMEOUT via extraEnv)" (int $b.terminationGracePeriodSeconds) $bbShutdownNeed) -}}
@@ -73,7 +70,7 @@ metadata:
     {{- include "convex.componentLabels" (dict "ctx" . "component" "bigbrain") | nindent 4 }}
 
 spec:
-  replicas: {{ $b.replicas }}
+  replicas: 1
   strategy:
     type: Recreate
   selector:
@@ -87,39 +84,13 @@ spec:
       {{- with include "convex.imagePullSecrets" . }}{{- . | nindent 6 }}{{- end }}
       terminationGracePeriodSeconds: {{ $b.terminationGracePeriodSeconds }}
       serviceAccountName: {{ include "convex.bigbrainName" . }}
-      securityContext:
-        runAsNonRoot: true
-        runAsUser: 65532
-        seccompProfile:
-          type: RuntimeDefault
       {{- with include "convex.podScheduling" $b }}{{- . | nindent 6 }}{{- end }}
       {{- if $b.affinity }}
       affinity:
         {{- toYaml $b.affinity | nindent 8 }}
       {{- else if or $b.preferredNode $b.nodes }}
       affinity:
-        nodeAffinity:
-          {{- with $b.preferredNode }}
-          preferredDuringSchedulingIgnoredDuringExecution:
-            - weight: 1
-              preference:
-                matchExpressions:
-                  - key: kubernetes.io/hostname
-                    operator: In
-                    values:
-                      - {{ . }}
-          {{- end }}
-          {{- if $b.nodes }}
-          requiredDuringSchedulingIgnoredDuringExecution:
-            nodeSelectorTerms:
-              - matchExpressions:
-                  - key: kubernetes.io/hostname
-                    operator: In
-                    values:
-                      {{- range $b.nodes }}
-                      - {{ . }}
-                      {{- end }}
-          {{- end }}
+        {{- include "convex.nodeAffinity" $b | nindent 8 }}
       {{- end }}
       containers:
         - name: bigbrain

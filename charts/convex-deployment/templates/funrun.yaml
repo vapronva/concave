@@ -40,30 +40,7 @@ spec:
         {{- toYaml .Values.funrun.affinity | nindent 8 }}
       {{- else }}
       affinity:
-        {{- if or .Values.ha.preferredNode .Values.funrun.nodes }}
-        nodeAffinity:
-          {{- with .Values.ha.preferredNode }}
-          preferredDuringSchedulingIgnoredDuringExecution:
-            - weight: 1
-              preference:
-                matchExpressions:
-                  - key: kubernetes.io/hostname
-                    operator: In
-                    values:
-                      - {{ . }}
-          {{- end }}
-          {{- if .Values.funrun.nodes }}
-          requiredDuringSchedulingIgnoredDuringExecution:
-            nodeSelectorTerms:
-              - matchExpressions:
-                  - key: kubernetes.io/hostname
-                    operator: In
-                    values:
-                      {{- range .Values.funrun.nodes }}
-                      - {{ . }}
-                      {{- end }}
-          {{- end }}
-        {{- end }}
+        {{- with include "convex.nodeAffinity" .Values.funrun }}{{ . | nindent 8 }}{{- end }}
         podAntiAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
             - weight: 1
@@ -139,7 +116,6 @@ spec:
             failureThreshold: 3
           livenessProbe:
             httpGet: { path: /healthz, port: health }
-            initialDelaySeconds: 120
             failureThreshold: 6
             periodSeconds: 10
           lifecycle:

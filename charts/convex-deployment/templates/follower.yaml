@@ -52,7 +52,7 @@ spec:
                     {{ $prefix }}/instance: {{ required "instance.name is required" .Values.instance.name | quote }}
           {{- end }}
       {{- end }}
-      terminationGracePeriodSeconds: 20
+      terminationGracePeriodSeconds: 40
       automountServiceAccountToken: false
       containers:
         {{- include "convex.backendContainer" (dict "ctx" . "role" "follower" "extraPorts" (list) "probeInitialDelaySeconds" 8 "resourcesKey" "follower") | nindent 8 }}
