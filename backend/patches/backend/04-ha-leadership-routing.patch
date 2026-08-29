@@ -31,10 +31,10 @@ index 986cfe59a..82f7a31a8 100644
  }
 diff --git a/crates/local_backend/src/leadership.rs b/crates/local_backend/src/leadership.rs
 new file mode 100644
-index 000000000..44c9154b0
+index 000000000..3633010c2
 --- /dev/null
 +++ b/crates/local_backend/src/leadership.rs
-@@ -0,0 +1,818 @@
+@@ -0,0 +1,792 @@
 +use std::sync::{
 +    atomic::{
 +        AtomicU8,
@@ -133,13 +133,6 @@ index 000000000..44c9154b0
 +        }
 +    }
 +
-+    pub fn current(&self) -> BackendRole {
-+        match self.role.load(Ordering::SeqCst) {
-+            ROLE_LEADER => BackendRole::Leader,
-+            _ => BackendRole::Follower,
-+        }
-+    }
-+
 +    pub fn current_label(&self) -> &'static str {
 +        match self.role.load(Ordering::SeqCst) {
 +            ROLE_LEADER => "leader",
@@ -161,7 +154,6 @@ index 000000000..44c9154b0
 +            Ordering::SeqCst,
 +        ) {
 +            Ok(_) => PromotionAttempt::Started,
-+            Err(ROLE_PROMOTING) => PromotionAttempt::AlreadyInProgress,
 +            Err(ROLE_LEADER) => PromotionAttempt::AlreadyLeader,
 +            Err(ROLE_DEMOTING) => PromotionAttempt::DemotionInProgress,
 +            Err(_) => PromotionAttempt::AlreadyInProgress,
@@ -198,7 +190,6 @@ index 000000000..44c9154b0
 +            Ok(_) => DemotionAttempt::Started,
 +            Err(ROLE_DEMOTING) => DemotionAttempt::AlreadyInProgress,
 +            Err(ROLE_PROMOTING) => DemotionAttempt::PromotionInProgress,
-+            Err(ROLE_FOLLOWER) => DemotionAttempt::AlreadyFollower,
 +            Err(_) => DemotionAttempt::AlreadyFollower,
 +        }
 +    }
@@ -227,7 +218,6 @@ index 000000000..44c9154b0
 +
 +pub struct PromoteContext {
 +    pub persistence_factory: PersistenceFactory,
-+    pub preempt_signal: ShutdownSignal,
 +    pub retention_rate_limiter: Arc<RateLimiter<ProdRuntime>>,
 +}
 +
@@ -325,7 +315,7 @@ index 000000000..44c9154b0
 +}
 +
 +#[derive(Serialize)]
-+pub struct PromoteResponse {
++pub struct RoleResponse {
 +    pub role: String,
 +    pub is_leader: bool,
 +    pub message: String,
@@ -340,7 +330,7 @@ index 000000000..44c9154b0
 +        PromotionAttempt::AlreadyLeader => {
 +            return (
 +                StatusCode::OK,
-+                axum::Json(PromoteResponse {
++                axum::Json(RoleResponse {
 +                    role: BackendRole::Leader.as_str().to_string(),
 +                    is_leader: true,
 +                    message: "already leader".to_string(),
@@ -351,7 +341,7 @@ index 000000000..44c9154b0
 +        PromotionAttempt::AlreadyInProgress => {
 +            return (
 +                StatusCode::ACCEPTED,
-+                axum::Json(PromoteResponse {
++                axum::Json(RoleResponse {
 +                    role: BackendRole::Follower.as_str().to_string(),
 +                    is_leader: false,
 +                    message: "promotion already in progress".to_string(),
@@ -362,7 +352,7 @@ index 000000000..44c9154b0
 +        PromotionAttempt::DemotionInProgress => {
 +            return (
 +                StatusCode::CONFLICT,
-+                axum::Json(PromoteResponse {
++                axum::Json(RoleResponse {
 +                    role: BackendRole::Follower.as_str().to_string(),
 +                    is_leader: false,
 +                    message: "a demotion is in progress; retry after it completes".to_string(),
@@ -378,7 +368,7 @@ index 000000000..44c9154b0
 +    });
 +    (
 +        StatusCode::ACCEPTED,
-+        axum::Json(PromoteResponse {
++        axum::Json(RoleResponse {
 +            role: BackendRole::Follower.as_str().to_string(),
 +            is_leader: false,
 +            message: "promotion started".to_string(),
@@ -405,7 +395,7 @@ index 000000000..44c9154b0
 +        .become_leader(
 +            rw_persistence.clone(),
 +            promote_ctx.retention_rate_limiter.clone(),
-+            promote_ctx.preempt_signal.clone(),
++            st.leader_handle.preempt_signal.clone(),
 +        )
 +        .await
 +    {
@@ -423,24 +413,11 @@ index 000000000..44c9154b0
 +        },
 +        Err(e) => {
 +            tracing::error!("[concave] promotion failed after lease acquisition: {e:#}");
-+            if let Err(release_err) = rw_persistence.release_lease().await {
-+                tracing::warn!(
-+                    "[concave] failed to release the lease after a failed promotion (the next \
-+                     acquirer steals it anyway): {release_err:#}"
-+                );
-+            }
 +            st.leader_handle.preempt_signal.signal(anyhow::anyhow!(
 +                "in-process promotion failed after acquiring the lease: {e:#}"
 +            ));
 +        },
 +    }
-+}
-+
-+#[derive(Serialize)]
-+pub struct DemoteResponse {
-+    pub role: String,
-+    pub is_leader: bool,
-+    pub message: String,
 +}
 +
 +pub async fn demote<S>(MtState(st): MtState<LocalAppState>) -> Response
@@ -451,7 +428,7 @@ index 000000000..44c9154b0
 +        DemotionAttempt::AlreadyFollower => {
 +            return (
 +                StatusCode::CONFLICT,
-+                axum::Json(DemoteResponse {
++                axum::Json(RoleResponse {
 +                    role: BackendRole::Follower.as_str().to_string(),
 +                    is_leader: false,
 +                    message: "already a follower; nothing to demote".to_string(),
@@ -462,7 +439,7 @@ index 000000000..44c9154b0
 +        DemotionAttempt::AlreadyInProgress => {
 +            return (
 +                StatusCode::CONFLICT,
-+                axum::Json(DemoteResponse {
++                axum::Json(RoleResponse {
 +                    role: BackendRole::Follower.as_str().to_string(),
 +                    is_leader: false,
 +                    message: "demotion already in progress".to_string(),
@@ -473,7 +450,7 @@ index 000000000..44c9154b0
 +        DemotionAttempt::PromotionInProgress => {
 +            return (
 +                StatusCode::CONFLICT,
-+                axum::Json(DemoteResponse {
++                axum::Json(RoleResponse {
 +                    role: BackendRole::Follower.as_str().to_string(),
 +                    is_leader: false,
 +                    message: "a promotion is in progress; retry after it completes".to_string(),
@@ -492,7 +469,7 @@ index 000000000..44c9154b0
 +        ));
 +        return (
 +            StatusCode::INTERNAL_SERVER_ERROR,
-+            axum::Json(DemoteResponse {
++            axum::Json(RoleResponse {
 +                role: BackendRole::Follower.as_str().to_string(),
 +                is_leader: false,
 +                message: "no RW persistence handle (restarting)".to_string(),
@@ -507,7 +484,7 @@ index 000000000..44c9154b0
 +    });
 +    (
 +        StatusCode::ACCEPTED,
-+        axum::Json(DemoteResponse {
++        axum::Json(RoleResponse {
 +            role: BackendRole::Follower.as_str().to_string(),
 +            is_leader: false,
 +            message: "demotion started".to_string(),
@@ -772,14 +749,12 @@ index 000000000..44c9154b0
 +    fn follower_starts_not_leader() {
 +        let rs = RoleState::new(BackendRole::Follower);
 +        assert!(!rs.is_leader());
-+        assert_eq!(rs.current(), BackendRole::Follower);
 +    }
 +
 +    #[test]
 +    fn leader_starts_leader() {
 +        let rs = RoleState::new(BackendRole::Leader);
 +        assert!(rs.is_leader());
-+        assert_eq!(rs.current(), BackendRole::Leader);
 +    }
 +
 +    #[test]
@@ -794,7 +769,6 @@ index 000000000..44c9154b0
 +        assert_eq!(rs.current_label(), "leader");
 +        assert!(matches!(rs.begin_demotion(), DemotionAttempt::Started));
 +        assert!(!rs.is_leader());
-+        assert_eq!(rs.current(), BackendRole::Follower);
 +        assert_eq!(rs.current_label(), "demoting");
 +        rs.finish_demotion_success();
 +        assert!(!rs.is_leader());

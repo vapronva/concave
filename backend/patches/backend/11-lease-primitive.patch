@@ -57,7 +57,7 @@ index b70e227ba..7aef8a33f 100644
      persistence
          .write_persistence_global(PersistenceGlobalKey::MaxRepeatableTimestamp, now.into())
 diff --git a/crates/postgres/src/lib.rs b/crates/postgres/src/lib.rs
-index 9f598b5b6..5e1459172 100644
+index 9f598b5b6..c5228c359 100644
 --- a/crates/postgres/src/lib.rs
 +++ b/crates/postgres/src/lib.rs
 @@ -462,6 +462,41 @@ impl PostgresPersistence {
@@ -171,16 +171,7 @@ index 9f598b5b6..5e1459172 100644
          Ok(())
      }
  
-@@ -1757,8 +1822,6 @@ struct Lease {
- }
- 
- impl Lease {
--    /// Acquire a lease. Blocks as long as there is another lease holder.
--    /// Returns any transient errors encountered.
-     async fn acquire(
-         pool: Arc<ConvexPgPool>,
-         schema: &SchemaName,
-@@ -1776,27 +1839,27 @@ impl Lease {
+@@ -1776,27 +1841,27 @@ impl Lease {
              .as_nanos() as i64;
  
          tracing::info!("attempting to acquire lease");
@@ -211,7 +202,7 @@ index 9f598b5b6..5e1459172 100644
 -        tracing::info!("lease acquired with ts {}", ts);
 -
 +        let acquired_ts: i64 = row
-+            .ok_or_else(|| anyhow::anyhow!("failed to acquire lease: leases row missing"))?
++            .context("failed to acquire lease: leases row missing")?
 +            .get(0);
 +        tracing::info!("lease acquired with ts {}", acquired_ts);
          timer.finish();
@@ -222,7 +213,7 @@ index 9f598b5b6..5e1459172 100644
              schema: schema.clone(),
              instance_name,
              multitenant,
-@@ -1804,6 +1867,61 @@ impl Lease {
+@@ -1804,6 +1869,61 @@ impl Lease {
          })
      }
  

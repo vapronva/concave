@@ -68,7 +68,7 @@ index 6a04b99b3..0b94dd858 100644
  /// convenience) from allowing browsers to make these requests.
  pub fn platform_api_cors() -> CorsLayer {
 diff --git a/crates/common/src/knobs.rs b/crates/common/src/knobs.rs
-index d08620d39..ee28bf3b0 100644
+index d08620d39..0917988e9 100644
 --- a/crates/common/src/knobs.rs
 +++ b/crates/common/src/knobs.rs
 @@ -618,6 +618,17 @@ pub static MAX_REPEATABLE_TIMESTAMP_IDLE_FREQUENCY: LazyLock<Duration> = LazyLoc
@@ -114,7 +114,7 @@ index d08620d39..ee28bf3b0 100644
  /// The maximum number of concurrent index cache requests in Funrun.
  pub static FUNRUN_INDEX_CACHE_CONCURRENCY: LazyLock<usize> =
      LazyLock::new(|| env_config("FUNRUN_INDEX_CACHE_CONCURRENCY", 200));
-@@ -1294,28 +1316,41 @@ pub static FUNRUN_MODULE_QUEUE_SIZE: LazyLock<usize> =
+@@ -1294,6 +1316,15 @@ pub static FUNRUN_MODULE_QUEUE_SIZE: LazyLock<usize> =
  pub static FUNRUN_CODE_CACHE_SIZE: LazyLock<u64> =
      LazyLock::new(|| env_config("FUNRUN_CODE_CACHE_SIZE", 500_000_000));
  
@@ -130,21 +130,10 @@ index d08620d39..ee28bf3b0 100644
  /// The maximum number of fetch clients Funrun would create.
  pub static FUNRUN_FETCH_CLIENT_CACHE_SIZE: LazyLock<usize> =
      LazyLock::new(|| env_config("FUNRUN_FETCH_CLIENT_CACHE_SIZE", 100));
+@@ -1312,10 +1343,28 @@ pub static FUNRUN_FETCH_CLIENT_CACHE_SIZE: LazyLock<usize> =
+ pub static FUNRUN_CLIENT_MAX_REQUESTS_PER_UPSTREAM: LazyLock<usize> =
+     LazyLock::new(|| env_config("FUNRUN_CLIENT_MAX_REQUESTS_PER_UPSTREAM", 15));
  
--/// The maximum number of concurrent requests a single client can make to a
--/// single Funrun server.
--/// NOTE: When changing this value, ensure that the following parameters
--/// for pro satisfy this inequality. This makes sure that if one funrun instance
--/// is down, we still have enough capacity to satisfy requests if a backend is
--/// maxing out its concurrent function call limits.
--///
--/// max_concurrent_queries +
--/// max_concurrent_mutations + max_concurrent_v8_actions +
--/// max_concurrent_http_actions < (number of funrun nodes - 1) *
--/// FUNRUN_CLIENT_MAX_REQUESTS_PER_UPSTREAM
--pub static FUNRUN_CLIENT_MAX_REQUESTS_PER_UPSTREAM: LazyLock<usize> =
--    LazyLock::new(|| env_config("FUNRUN_CLIENT_MAX_REQUESTS_PER_UPSTREAM", 15));
--
 -/// The maximum number of retries a Funrun client will perform. The client only
 -/// retries overloaded errors.
 +/// Max retries per funrun call; total attempts = retries + 1. Queries and
@@ -267,10 +256,10 @@ index 64a4c9068..998b61d70 100644
 +}
 diff --git a/crates/function_runner/src/proto.rs b/crates/function_runner/src/proto.rs
 new file mode 100644
-index 000000000..9bda993e2
+index 000000000..0b7216a3c
 --- /dev/null
 +++ b/crates/function_runner/src/proto.rs
-@@ -0,0 +1,213 @@
+@@ -0,0 +1,211 @@
 +use std::{
 +    collections::BTreeMap,
 +    str::FromStr,
@@ -302,17 +291,15 @@ index 000000000..9bda993e2
 +    FunctionWrites,
 +};
 +
-+impl TryFrom<FunctionReads> for pb::funrun::FunctionReads {
-+    type Error = anyhow::Error;
-+
-+    fn try_from(
++impl From<FunctionReads> for pb::funrun::FunctionReads {
++    fn from(
 +        FunctionReads {
 +            reads,
 +            num_intervals,
 +            user_tx_size,
 +            system_tx_size,
 +        }: FunctionReads,
-+    ) -> anyhow::Result<Self> {
++    ) -> Self {
 +        let (index_reads, search_reads) = reads.consume();
 +        let indexed = index_reads
 +            .map(|(index_name, index_reads)| {
@@ -336,13 +323,13 @@ index 000000000..9bda993e2
 +                }
 +            })
 +            .collect();
-+        Ok(pb::funrun::FunctionReads {
++        pb::funrun::FunctionReads {
 +            indexed,
 +            num_intervals: num_intervals as u64,
 +            user_tx_size: Some(read_size_to_proto(user_tx_size)),
 +            system_tx_size: Some(read_size_to_proto(system_tx_size)),
 +            search,
-+        })
++        }
 +    }
 +}
 +
@@ -443,7 +430,7 @@ index 000000000..9bda993e2
 +            .collect();
 +        Ok(pb::funrun::FunctionFinalTransaction {
 +            begin_timestamp: begin_timestamp.into(),
-+            reads: Some(reads.try_into()?),
++            reads: Some(reads.into()),
 +            writes,
 +            rows_read_by_tablet,
 +        })
@@ -486,10 +473,10 @@ index 000000000..9bda993e2
 +}
 diff --git a/crates/function_runner/src/remote.rs b/crates/function_runner/src/remote.rs
 new file mode 100644
-index 000000000..1d16612e1
+index 000000000..ffdd2ca11
 --- /dev/null
 +++ b/crates/function_runner/src/remote.rs
-@@ -0,0 +1,946 @@
+@@ -0,0 +1,872 @@
 +use std::{
 +    collections::{
 +        BTreeMap,
@@ -577,11 +564,8 @@ index 000000000..1d16612e1
 +};
 +use tonic::transport::{
 +    channel::Change,
-+    Certificate,
 +    Channel,
-+    ClientTlsConfig,
 +    Endpoint,
-+    Identity as TlsIdentity,
 +};
 +use udf::{
 +    ActionCallbacks,
@@ -617,55 +601,6 @@ index 000000000..1d16612e1
 +    (writes + result + udf::HTTP_ACTION_BODY_LIMIT) + (4 << 20)
 +});
 +
-+pub struct FunrunTlsPem {
-+    pub cert_pem: Vec<u8>,
-+    pub key_pem: Vec<u8>,
-+    pub ca_pem: Vec<u8>,
-+}
-+
-+pub fn funrun_tls_pem_from_env() -> anyhow::Result<Option<FunrunTlsPem>> {
-+    let cert = std::env::var_os("CONVEX_FUNRUN_TLS_CERT");
-+    let key = std::env::var_os("CONVEX_FUNRUN_TLS_KEY");
-+    let ca = std::env::var_os("CONVEX_FUNRUN_TLS_CA");
-+    match (cert, key, ca) {
-+        (None, None, None) => Ok(None),
-+        (Some(cert), Some(key), Some(ca)) => {
-+            let cert_pem = std::fs::read(&cert)
-+                .with_context(|| format!("reading CONVEX_FUNRUN_TLS_CERT {cert:?}"))?;
-+            let key_pem = std::fs::read(&key)
-+                .with_context(|| format!("reading CONVEX_FUNRUN_TLS_KEY {key:?}"))?;
-+            let ca_pem = std::fs::read(&ca)
-+                .with_context(|| format!("reading CONVEX_FUNRUN_TLS_CA {ca:?}"))?;
-+            Ok(Some(FunrunTlsPem {
-+                cert_pem,
-+                key_pem,
-+                ca_pem,
-+            }))
-+        },
-+        _ => anyhow::bail!(
-+            "funrun mTLS misconfigured: set ALL of CONVEX_FUNRUN_TLS_CERT, CONVEX_FUNRUN_TLS_KEY, \
-+             CONVEX_FUNRUN_TLS_CA (file paths) to enable mutual TLS, or NONE of them for plaintext"
-+        ),
-+    }
-+}
-+
-+fn funrun_client_tls_config() -> anyhow::Result<Option<ClientTlsConfig>> {
-+    let Some(FunrunTlsPem {
-+        cert_pem,
-+        key_pem,
-+        ca_pem,
-+    }) = funrun_tls_pem_from_env()?
-+    else {
-+        return Ok(None);
-+    };
-+    let domain = std::env::var("CONVEX_FUNRUN_TLS_DOMAIN").unwrap_or_else(|_| "funrun".to_string());
-+    let config = ClientTlsConfig::new()
-+        .domain_name(domain)
-+        .ca_certificate(Certificate::from_pem(ca_pem))
-+        .identity(TlsIdentity::from_pem(cert_pem, key_pem));
-+    Ok(Some(config))
-+}
-+
 +fn parse_funrun_target(addr: &str) -> anyhow::Result<(String, u16)> {
 +    let rest = addr
 +        .strip_prefix("https://")
@@ -695,20 +630,14 @@ index 000000000..1d16612e1
 +const FUNRUN_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
 +const FUNRUN_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(5);
 +
-+fn funrun_endpoint(uri: &str, tls_config: &Option<ClientTlsConfig>) -> anyhow::Result<Endpoint> {
-+    let mut endpoint = Endpoint::from_shared(uri.to_string())
++fn funrun_endpoint(uri: &str) -> anyhow::Result<Endpoint> {
++    Ok(Endpoint::from_shared(uri.to_string())
 +        .with_context(|| format!("invalid funrun endpoint {uri}"))?
 +        .tcp_nodelay(true)
 +        .connect_timeout(FUNRUN_CONNECT_TIMEOUT)
 +        .http2_keep_alive_interval(FUNRUN_KEEPALIVE_INTERVAL)
 +        .keep_alive_timeout(FUNRUN_KEEPALIVE_TIMEOUT)
-+        .keep_alive_while_idle(true);
-+    if let Some(tls_config) = tls_config {
-+        endpoint = endpoint
-+            .tls_config(tls_config.clone())
-+            .context("invalid funrun client TLS configuration")?;
-+    }
-+    Ok(endpoint)
++        .keep_alive_while_idle(true))
 +}
 +
 +pub struct RemoteFunctionRunner<RT: Runtime> {
@@ -741,27 +670,12 @@ index 000000000..1d16612e1
 +        rt: RT,
 +        storage: DeploymentStorage,
 +    ) -> anyhow::Result<Self> {
-+        let tls_config = funrun_client_tls_config()?;
-+        if tls_config.is_some() {
-+            tracing::info!("[funrun] connecting to fleet over mutual TLS");
-+        } else {
-+            tracing::warn!(
-+                "[funrun] CONVEX_FUNRUN_TLS_* unset; connecting to fleet over PLAINTEXT gRPC -- \
-+                 use only for local/dev"
-+            );
-+        }
 +        let (host, port) = parse_funrun_target(&funrun_addr)?;
-+        let scheme = if tls_config.is_some() {
-+            "https"
-+        } else {
-+            "http"
-+        };
 +        let endpoints_epoch = Instant::now();
 +        let endpoints_empty_since = Arc::new(AtomicU64::new(1));
 +        let channel = {
 +            let (channel, tx) = Channel::balance_channel::<SocketAddr>(64);
 +            let refresh_rt = rt.clone();
-+            let refresh_tls = tls_config.clone();
 +            let empty_since = endpoints_empty_since.clone();
 +            rt.spawn_background("funrun_lb_refresh", async move {
 +                let mut current = BTreeSet::new();
@@ -773,8 +687,7 @@ index 000000000..1d16612e1
 +                                let mut next: BTreeSet<SocketAddr> =
 +                                    unique.intersection(&current).copied().collect();
 +                                for addr in unique.difference(&current) {
-+                                    if let Ok(endpoint) =
-+                                        funrun_endpoint(&format!("{scheme}://{addr}"), &refresh_tls)
++                                    if let Ok(endpoint) = funrun_endpoint(&format!("http://{addr}"))
 +                                    {
 +                                        if tx.send(Change::Insert(*addr, endpoint)).await.is_ok() {
 +                                            next.insert(*addr);
@@ -1099,7 +1012,7 @@ index 000000000..1d16612e1
 +            usage_stats,
 +        } = result;
 +        let outcome = FunctionOutcome::from_proto(
-+            outcome.ok_or_else(|| anyhow::anyhow!("funrun response missing outcome"))?,
++            outcome.context("funrun response missing outcome")?,
 +            path_and_args,
 +            None,
 +            inert_identity,
@@ -1250,7 +1163,7 @@ index 000000000..1d16612e1
 +            usage_stats,
 +        } = result.context("funrun HttpAction stream ended without a terminal result")?;
 +        let outcome = FunctionOutcome::from_proto(
-+            outcome.ok_or_else(|| anyhow::anyhow!("funrun response missing outcome"))?,
++            outcome.context("funrun response missing outcome")?,
 +            None,
 +            Some((http_path_for_outcome, request_head)),
 +            inert_identity,

@@ -58,10 +58,10 @@ index 000000000..fee975de7
 +workspace = true
 diff --git a/crates/funrun_server/src/callbacks.rs b/crates/funrun_server/src/callbacks.rs
 new file mode 100644
-index 000000000..f6549e28c
+index 000000000..8f9c87528
 --- /dev/null
 +++ b/crates/funrun_server/src/callbacks.rs
-@@ -0,0 +1,637 @@
+@@ -0,0 +1,607 @@
 +use anyhow::Context;
 +use async_trait::async_trait;
 +use common::{
@@ -114,36 +114,16 @@ index 000000000..f6549e28c
 +use vector::PublicVectorSearchQueryResult;
 +
 +pub struct HttpActionCallbacks {
-+    client: reqwest::Client,
-+    backend_url: ConvexOrigin,
-+    callback_token: String,
-+    auth_header: Option<String>,
-+    request_identity: Identity,
-+    context: ExecutionContext,
-+    action_name: Option<String>,
++    pub(crate) client: reqwest::Client,
++    pub(crate) backend_url: ConvexOrigin,
++    pub(crate) callback_token: String,
++    pub(crate) auth_header: Option<String>,
++    pub(crate) request_identity: Identity,
++    pub(crate) context: ExecutionContext,
++    pub(crate) action_name: Option<String>,
 +}
 +
 +impl HttpActionCallbacks {
-+    pub fn new(
-+        client: reqwest::Client,
-+        backend_url: ConvexOrigin,
-+        callback_token: String,
-+        auth_header: Option<String>,
-+        request_identity: Identity,
-+        context: ExecutionContext,
-+        action_name: Option<String>,
-+    ) -> Self {
-+        Self {
-+            client,
-+            backend_url,
-+            callback_token,
-+            auth_header,
-+            request_identity,
-+            context,
-+            action_name,
-+        }
-+    }
-+
 +    fn url(&self, path: &str) -> String {
 +        format!(
 +            "{}{}",
@@ -197,8 +177,6 @@ index 000000000..f6549e28c
 +        let body = RunFunctionBody {
 +            path: Some(function_path.udf_path.to_string()),
 +            component_path: Some(function_path.component.to_string()),
-+            reference: None,
-+            function_handle: None,
 +            args: args_raw,
 +        };
 +        let response = self
@@ -270,10 +248,6 @@ index 000000000..f6549e28c
 +    path: Option<String>,
 +    #[serde(skip_serializing_if = "Option::is_none")]
 +    component_path: Option<String>,
-+    #[serde(skip_serializing_if = "Option::is_none")]
-+    reference: Option<String>,
-+    #[serde(skip_serializing_if = "Option::is_none")]
-+    function_handle: Option<String>,
 +    args: Box<RawValue>,
 +}
 +
@@ -296,8 +270,6 @@ index 000000000..f6549e28c
 +    udf_path: Option<String>,
 +    #[serde(skip_serializing_if = "Option::is_none")]
 +    component_path: Option<String>,
-+    reference: Option<String>,
-+    function_handle: Option<String>,
 +    udf_args: Box<RawValue>,
 +    scheduled_ts: f64,
 +}
@@ -320,7 +292,6 @@ index 000000000..f6549e28c
 +    udf_path: Option<String>,
 +    #[serde(skip_serializing_if = "Option::is_none")]
 +    component_path: Option<String>,
-+    reference: Option<String>,
 +}
 +
 +#[derive(Deserialize)]
@@ -390,7 +361,11 @@ index 000000000..f6549e28c
 +
 +#[async_trait]
 +impl ActionCallbacks for HttpActionCallbacks {
-+    async fn create_ai_gateway_token(&self, _caller: AttributedCaller) -> anyhow::Result<String> {
++    async fn create_ai_gateway_token(
++        &self,
++        _identity: Identity,
++        _caller: AttributedCaller,
++    ) -> anyhow::Result<String> {
 +        anyhow::bail!(errors::ErrorMetadata::bad_request(
 +            "AiGatewayUnavailable",
 +            "`getServiceToken(\"ai-gateway\")` isn't available on this deployment because the AI \
@@ -445,8 +420,6 @@ index 000000000..f6549e28c
 +        let body = ScheduleJobBody {
 +            udf_path: Some(scheduled_path.udf_path.to_string()),
 +            component_path: Some(scheduled_path.component.to_string()),
-+            reference: None,
-+            function_handle: None,
 +            udf_args,
 +            scheduled_ts: scheduled_ts.as_secs_f64(),
 +        };
@@ -484,7 +457,6 @@ index 000000000..f6549e28c
 +        let body = CreateFunctionHandleBody {
 +            udf_path: Some(path.udf_path.to_string()),
 +            component_path: Some(path.component.to_string()),
-+            reference: None,
 +        };
 +        let response = self
 +            .request(
@@ -657,8 +629,6 @@ index 000000000..f6549e28c
 +        let body = RunFunctionBody {
 +            path: Some("app.js:bump".to_string()),
 +            component_path: Some(ComponentPath::root().to_string()),
-+            reference: None,
-+            function_handle: None,
 +            args: serde_json::value::RawValue::from_string("{}".to_string()).unwrap(),
 +        };
 +        let encoded = serde_json::to_value(&body).unwrap();
@@ -701,45 +671,19 @@ index 000000000..f6549e28c
 +}
 diff --git a/crates/funrun_server/src/config.rs b/crates/funrun_server/src/config.rs
 new file mode 100644
-index 000000000..2900baf6e
+index 000000000..8f8f88182
 --- /dev/null
 +++ b/crates/funrun_server/src/config.rs
-@@ -0,0 +1,289 @@
-+use std::net::SocketAddr;
+@@ -0,0 +1,81 @@
++use std::{
++    net::SocketAddr,
++    time::Duration,
++};
 +
 +use anyhow::Context;
 +use clusters::DbDriverTag;
 +use common::types::PersistenceVersion;
-+use function_runner::remote::{
-+    funrun_tls_pem_from_env,
-+    FunrunTlsPem,
-+};
 +use keybroker::DeploymentSecret;
-+
-+#[derive(Clone)]
-+pub struct FunrunTlsConfig {
-+    pub cert_pem: Vec<u8>,
-+    pub key_pem: Vec<u8>,
-+    pub ca_pem: Vec<u8>,
-+}
-+
-+impl FunrunTlsConfig {
-+    pub fn from_env() -> anyhow::Result<Option<Self>> {
-+        let Some(FunrunTlsPem {
-+            cert_pem,
-+            key_pem,
-+            ca_pem,
-+        }) = funrun_tls_pem_from_env()?
-+        else {
-+            return Ok(None);
-+        };
-+        Ok(Some(Self {
-+            cert_pem,
-+            key_pem,
-+            ca_pem,
-+        }))
-+    }
-+}
 +
 +#[derive(Clone)]
 +pub struct FunrunInstanceConfig {
@@ -748,26 +692,14 @@ index 000000000..2900baf6e
 +    pub db_spec: String,
 +}
 +
-+impl std::fmt::Debug for FunrunInstanceConfig {
-+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-+        f.debug_struct("FunrunInstanceConfig")
-+            .field("instance_name", &self.instance_name)
-+            .field("instance_secret", &"<redacted>")
-+            .field("db_spec", &"<redacted>")
-+            .finish()
-+    }
-+}
-+
-+#[derive(Clone)]
 +pub struct FunrunConfig {
 +    pub listen: SocketAddr,
 +    pub health_listen: SocketAddr,
-+    pub max_snapshot_lag: std::time::Duration,
-+    pub drain_delay: std::time::Duration,
-+    pub instances: Vec<FunrunInstanceConfig>,
++    pub max_snapshot_lag: Duration,
++    pub drain_delay: Duration,
++    pub instance: FunrunInstanceConfig,
 +    pub db: DbDriverTag,
 +    pub require_ssl: bool,
-+    pub tls: Option<FunrunTlsConfig>,
 +}
 +
 +impl FunrunConfig {
@@ -780,20 +712,6 @@ index 000000000..2900baf6e
 +            .unwrap_or_else(|_| "0.0.0.0:8091".to_string())
 +            .parse()
 +            .context("Invalid FUNRUN_HEALTH_LISTEN")?;
-+        fn duration_secs_from_env(
-+            key: &str,
-+            default_secs: u64,
-+        ) -> anyhow::Result<std::time::Duration> {
-+            Ok(std::env::var(key)
-+                .ok()
-+                .map(|v| {
-+                    v.parse::<u64>()
-+                        .map(std::time::Duration::from_secs)
-+                        .with_context(|| format!("Invalid {key}"))
-+                })
-+                .transpose()?
-+                .unwrap_or(std::time::Duration::from_secs(default_secs)))
-+        }
 +        let max_snapshot_lag = duration_secs_from_env("FUNRUN_MAX_SNAPSHOT_LAG_SECS", 30)?;
 +        let drain_delay = duration_secs_from_env("CONVEX_FUNRUN_DRAIN_DELAY_SECS", 8)?;
 +        let db = match std::env::var("FUNRUN_DB").ok() {
@@ -805,201 +723,45 @@ index 000000000..2900baf6e
 +        let require_ssl = std::env::var("FUNRUN_DO_NOT_REQUIRE_SSL")
 +            .map(|v| v != "true" && v != "1")
 +            .unwrap_or(true);
-+        let instances = match std::env::var("FUNRUN_INSTANCES") {
-+            Ok(spec) if !spec.trim().is_empty() => parse_instances(&spec)?,
-+            _ => vec![Self::single_instance_from_env()?],
-+        };
-+        let tls = FunrunTlsConfig::from_env()?;
++        let instance_name =
++            std::env::var("FUNRUN_INSTANCE_NAME").context("FUNRUN_INSTANCE_NAME must be set")?;
++        let instance_secret = std::env::var("FUNRUN_INSTANCE_SECRET")
++            .context("FUNRUN_INSTANCE_SECRET must be set")?;
++        let instance_secret = DeploymentSecret::try_from(instance_secret.as_str())?;
++        let db_spec = std::env::var("POSTGRES_URL").context("POSTGRES_URL must be set")?;
 +        Ok(Self {
 +            listen,
 +            health_listen,
 +            max_snapshot_lag,
 +            drain_delay,
-+            instances,
++            instance: FunrunInstanceConfig {
++                instance_name,
++                instance_secret,
++                db_spec,
++            },
 +            db,
 +            require_ssl,
-+            tls,
-+        })
-+    }
-+
-+    fn single_instance_from_env() -> anyhow::Result<FunrunInstanceConfig> {
-+        let instance_name = std::env::var("FUNRUN_INSTANCE_NAME")
-+            .or_else(|_| std::env::var("INSTANCE_NAME"))
-+            .map_err(|_| {
-+                anyhow::anyhow!(
-+                    "set FUNRUN_INSTANCES (multi-tenant) or FUNRUN_INSTANCE_NAME (or \
-+                     INSTANCE_NAME) for a single deployment"
-+                )
-+            })?;
-+        let instance_secret = std::env::var("FUNRUN_INSTANCE_SECRET")
-+            .or_else(|_| std::env::var("INSTANCE_SECRET"))
-+            .map_err(|_| {
-+                anyhow::anyhow!("FUNRUN_INSTANCE_SECRET (or INSTANCE_SECRET) must be set")
-+            })?;
-+        let instance_secret = DeploymentSecret::try_from(instance_secret.as_str())?;
-+        let db_spec = std::env::var("FUNRUN_DATABASE_URL")
-+            .or_else(|_| std::env::var("POSTGRES_URL"))
-+            .or_else(|_| std::env::var("DATABASE_URL"))
-+            .map_err(|_| {
-+                anyhow::anyhow!("FUNRUN_DATABASE_URL (or POSTGRES_URL/DATABASE_URL) must be set")
-+            })?;
-+        Ok(FunrunInstanceConfig {
-+            instance_name,
-+            instance_secret,
-+            db_spec,
 +        })
 +    }
 +}
 +
-+fn parse_instances(spec: &str) -> anyhow::Result<Vec<FunrunInstanceConfig>> {
-+    let mut instances = Vec::new();
-+    for raw in spec.split(';') {
-+        let entry = raw.trim();
-+        if entry.is_empty() {
-+            continue;
-+        }
-+        let (name, value) = entry.split_once('=').ok_or_else(|| {
-+            anyhow::anyhow!(
-+                "invalid FUNRUN_INSTANCES entry {entry:?}: expected `<name>=<db_url>|<secret>`"
-+            )
-+        })?;
-+        let name = name.trim();
-+        anyhow::ensure!(
-+            !name.is_empty(),
-+            "invalid FUNRUN_INSTANCES entry {entry:?}: empty instance name"
-+        );
-+        let mut fields = value.split('|');
-+        let db_spec = fields
-+            .next()
-+            .map(str::trim)
-+            .filter(|s| !s.is_empty())
-+            .ok_or_else(|| {
-+                anyhow::anyhow!("FUNRUN_INSTANCES entry for {name:?} is missing the db_url")
-+            })?
-+            .to_owned();
-+        let secret = fields
-+            .next()
-+            .map(str::trim)
-+            .filter(|s| !s.is_empty())
-+            .ok_or_else(|| {
-+                anyhow::anyhow!(
-+                    "FUNRUN_INSTANCES entry for {name:?} is missing the instance secret"
-+                )
-+            })?;
-+        let instance_secret = DeploymentSecret::try_from(secret).map_err(|e| {
-+            anyhow::anyhow!("FUNRUN_INSTANCES entry for {name:?} has an invalid secret: {e}")
-+        })?;
-+        anyhow::ensure!(
-+            fields.next().is_none(),
-+            "FUNRUN_INSTANCES entry for {name:?} has too many `|`-fields (expected db_url|secret)"
-+        );
-+        anyhow::ensure!(
-+            !instances
-+                .iter()
-+                .any(|i: &FunrunInstanceConfig| i.instance_name == name),
-+            "FUNRUN_INSTANCES lists instance {name:?} more than once"
-+        );
-+        instances.push(FunrunInstanceConfig {
-+            instance_name: name.to_owned(),
-+            instance_secret,
-+            db_spec,
-+        });
-+    }
-+    anyhow::ensure!(
-+        !instances.is_empty(),
-+        "FUNRUN_INSTANCES was set but contained no instances"
-+    );
-+    Ok(instances)
-+}
-+
-+#[cfg(test)]
-+mod tests {
-+    use super::*;
-+
-+    const SECRET_A: &str = "0000000000000000000000000000000000000000000000000000000000000001";
-+    const SECRET_B: &str = "0000000000000000000000000000000000000000000000000000000000000002";
-+
-+    #[test]
-+    fn parse_single_entry() {
-+        let parsed = parse_instances(&format!("inst-a=postgres://u:p@h/a|{SECRET_A}")).unwrap();
-+        assert_eq!(parsed.len(), 1);
-+        assert_eq!(parsed[0].instance_name, "inst-a");
-+        assert_eq!(parsed[0].db_spec, "postgres://u:p@h/a");
-+        assert_eq!(
-+            parsed[0].instance_secret,
-+            DeploymentSecret::try_from(SECRET_A).unwrap()
-+        );
-+    }
-+
-+    #[test]
-+    fn parse_multi_with_whitespace() {
-+        let spec = format!(
-+            "  inst-a = postgres://u:p@h/a | {SECRET_A} ;\n  inst-b=postgres://u:p@h/b|{SECRET_B} \
-+             ;"
-+        );
-+        let parsed = parse_instances(&spec).unwrap();
-+        assert_eq!(parsed.len(), 2);
-+        assert_eq!(parsed[0].instance_name, "inst-a");
-+        assert_eq!(parsed[0].db_spec, "postgres://u:p@h/a");
-+        assert_eq!(parsed[1].instance_name, "inst-b");
-+        assert_eq!(parsed[1].db_spec, "postgres://u:p@h/b");
-+    }
-+
-+    #[test]
-+    fn db_url_may_contain_equals() {
-+        let parsed =
-+            parse_instances(&format!("inst-a=postgres://h/a?sslmode=require|{SECRET_A}")).unwrap();
-+        assert_eq!(parsed[0].db_spec, "postgres://h/a?sslmode=require");
-+    }
-+
-+    #[test]
-+    fn missing_secret_errors() {
-+        let err = parse_instances("inst-a=postgres://u:p@h/a").unwrap_err();
-+        assert!(
-+            err.to_string().contains("missing the instance secret"),
-+            "{err}"
-+        );
-+    }
-+
-+    #[test]
-+    fn bad_secret_errors() {
-+        let err = parse_instances("inst-a=postgres://u:p@h/a|not-hex").unwrap_err();
-+        assert!(err.to_string().contains("invalid secret"), "{err}");
-+    }
-+
-+    #[test]
-+    fn missing_equals_errors() {
-+        let err = parse_instances("garbage-no-equals").unwrap_err();
-+        assert!(
-+            err.to_string().contains("invalid FUNRUN_INSTANCES entry"),
-+            "{err}"
-+        );
-+    }
-+
-+    #[test]
-+    fn too_many_fields_errors() {
-+        let err = parse_instances(&format!("inst-a=db|{SECRET_A}|extra")).unwrap_err();
-+        assert!(err.to_string().contains("too many"), "{err}");
-+    }
-+
-+    #[test]
-+    fn duplicate_name_errors() {
-+        let err = parse_instances(&format!("dup=db1|{SECRET_A};dup=db2|{SECRET_B}")).unwrap_err();
-+        assert!(err.to_string().contains("more than once"), "{err}");
-+    }
-+
-+    #[test]
-+    fn empty_after_trim_errors() {
-+        let err = parse_instances("   ;  ; ").unwrap_err();
-+        assert!(err.to_string().contains("no instances"), "{err}");
-+    }
++fn duration_secs_from_env(key: &str, default_secs: u64) -> anyhow::Result<Duration> {
++    Ok(std::env::var(key)
++        .ok()
++        .map(|v| {
++            v.parse::<u64>()
++                .map(Duration::from_secs)
++                .with_context(|| format!("Invalid {key}"))
++        })
++        .transpose()?
++        .unwrap_or(Duration::from_secs(default_secs)))
 +}
 diff --git a/crates/funrun_server/src/main.rs b/crates/funrun_server/src/main.rs
 new file mode 100644
-index 000000000..28ce53226
+index 000000000..ad2c3990a
 --- /dev/null
 +++ b/crates/funrun_server/src/main.rs
-@@ -0,0 +1,279 @@
+@@ -0,0 +1,257 @@
 +use std::sync::{
 +    atomic::{
 +        AtomicBool,
@@ -1046,16 +808,9 @@ index 000000000..28ce53226
 +}
 +
 +async fn serve(runtime: ProdRuntime, config: FunrunConfig) -> anyhow::Result<()> {
-+    let instance_names = config
-+        .instances
-+        .iter()
-+        .map(|i| i.instance_name.as_str())
-+        .collect::<Vec<_>>()
-+        .join(", ");
 +    tracing::info!(
-+        "[convex-funrun] starting for {} instance(s) [{}] on {}",
-+        config.instances.len(),
-+        instance_names,
++        "[convex-funrun] starting for instance {} on {}",
++        config.instance.instance_name,
 +        config.listen,
 +    );
 +    let registry = Arc::new(InstanceRegistry::new(runtime.clone(), &config)?);
@@ -1068,21 +823,6 @@ index 000000000..28ce53226
 +    let mut builder = tonic::transport::Server::builder()
 +        .http2_keepalive_interval(Some(std::time::Duration::from_secs(30)))
 +        .http2_keepalive_timeout(Some(std::time::Duration::from_secs(10)));
-+    if let Some(tls) = &config.tls {
-+        let identity = tonic::transport::Identity::from_pem(&tls.cert_pem, &tls.key_pem);
-+        let tls_config = tonic::transport::ServerTlsConfig::new()
-+            .identity(identity)
-+            .client_ca_root(tonic::transport::Certificate::from_pem(&tls.ca_pem));
-+        builder = builder
-+            .tls_config(tls_config)
-+            .context("invalid funrun TLS configuration")?;
-+        tracing::info!("[convex-funrun] mutual TLS enabled (requiring client certs)");
-+    } else {
-+        tracing::warn!(
-+            "[convex-funrun] TLS not configured (CONVEX_FUNRUN_TLS_* unset); serving PLAINTEXT \
-+             gRPC -- use only for local/dev"
-+        );
-+    }
 +    let shutting_down = Arc::new(AtomicBool::new(false));
 +    let (shutdown_tx, shutdown_rx) = watch::channel(false);
 +    {
@@ -1353,7 +1093,7 @@ index 000000000..4a5754360
 +}
 diff --git a/crates/funrun_server/src/service.rs b/crates/funrun_server/src/service.rs
 new file mode 100644
-index 000000000..f704694dc
+index 000000000..27f02b7fe
 --- /dev/null
 +++ b/crates/funrun_server/src/service.rs
 @@ -0,0 +1,650 @@
@@ -1610,15 +1350,15 @@ index 000000000..f704694dc
 +        let transport_url = callback_transport_url
 +            .map(ConvexOrigin::from)
 +            .unwrap_or_else(|| backend_url.clone());
-+        let action_callbacks = Arc::new(HttpActionCallbacks::new(
-+            callback_client,
-+            transport_url,
-+            callback_token.context("missing callback_token")?,
++        let action_callbacks = Arc::new(HttpActionCallbacks {
++            client: callback_client,
++            backend_url: transport_url,
++            callback_token: callback_token.context("missing callback_token")?,
 +            auth_header,
-+            identity.clone(),
-+            context.clone(),
++            request_identity: identity.clone(),
++            context: context.clone(),
 +            action_name,
-+        ));
++        });
 +        let deployment = DeploymentMetadata {
 +            name: instance.instance_name.clone(),
 +            region: None,
@@ -2009,10 +1749,10 @@ index 000000000..f704694dc
 +}
 diff --git a/crates/funrun_server/src/snapshot.rs b/crates/funrun_server/src/snapshot.rs
 new file mode 100644
-index 000000000..5dff5ee21
+index 000000000..e4de99bf2
 --- /dev/null
 +++ b/crates/funrun_server/src/snapshot.rs
-@@ -0,0 +1,815 @@
+@@ -0,0 +1,758 @@
 +use std::{
 +    collections::{
 +        BTreeMap,
@@ -2022,10 +1762,7 @@ index 000000000..5dff5ee21
 +        Arc,
 +        OnceLock,
 +    },
-+    time::{
-+        Duration,
-+        Instant,
-+    },
++    time::Duration,
 +};
 +
 +use anyhow::Context;
@@ -2112,14 +1849,11 @@ index 000000000..5dff5ee21
 +    load_errors: Arc<Mutex<HashMap<String, InstanceLoadError>>>,
 +}
 +
-+struct RegistryEntry<RT: Runtime> {
-+    cell: Arc<OnceCell<Arc<InstanceState<RT>>>>,
-+    last_used: Instant,
-+}
++type RegistryEntry<RT> = Arc<OnceCell<Arc<InstanceState<RT>>>>;
 +
 +#[derive(Clone)]
 +struct InstanceLagSample {
-+    warm_timestamp: Option<String>,
++    warm_timestamp: String,
 +    persistence_timestamp: Option<String>,
 +    lag_seconds: Option<f64>,
 +    error: Option<String>,
@@ -2133,11 +1867,10 @@ index 000000000..5dff5ee21
 +
 +impl<RT: Runtime> InstanceRegistry<RT> {
 +    pub fn new(rt: RT, config: &FunrunConfig) -> anyhow::Result<Self> {
-+        let instances: HashMap<String, Arc<FunrunInstanceConfig>> = config
-+            .instances
-+            .iter()
-+            .map(|i| (i.instance_name.clone(), Arc::new(i.clone())))
-+            .collect();
++        let instances: HashMap<String, Arc<FunrunInstanceConfig>> = HashMap::from([(
++            config.instance.instance_name.clone(),
++            Arc::new(config.instance.clone()),
++        )]);
 +        let cap = max_percent_per_client(instances.len());
 +        let shared_isolate = SharedIsolateResources::new_with_max_workers(
 +            rt.clone(),
@@ -2152,11 +1885,9 @@ index 000000000..5dff5ee21
 +            instances.len(),
 +        );
 +        let searcher: Arc<dyn search::Searcher> = Arc::new(InProcessSearcher::new(rt.clone())?);
-+        let idle_ttl = Duration::from_secs(15 * 60);
 +        let states = Arc::new(Mutex::new(HashMap::new()));
 +        let lag_samples = Arc::new(Mutex::new(HashMap::new()));
 +        let load_errors = Arc::new(Mutex::new(HashMap::new()));
-+        Self::spawn_eviction_worker(rt.clone(), states.clone(), idle_ttl);
 +        Self::spawn_isolate_pool_sampler(
 +            rt.clone(),
 +            shared_isolate.clone(),
@@ -2261,7 +1992,7 @@ index 000000000..5dff5ee21
 +                InstanceHealth {
 +                    name: name.clone(),
 +                    healthy,
-+                    warm_timestamp: sample.and_then(|s| s.warm_timestamp.clone()),
++                    warm_timestamp: sample.map(|s| s.warm_timestamp.clone()),
 +                    persistence_timestamp: sample.and_then(|s| s.persistence_timestamp.clone()),
 +                    lag_seconds: sample.and_then(|s| s.lag_seconds),
 +                    error: sample.and_then(|s| s.error.clone()),
@@ -2274,20 +2005,6 @@ index 000000000..5dff5ee21
 +            healthy: self.pool_healthy(),
 +            instances,
 +        }
-+    }
-+
-+    fn spawn_eviction_worker(
-+        rt: RT,
-+        states: Arc<Mutex<HashMap<String, RegistryEntry<RT>>>>,
-+        idle_ttl: Duration,
-+    ) {
-+        let worker_rt = rt.clone();
-+        rt.spawn_background("funrun_instance_eviction", async move {
-+            loop {
-+                worker_rt.wait(Duration::from_secs(60)).await;
-+                evict_states(&states, idle_ttl).await;
-+            }
-+        });
 +    }
 +
 +    fn spawn_isolate_pool_sampler(
@@ -2308,7 +2025,7 @@ index 000000000..5dff5ee21
 +                    guard
 +                        .iter()
 +                        .filter_map(|(name, entry)| {
-+                            entry.cell.get().map(|state| (name.clone(), state.clone()))
++                            entry.get().map(|state| (name.clone(), state.clone()))
 +                        })
 +                        .collect()
 +                };
@@ -2327,13 +2044,13 @@ index 000000000..5dff5ee21
 +    let warm = state.database.now_ts_for_reads();
 +    match new_static_repeatable_recent(state.reader.as_ref()).await {
 +        Ok(latest) => InstanceLagSample {
-+            warm_timestamp: Some(warm.to_string()),
++            warm_timestamp: warm.to_string(),
 +            persistence_timestamp: Some(latest.to_string()),
 +            lag_seconds: Some(latest.secs_since_f64(*warm).max(0.0)),
 +            error: None,
 +        },
 +        Err(e) => InstanceLagSample {
-+            warm_timestamp: Some(warm.to_string()),
++            warm_timestamp: warm.to_string(),
 +            persistence_timestamp: None,
 +            lag_seconds: None,
 +            error: Some(format!("{e:#}")),
@@ -2347,8 +2064,7 @@ index 000000000..5dff5ee21
 +) -> anyhow::Result<Arc<FunrunInstanceConfig>> {
 +    instances.get(instance_name).cloned().with_context(|| {
 +        format!(
-+            "funrun pod is not configured for instance {instance_name:?} (set it in \
-+             FUNRUN_INSTANCES)"
++            "funrun pod is not configured for instance {instance_name:?} (FUNRUN_INSTANCE_NAME)"
 +        )
 +    })
 +}
@@ -2366,12 +2082,8 @@ index 000000000..5dff5ee21
 +        let mut guard = states.lock();
 +        let entry = guard
 +            .entry(key.to_owned())
-+            .or_insert_with(|| RegistryEntry {
-+                cell: Arc::new(OnceCell::new()),
-+                last_used: Instant::now(),
-+            });
-+        entry.last_used = Instant::now();
-+        (entry.cell.clone(), entry.cell.get().cloned())
++            .or_insert_with(|| Arc::new(OnceCell::new()));
++        (entry.clone(), entry.get().cloned())
 +    };
 +    if let Some(value) = existing {
 +        return Ok(value);
@@ -2380,45 +2092,16 @@ index 000000000..5dff5ee21
 +    Ok(value.clone())
 +}
 +
-+async fn evict_states<RT: Runtime>(
-+    states: &Mutex<HashMap<String, RegistryEntry<RT>>>,
-+    idle_ttl: Duration,
-+) {
-+    let now = Instant::now();
-+    let mut evicted = Vec::new();
-+    {
-+        let mut guard = states.lock();
-+        let stale: Vec<(String, Arc<InstanceState<RT>>)> = guard
-+            .iter()
-+            .filter_map(|(name, entry)| {
-+                let state = entry.cell.get()?;
-+                (Arc::strong_count(state) == 1 && now.duration_since(entry.last_used) >= idle_ttl)
-+                    .then(|| (name.clone(), state.clone()))
-+            })
-+            .collect();
-+        for (name, state) in stale {
-+            guard.remove(&name);
-+            evicted.push((name, state));
-+        }
-+    }
-+    for (name, state) in evicted {
-+        tracing::info!("[convex-funrun] evicting idle warm instance {name}");
-+        if let Err(e) = state.database.shutdown().await {
-+            tracing::warn!("[convex-funrun] failed to shut down evicted instance {name}: {e:#}");
-+        }
-+    }
-+}
-+
 +pub struct InstanceState<RT: Runtime> {
-+    pub rt: RT,
++    rt: RT,
 +    pub instance_name: String,
 +    pub key_broker: FunctionRunnerKeyBroker,
-+    pub reader: Arc<dyn PersistenceReader>,
++    reader: Arc<dyn PersistenceReader>,
 +    pub retention_validator: Arc<dyn RetentionValidator>,
-+    pub searcher: Arc<dyn search::Searcher>,
-+    pub search_storage: Arc<dyn Storage>,
++    searcher: Arc<dyn search::Searcher>,
++    search_storage: Arc<dyn Storage>,
 +    pub core: FunctionRunnerCore<RT, DeploymentStorage>,
-+    pub database: Database<RT>,
++    database: Database<RT>,
 +    snapshot_cache: Cache<Timestamp, SnapshotInputs>,
 +    summary_cache: tokio::sync::Mutex<Option<database::table_summary::TableSummarySnapshot>>,
 +}

@@ -11,7 +11,7 @@ index bceb6b977..f2f937c1f 100644
                          outcome.result.is_ok(),
                          usage_stats,
 diff --git a/crates/application/src/lib.rs b/crates/application/src/lib.rs
-index 8e25e0668..f0f3fdb64 100644
+index 8e25e0668..385f88ce3 100644
 --- a/crates/application/src/lib.rs
 +++ b/crates/application/src/lib.rs
 @@ -135,6 +135,7 @@ use common::{
@@ -76,7 +76,7 @@ index 8e25e0668..f0f3fdb64 100644
  }
  
  /// Create storage based on the storage type configuration
-@@ -665,29 +671,31 @@ impl<RT: Runtime> Application<RT> {
+@@ -665,29 +671,32 @@ impl<RT: Runtime> Application<RT> {
              storage_type
          };
  
@@ -115,14 +115,14 @@ index 8e25e0668..f0f3fdb64 100644
          )
          .await?;
 -
--        // Search storage needs to be set for Database to be fully initialized
+         // Search storage needs to be set for Database to be fully initialized
          database.set_search_storage(search_storage.clone());
 -        tracing::info!("{:?} storage is configured.", storage_type);
 -
          Ok(ApplicationStorage {
              files_storage,
              modules_storage,
-@@ -697,7 +705,34 @@ impl<RT: Runtime> Application<RT> {
+@@ -697,7 +706,32 @@ impl<RT: Runtime> Application<RT> {
          })
      }
  
@@ -137,12 +137,10 @@ index 8e25e0668..f0f3fdb64 100644
 +                .await?
 +                .into_value()
 +                .storage_type
-+                .ok_or_else(|| {
-+                    anyhow::anyhow!(
-+                        "follower cannot start: database storage tag is not initialized (the \
-+                         leader must initialize the database first)"
-+                    )
-+                })?
++                .context(
++                    "follower cannot start: database storage tag is not initialized (the leader \
++                     must initialize the database first)",
++                )?
 +        };
 +        let storage = Self::open_application_storage(runtime, database, &storage_type).await?;
 +        tracing::info!(
@@ -157,7 +155,7 @@ index 8e25e0668..f0f3fdb64 100644
          runtime: RT,
          database: Database<RT>,
          file_storage: FileStorage<RT>,
-@@ -711,7 +746,7 @@ impl<RT: Runtime> Application<RT> {
+@@ -711,7 +745,7 @@ impl<RT: Runtime> Application<RT> {
          convex_site: ConvexSite,
          searcher: Arc<dyn Searcher>,
          segment_term_metadata_fetcher: Arc<dyn SegmentTermMetadataFetcher>,
@@ -166,18 +164,7 @@ index 8e25e0668..f0f3fdb64 100644
          node_actions: NodeActions<RT>,
          log_visibility: Arc<dyn LogVisibility<RT>>,
          app_auth: Arc<ApplicationAuth<RT>>,
-@@ -725,8 +760,8 @@ impl<RT: Runtime> Application<RT> {
-         ai_gateway_jwt_minter: Option<Arc<dyn ai_gateway_jwt::AiGatewayJwtMinter>>,
-         source_map_cache: SourceMapCache<RT>,
-     ) -> anyhow::Result<Self> {
--        // Wrap the usage logger so usage is recorded for enforcement before
--        // being forwarded downstream.
-+        // Wrap the usage logger so recorded usage flows into the meter read by
-+        // the get_current_usage endpoint.
-         let usage_meter = Arc::new(UsageMeter::new(runtime.system_time())?);
-         let usage_event_logger: Arc<dyn UsageEventLogger> =
-             UsageLimitRecorder::new(runtime.clone(), usage_meter.clone(), usage_event_logger);
-@@ -738,6 +773,144 @@ impl<RT: Runtime> Application<RT> {
+@@ -738,6 +772,144 @@ impl<RT: Runtime> Application<RT> {
              CONVEX_SITE.clone() => convex_site.parse()?
          };
  
@@ -322,7 +309,7 @@ index 8e25e0668..f0f3fdb64 100644
          let mut index_worker = Arc::new(Mutex::new(None));
          if *ENABLE_INDEX_BACKFILL {
              let index_worker_fut = IndexWorker::new(
-@@ -762,12 +935,12 @@ impl<RT: Runtime> Application<RT> {
+@@ -762,12 +934,12 @@ impl<RT: Runtime> Application<RT> {
              database.clone(),
              persistence.reader(),
              application_storage.search_storage.clone(),
@@ -338,7 +325,7 @@ index 8e25e0668..f0f3fdb64 100644
          let table_summary_worker = TableSummaryWorker::start(
              runtime.clone(),
              database.clone(),
-@@ -789,90 +962,9 @@ impl<RT: Runtime> Application<RT> {
+@@ -789,90 +961,9 @@ impl<RT: Runtime> Application<RT> {
              runtime.spawn("system_table_cleanup_worker", system_table_cleanup_worker),
          ));
  
@@ -432,7 +419,7 @@ index 8e25e0668..f0f3fdb64 100644
  
          let scheduled_job_runner = ScheduledJobRunner::start(
              runtime.clone(),
-@@ -898,7 +990,7 @@ impl<RT: Runtime> Application<RT> {
+@@ -898,7 +989,7 @@ impl<RT: Runtime> Application<RT> {
              database.clone(),
              application_storage.exports_storage.clone(),
              application_storage.files_storage.clone(),
@@ -441,7 +428,7 @@ index 8e25e0668..f0f3fdb64 100644
              usage_counter.clone(),
              deployment_name.clone(),
          );
-@@ -935,7 +1027,7 @@ impl<RT: Runtime> Application<RT> {
+@@ -935,7 +1026,7 @@ impl<RT: Runtime> Application<RT> {
              deployment_name.clone(),
          )?;
  
@@ -450,7 +437,7 @@ index 8e25e0668..f0f3fdb64 100644
              usage_gauges_tracking_worker,
              scheduled_job_runner,
              cron_job_executor,
-@@ -950,29 +1042,79 @@ impl<RT: Runtime> Application<RT> {
+@@ -950,29 +1041,79 @@ impl<RT: Runtime> Application<RT> {
              system_table_cleanup_worker,
              migration_worker,
              usage_limit_worker,
@@ -551,7 +538,7 @@ index 8e25e0668..f0f3fdb64 100644
      }
  
      pub fn usage_meter(&self) -> &Arc<UsageMeter> {
-@@ -983,6 +1125,10 @@ impl<RT: Runtime> Application<RT> {
+@@ -983,6 +1124,10 @@ impl<RT: Runtime> Application<RT> {
          self.runtime.clone()
      }
  
@@ -562,7 +549,7 @@ index 8e25e0668..f0f3fdb64 100644
      pub fn modules_storage(&self) -> &Arc<dyn Storage> {
          &self.application_storage.modules_storage
      }
-@@ -3890,7 +4036,10 @@ impl<RT: Runtime> Application<RT> {
+@@ -3890,7 +4035,10 @@ impl<RT: Runtime> Application<RT> {
      }
  
      pub async fn shutdown(&self) -> anyhow::Result<()> {

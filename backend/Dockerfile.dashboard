@@ -2,7 +2,7 @@ ARG TOOLS_IMAGE=docker.horse/ci/on-alpine/tools:1
 
 FROM $TOOLS_IMAGE AS tools
 
-FROM docker.io/library/node:24-trixie-slim AS build
+FROM docker.io/library/node:24.20.0-trixie-slim AS build
 
 ARG MIRROR_DEBIAN_URL=""
 
@@ -12,7 +12,7 @@ COPY --from=tools /usr/local/bin/pkg-base-setup /usr/local/bin/
 
 RUN echo 'Acquire::ForceIPv4 "true";' > /etc/apt/apt.conf.d/99force-ipv4 && \
       pkg-base-setup && \
-      apt-get install --assume-yes --no-install-recommends curl build-essential git python3 perl && \
+      apt-get install --assume-yes --no-install-recommends build-essential git python3 perl && \
       apt-get clean && \
       rm --recursive --force /var/lib/apt/lists/*
 
@@ -57,7 +57,7 @@ RUN turbo run build --filter=dashboard-self-hosted...
 
 RUN pnpm --filter=dashboard-self-hosted --config.inject-workspace-packages=true deploy --prod /tmp/deploy
 
-FROM docker.io/library/node:24-trixie-slim
+FROM docker.io/library/node:24.20.0-trixie-slim
 
 LABEL org.opencontainers.image.source=https://git.horse/vapronva/concave
 

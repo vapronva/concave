@@ -157,7 +157,7 @@ index 000000000..93e7fe12b
 +  uint64 rows_read = 2;
 +}
 diff --git a/crates/pb/src/error_metadata.rs b/crates/pb/src/error_metadata.rs
-index a465e35e8..db44559e5 100644
+index a465e35e8..e7db198e9 100644
 --- a/crates/pb/src/error_metadata.rs
 +++ b/crates/pb/src/error_metadata.rs
 @@ -141,11 +141,23 @@ impl TryFrom<ErrorMetadataProto> for ErrorMetadata {
@@ -171,8 +171,8 @@ index a465e35e8..db44559e5 100644
  }
  
 +fn decode_status_details(details: &[u8]) -> anyhow::Result<Option<ErrorMetadata>> {
-+    let details = StatusDetailsProto::decode(details)
-+        .map_err(|err| anyhow::anyhow!("Failed to decode StatusDetails proto: {}", err))?;
++    let details =
++        StatusDetailsProto::decode(details).context("Failed to decode StatusDetails proto")?;
 +    details
 +        .error_metadata
 +        .map(|metadata| {

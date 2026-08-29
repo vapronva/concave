@@ -38,10 +38,10 @@ index e66741039..762516c78 100644
 +}
 diff --git a/crates/local_backend/src/usage_forwarder.rs b/crates/local_backend/src/usage_forwarder.rs
 new file mode 100644
-index 000000000..40be94f34
+index 000000000..72cd6b132
 --- /dev/null
 +++ b/crates/local_backend/src/usage_forwarder.rs
-@@ -0,0 +1,352 @@
+@@ -0,0 +1,349 @@
 +use async_trait::async_trait;
 +use axum::{
 +    extract::RawQuery,
@@ -271,10 +271,7 @@ index 000000000..40be94f34
 +        };
 +        Ok(Some(Self {
 +            base_url: reqwest::Url::parse(&base_url)?,
-+            token: std::env::var("CONVEX_INSIGHTS_QUERY_TOKEN")
-+                .ok()
-+                .filter(|t| !t.is_empty())
-+                .or_else(usage_sink_token),
++            token: usage_sink_token(),
 +            client: Client::builder()
 +                .timeout(Duration::from_secs(15))
 +                .connect_timeout(Duration::from_secs(10))

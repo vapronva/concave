@@ -124,7 +124,7 @@ index dfe80d124..4a3d1d2f9 100644
 +    }
 +}
 diff --git a/crates/local_backend/src/lib.rs b/crates/local_backend/src/lib.rs
-index 9ad08230d..ae88c89b3 100644
+index 9ad08230d..2b2d8186d 100644
 --- a/crates/local_backend/src/lib.rs
 +++ b/crates/local_backend/src/lib.rs
 @@ -35,7 +35,10 @@ use common::{
@@ -216,7 +216,7 @@ index 9ad08230d..ae88c89b3 100644
      zombify_rx: async_broadcast::Receiver<()>,
      preempt_tx: ShutdownSignal,
  ) -> anyhow::Result<LocalAppState> {
-@@ -163,30 +197,71 @@ pub async fn make_app(
+@@ -163,30 +197,66 @@ pub async fn make_app(
      // TODO(CX-6572) Separate `SegmentMetadataFetcher` from `SearcherImpl`
      let segment_metadata_fetcher: Arc<dyn SegmentTermMetadataFetcher> = in_process_searcher;
      let (deleted_tablet_sender, deleted_tablet_receiver) = tokio::sync::mpsc::channel(100);
@@ -275,11 +275,6 @@ index 9ad08230d..ae88c89b3 100644
 +            .await?
 +        },
 +    };
-+    if config.role.is_leader() && std::env::var_os("CONVEX_BACKEND_ROLE").is_none() {
-+        tracing::warn!(
-+            "[concave] CONVEX_BACKEND_ROLE unset; an HA standby must set it to follower"
-+        );
-+    }
 +    if boot_role.is_leader() {
 +        initialize_application_system_tables(&database).await?;
 +    }
@@ -311,7 +306,7 @@ index 9ad08230d..ae88c89b3 100644
  
      let file_storage = FileStorage {
          transactional_file_storage: TransactionalFileStorage::new(
-@@ -229,21 +304,41 @@ pub async fn make_app(
+@@ -229,21 +299,41 @@ pub async fn make_app(
          reqwest::redirect::Policy::default(),
      );
      let function_runner: Arc<dyn FunctionRunner<ProdRuntime>> =
@@ -365,7 +360,7 @@ index 9ad08230d..ae88c89b3 100644
          runtime.clone(),
          database.clone(),
          file_storage.clone(),
-@@ -261,7 +356,7 @@ pub async fn make_app(
+@@ -261,7 +351,7 @@ pub async fn make_app(
          config.convex_site_url()?,
          searcher.clone(),
          segment_metadata_fetcher,
@@ -374,7 +369,7 @@ index 9ad08230d..ae88c89b3 100644
          node_actions,
          Arc::new(RedactLogsToClient::new(config.redact_logs_to_client)),
          Arc::new(ApplicationAuth::new(
-@@ -284,7 +379,7 @@ pub async fn make_app(
+@@ -284,7 +374,7 @@ pub async fn make_app(
      let origin = config.convex_origin_url()?;
      let instance_name = config.name();
  
@@ -383,7 +378,7 @@ index 9ad08230d..ae88c89b3 100644
          let beacon_future = beacon::start_beacon(
              runtime.clone(),
              database.clone(),
-@@ -294,14 +389,100 @@ pub async fn make_app(
+@@ -294,14 +384,99 @@ pub async fn make_app(
          runtime.spawn_background("beacon_worker", beacon_future);
      }
  
@@ -426,7 +421,6 @@ index 9ad08230d..ae88c89b3 100644
 +        });
 +        Arc::new(crate::leadership::PromoteContext {
 +            persistence_factory,
-+            preempt_signal: preempt_tx.clone(),
 +            retention_rate_limiter: Arc::new(new_rate_limiter(
 +                runtime.clone(),
 +                Quota::per_second(*DOCUMENT_RETENTION_RATE_LIMIT),
@@ -485,7 +479,7 @@ index 9ad08230d..ae88c89b3 100644
  }
  
 diff --git a/crates/local_backend/src/main.rs b/crates/local_backend/src/main.rs
-index 4217d331d..24807680c 100644
+index 4217d331d..5f621fe84 100644
 --- a/crates/local_backend/src/main.rs
 +++ b/crates/local_backend/src/main.rs
 @@ -12,11 +12,16 @@ use common::{
@@ -654,13 +648,11 @@ index 4217d331d..24807680c 100644
              r?;
              let _: Result<_, _> = shutdown_tx.broadcast(()).await;
          },
-@@ -242,8 +309,8 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
-                 tracing::info!("Cool down expired. Shutting down");
+@@ -243,7 +310,7 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
                  break;
              }
--            // Forcibly shutdown with second ctrl-c.
+             // Forcibly shutdown with second ctrl-c.
 -            r = signal::ctrl_c().fuse() => {
-+            // Forcibly shutdown with a second signal.
 +            r = shutdown_signal().fuse() => {
                  r?;
                  tracing::warn!("Forcibly shutting down!");

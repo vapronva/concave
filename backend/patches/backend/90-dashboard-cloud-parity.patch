@@ -2530,10 +2530,10 @@ index 000000000..b43fc782b
 +}
 diff --git a/npm-packages/dashboard-common/src/features/settings/components/backups/SnapshotExport.tsx b/npm-packages/dashboard-common/src/features/settings/components/backups/SnapshotExport.tsx
 new file mode 100644
-index 000000000..5894715c8
+index 000000000..36d029aee
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/settings/components/backups/SnapshotExport.tsx
-@@ -0,0 +1,132 @@
+@@ -0,0 +1,130 @@
 +import { DownloadIcon } from "@radix-ui/react-icons";
 +import { Button } from "@ui/Button";
 +import { Spinner } from "@ui/Spinner";
@@ -2596,9 +2596,7 @@ index 000000000..5894715c8
 +                    variant="primary"
 +                    inline
 +                    aria-label="download"
-+                    onClick={() =>
-+                      void getZipExport(existingExport._id, filename)
-+                    }
++                    onClick={() => void getZipExport(existingExport._id)}
 +                  >
 +                    <DownloadIcon aria-label="Download" />
 +                    <span className="hidden md:flex">Download</span>
@@ -3183,7 +3181,7 @@ index 28ae40fc5..01524ff9a 100644
    return pages;
  }
 diff --git a/npm-packages/dashboard-common/src/lib/deploymentApi.ts b/npm-packages/dashboard-common/src/lib/deploymentApi.ts
-index 3d3625939..125128092 100644
+index 3d3625939..25ce3742d 100644
 --- a/npm-packages/dashboard-common/src/lib/deploymentApi.ts
 +++ b/npm-packages/dashboard-common/src/lib/deploymentApi.ts
 @@ -1,14 +1,15 @@
@@ -3221,7 +3219,7 @@ index 3d3625939..125128092 100644
  export function useFunctionUrl(udfPath: string, componentId?: string | null) {
    const { deploymentsURI } = useContext(DeploymentInfoContext);
  
-@@ -102,3 +100,174 @@ export const deploymentAuthMiddleware: Middleware =
+@@ -102,3 +100,172 @@ export const deploymentAuthMiddleware: Middleware =
  
      return useSWRNext(swrKey, fetcher, config);
    };
@@ -3262,26 +3260,24 @@ index 3d3625939..125128092 100644
 +
 +export function useGetZipExport(): (
 +  snapshotId: Id<"_exports">,
-+  filename: string,
 +) => Promise<void> {
++  const deploymentUrl = useDeploymentUrl();
 +  const checkedFetch = useCheckedDeploymentFetch();
 +  return useCallback(
-+    async (snapshotId: Id<"_exports">, filename: string) => {
-+      const res = await checkedFetch(`/api/export/zip/${snapshotId}`);
++    async (snapshotId: Id<"_exports">) => {
++      const exportUrl = `/api/export/zip/${snapshotId}`;
++      const res = await checkedFetch(`${exportUrl}/token`, { method: "POST" });
 +      if (!res) {
 +        return;
 +      }
-+      const blob = await res.blob();
-+      const objectUrl = URL.createObjectURL(blob);
++      const { token } = await res.json();
 +      const anchor = document.createElement("a");
-+      anchor.href = objectUrl;
-+      anchor.download = filename;
++      anchor.href = `${deploymentUrl}${exportUrl}?${new URLSearchParams({ token })}`;
 +      document.body.appendChild(anchor);
 +      anchor.click();
 +      document.body.removeChild(anchor);
-+      URL.revokeObjectURL(objectUrl);
 +    },
-+    [checkedFetch],
++    [deploymentUrl, checkedFetch],
 +  );
 +}
 +
