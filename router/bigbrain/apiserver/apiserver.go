@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 
-	"k8s.io/component-base/logs"
 	"sigs.k8s.io/custom-metrics-apiserver/pkg/cmd"
 )
 
@@ -15,8 +14,6 @@ type Config struct {
 }
 
 func Run(ctx context.Context, cfg Config, prov *FunrunProvider, log *slog.Logger) error {
-	logs.InitLogs()
-	defer logs.FlushLogs()
 	base := &cmd.AdapterBase{Name: "bigbrain-custom-metrics"}
 	base.WithCustomMetrics(prov)
 	args := []string{

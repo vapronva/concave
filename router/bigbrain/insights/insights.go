@@ -3,7 +3,6 @@ package insights
 import (
 	"encoding/json"
 	"errors"
-	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -17,7 +16,6 @@ const (
 	bytesReadLimit             = 16 * 1024 * 1024
 	rootComponent              = "-root-component-"
 	groupSep                   = "\x1f"
-	defaultRingCap             = 50_000
 	maxRecentPerGroup          = 50
 	inclusiveEndHours          = 24
 	occKeyPartsCount           = 3
@@ -40,8 +38,6 @@ const (
 )
 
 var ErrBadDateRange = errors.New("from must be on or before to")
-
-var dateRE = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
 
 type Row struct {
 	Deployment           string
@@ -78,9 +74,6 @@ type deploymentRows struct {
 }
 
 func New(ringCap int) *Insights {
-	if ringCap <= 0 {
-		ringCap = defaultRingCap
-	}
 	return &Insights{mem: make(map[string]*deploymentRows), cap: ringCap}
 }
 
@@ -136,9 +129,6 @@ func (i *Insights) rows(deployment string, fromMs, toMs int64) []Row {
 }
 
 func (i *Insights) Query(deployment, fromDate, toDate string) ([][]any, error) {
-	if !dateRE.MatchString(fromDate) || !dateRE.MatchString(toDate) {
-		return nil, ErrBadDateRange
-	}
 	from, err := time.Parse("2006-01-02", fromDate)
 	if err != nil {
 		return nil, ErrBadDateRange

@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"git.horse/vapronva/concave/router/bigbrain/election"
 	"git.horse/vapronva/concave/router/bigbrain/registry"
 )
 
@@ -40,9 +41,10 @@ func TestElectionFlags_ExplicitZeroAndUnsetEnv(t *testing.T) {
 	if cfg.FailbackEnabled == nil || *cfg.FailbackEnabled {
 		t.Fatalf("explicit false env must reach the config, got %v", cfg.FailbackEnabled)
 	}
-	if cfg.Interval != nil || cfg.FailbackStability != nil ||
-		cfg.FailbackWarmthLagNs != nil || cfg.UnreachableLeaderGrace != nil {
-		t.Fatalf("unset envs must leave fields nil for withDefaults to fill, got %+v", cfg)
+	if *cfg.Interval != election.DefaultInterval || *cfg.FailbackStability != election.DefaultFailbackStability ||
+		*cfg.FailbackWarmthLagNs != election.DefaultFailbackWarmthLagNs ||
+		*cfg.UnreachableLeaderGrace != election.DefaultUnreachableLeaderGrace {
+		t.Fatalf("unset envs must yield the election defaults, got %+v", cfg)
 	}
 }
 

@@ -77,18 +77,16 @@ func pickLeader(claims []observation, incumbent string) observation {
 			best = o
 		}
 	}
-	for _, o := range claims {
-		if o.be.Pod != incumbent {
-			continue
-		}
-		bestLease, bestHasLease := leaseOf(best)
-		incumbentLease, incumbentHasLease := leaseOf(o)
-		if bestHasLease && (!incumbentHasLease || incumbentLease < bestLease) {
-			break
-		}
-		return o
+	i := slices.IndexFunc(claims, func(o observation) bool { return o.be.Pod == incumbent })
+	if i < 0 {
+		return best
 	}
-	return best
+	bestLease, bestHasLease := leaseOf(best)
+	incumbentLease, incumbentHasLease := leaseOf(claims[i])
+	if bestHasLease && (!incumbentHasLease || incumbentLease < bestLease) {
+		return best
+	}
+	return claims[i]
 }
 
 func betterLeader(a, b observation) bool {

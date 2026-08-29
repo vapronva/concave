@@ -45,7 +45,7 @@ func main() {
 
 func run() int {
 	addr := flag.String("addr", env("BIGBRAIN_ADDR", defaultAddr), "HTTP listen address")
-	kubeconfig := flag.String("kubeconfig", env("KUBECONFIG", ""), "path to kubeconfig (empty is in-cluster)")
+	kubeconfig := flag.String("kubeconfig", "", "path to kubeconfig (empty is in-cluster; $KUBECONFIG is honored)")
 	labelPrefix := flag.String(
 		"label-prefix",
 		env("BIGBRAIN_LABEL_PREFIX", k8sclient.DefaultLabelPrefix),
@@ -57,8 +57,7 @@ func run() int {
 		"comma-separated name=namespace pairs to register at boot (e.g., convex-dev=convex-dev,convex-prod=convex-prod)",
 	)
 	electionCfg := electionFlags(flag.CommandLine)
-	ringCapDefault, _ := envInt("INSIGHTS_RING_CAP", defaultInsightsRingCap)
-	insightsRingCap := flag.Int("insights-ring-cap", ringCapDefault,
+	insightsRingCap := flag.Int("insights-ring-cap", envInt("INSIGHTS_RING_CAP", defaultInsightsRingCap),
 		"in-memory insights ring-buffer capacity (rows retained per deployment)")
 	flag.Parse()
 	log := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -95,8 +94,8 @@ func run() int {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	ctrlDone := runController(ctx, ctrl)
 	metricsDone, apiserverErr := startMetricsAPIServer(ctx, stop, k8s, reg, *labelPrefix, log)
+	ctrlDone := runController(ctx, ctrl)
 	serveErr := make(chan error, 1)
 	go func() {
 		log.Info("bigbrain: listening", "addr", *addr)
@@ -123,55 +122,43 @@ func run() int {
 }
 
 func electionFlags(fs *flag.FlagSet) func() election.Config {
-	intervalDefault, intervalSet := envDuration("BIGBRAIN_INTERVAL", election.DefaultInterval)
-	interval := fs.Duration("interval", intervalDefault, "reconcile interval")
-	debounceDefault, debounceSet := envInt("BIGBRAIN_PROMOTE_DEBOUNCE", election.DefaultPromoteDebounce)
-	debounce := fs.Int("promote-debounce", debounceDefault, "leaderless polls before promoting")
-	emptyDefault, emptySet := envInt("BIGBRAIN_EMPTY_DISCOVERY_DEBOUNCE", election.DefaultEmptyDiscoveryDebounce)
-	emptyDebounce := fs.Int("empty-discovery-debounce", emptyDefault,
+	interval := fs.Duration("interval", envDuration("BIGBRAIN_INTERVAL", election.DefaultInterval),
+		"reconcile interval")
+	debounce := fs.Int("promote-debounce", envInt("BIGBRAIN_PROMOTE_DEBOUNCE", election.DefaultPromoteDebounce),
+		"leaderless polls before promoting")
+	emptyDebounce := fs.Int("empty-discovery-debounce",
+		envInt("BIGBRAIN_EMPTY_DISCOVERY_DEBOUNCE", election.DefaultEmptyDiscoveryDebounce),
 		"consecutive empty discovery results before publishing leaderless")
-	fbEnabledDefault, fbEnabledSet := envBool("BIGBRAIN_FAILBACK_ENABLED", true)
-	failbackEnabled := fs.Bool("failback-enabled", fbEnabledDefault,
+	failbackEnabled := fs.Bool("failback-enabled", envBool("BIGBRAIN_FAILBACK_ENABLED", true),
 		"fail back to a recovered higher-priority pod (the primary) once it is warm and stable")
-	fbStabilityDefault, fbStabilitySet := envDuration("BIGBRAIN_FAILBACK_STABILITY", election.DefaultFailbackStability)
-	failbackStability := fs.Duration("failback-stability", fbStabilityDefault,
+	failbackStability := fs.Duration("failback-stability",
+		envDuration("BIGBRAIN_FAILBACK_STABILITY", election.DefaultFailbackStability),
 		"how long the higher-priority pod must stay warm and stable before failback")
-	fbWarmthDefault, fbWarmthSet := envUint64("BIGBRAIN_FAILBACK_WARMTH_LAG", election.DefaultFailbackWarmthLagNs)
-	failbackWarmthLag := fs.Uint64("failback-warmth-lag", fbWarmthDefault,
+	failbackWarmthLag := fs.Uint64("failback-warmth-lag",
+		envUint64("BIGBRAIN_FAILBACK_WARMTH_LAG", election.DefaultFailbackWarmthLagNs),
 		"max latest_ts lag for the candidate to count as warm/caught-up")
-	graceDefault, graceSet := envDuration("BIGBRAIN_UNREACHABLE_LEADER_GRACE", election.DefaultUnreachableLeaderGrace)
-	unreachableGrace := fs.Duration("unreachable-leader-grace", graceDefault,
+	unreachableGrace := fs.Duration("unreachable-leader-grace",
+		envDuration("BIGBRAIN_UNREACHABLE_LEADER_GRACE", election.DefaultUnreachableLeaderGrace),
 		"how long an unreachable incumbent keeps its lease before being treated as gone")
-	leaseGraceDefault, leaseGraceSet := envDuration(
-		"BIGBRAIN_LEASE_UNVERIFIED_GRACE", election.DefaultLeaseUnverifiedGrace,
-	)
-	leaseUnverifiedGrace := fs.Duration("lease-unverified-grace", leaseGraceDefault,
+	leaseUnverifiedGrace := fs.Duration("lease-unverified-grace",
+		envDuration("BIGBRAIN_LEASE_UNVERIFIED_GRACE", election.DefaultLeaseUnverifiedGrace),
 		"how long a reachable leader may fail to verify its own lease before losing its claim (0 disables)")
-	actuationDefault, actuationSet := envDuration("BIGBRAIN_ACTUATION_TIMEOUT", election.DefaultActuationTimeout)
-	actuationTimeout := fs.Duration("actuation-timeout", actuationDefault,
+	actuationTimeout := fs.Duration("actuation-timeout",
+		envDuration("BIGBRAIN_ACTUATION_TIMEOUT", election.DefaultActuationTimeout),
 		"budget for a single promote/demote call; each pod in a batch gets its own")
 	return func() election.Config {
-		passed := make(map[string]bool)
-		fs.Visit(func(f *flag.Flag) { passed[f.Name] = true })
 		return election.Config{
-			Interval:               knob(intervalSet, "interval", passed, interval),
-			PromoteDebounce:        knob(debounceSet, "promote-debounce", passed, debounce),
-			EmptyDiscoveryDebounce: knob(emptySet, "empty-discovery-debounce", passed, emptyDebounce),
-			FailbackEnabled:        knob(fbEnabledSet, "failback-enabled", passed, failbackEnabled),
-			FailbackStability:      knob(fbStabilitySet, "failback-stability", passed, failbackStability),
-			FailbackWarmthLagNs:    knob(fbWarmthSet, "failback-warmth-lag", passed, failbackWarmthLag),
-			UnreachableLeaderGrace: knob(graceSet, "unreachable-leader-grace", passed, unreachableGrace),
-			LeaseUnverifiedGrace:   knob(leaseGraceSet, "lease-unverified-grace", passed, leaseUnverifiedGrace),
-			ActuationTimeout:       knob(actuationSet, "actuation-timeout", passed, actuationTimeout),
+			Interval:               interval,
+			PromoteDebounce:        debounce,
+			EmptyDiscoveryDebounce: emptyDebounce,
+			FailbackEnabled:        failbackEnabled,
+			FailbackStability:      failbackStability,
+			FailbackWarmthLagNs:    failbackWarmthLag,
+			UnreachableLeaderGrace: unreachableGrace,
+			LeaseUnverifiedGrace:   leaseUnverifiedGrace,
+			ActuationTimeout:       actuationTimeout,
 		}
 	}
-}
-
-func knob[T any](envSet bool, name string, passed map[string]bool, v *T) *T {
-	if envSet || passed[name] {
-		return v
-	}
-	return nil
 }
 
 func buildRegistry(
@@ -261,7 +248,7 @@ func startMetricsAPIServer(
 	labelPrefix string,
 	log *slog.Logger,
 ) (<-chan struct{}, <-chan error) {
-	if enabled, _ := envBool("BIGBRAIN_METRICS_APISERVER_ENABLED", false); !enabled {
+	if !envBool("BIGBRAIN_METRICS_APISERVER_ENABLED", false) {
 		return nil, nil
 	}
 	prov := apiserver.NewProvider()
@@ -278,11 +265,11 @@ func startMetricsAPIServer(
 		seen[ns] = struct{}{}
 		namespaces = append(namespaces, ns)
 	}
-	scrapeInterval, _ := envDuration("BIGBRAIN_METRICS_SCRAPE_INTERVAL", defaultMetricsScrapeInterval)
+	scrapeInterval := envDuration("BIGBRAIN_METRICS_SCRAPE_INTERVAL", defaultMetricsScrapeInterval)
 	if scrapeInterval <= 0 {
 		badEnv("BIGBRAIN_METRICS_SCRAPE_INTERVAL", scrapeInterval.String(), errors.New("must be > 0"))
 	}
-	securePort, _ := envInt("BIGBRAIN_METRICS_APISERVER_PORT", defaultMetricsAPIServerPort)
+	securePort := envInt("BIGBRAIN_METRICS_APISERVER_PORT", defaultMetricsAPIServerPort)
 	if securePort < 1 || securePort > 65535 {
 		badEnv("BIGBRAIN_METRICS_APISERVER_PORT", strconv.Itoa(securePort), errors.New("must be in 1..65535"))
 	}
@@ -369,52 +356,52 @@ func env(k, d string) string {
 	return d
 }
 
-func envInt(k string, d int) (int, bool) {
+func envInt(k string, d int) int {
 	v := os.Getenv(k)
 	if v == "" {
-		return d, false
+		return d
 	}
 	n, err := strconv.Atoi(v)
 	if err != nil {
 		badEnv(k, v, err)
 	}
-	return n, true
+	return n
 }
 
-func envDuration(k string, d time.Duration) (time.Duration, bool) {
+func envDuration(k string, d time.Duration) time.Duration {
 	v := os.Getenv(k)
 	if v == "" {
-		return d, false
+		return d
 	}
 	dur, err := time.ParseDuration(v)
 	if err != nil {
 		badEnv(k, v, err)
 	}
-	return dur, true
+	return dur
 }
 
-func envUint64(k string, d uint64) (uint64, bool) {
+func envUint64(k string, d uint64) uint64 {
 	v := os.Getenv(k)
 	if v == "" {
-		return d, false
+		return d
 	}
 	n, err := strconv.ParseUint(v, 10, 64)
 	if err != nil {
 		badEnv(k, v, err)
 	}
-	return n, true
+	return n
 }
 
-func envBool(k string, d bool) (bool, bool) {
+func envBool(k string, d bool) bool {
 	v := os.Getenv(k)
 	if v == "" {
-		return d, false
+		return d
 	}
 	b, err := strconv.ParseBool(v)
 	if err != nil {
 		badEnv(k, v, err)
 	}
-	return b, true
+	return b
 }
 
 func badEnv(k, v string, err error) {

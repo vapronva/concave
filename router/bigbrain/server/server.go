@@ -99,10 +99,6 @@ func (s *Server) handleUsageIngest(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnauthorized, "invalid usage token")
 		return
 	}
-	if _, ok := s.reg.Namespace(body.Deployment); !ok {
-		writeErr(w, http.StatusNotFound, "unknown deployment "+body.Deployment)
-		return
-	}
 	kept := s.ins.Ingest(body.Deployment, body.Events)
 	writeJSON(w, http.StatusOK, map[string]int{"ingested": kept})
 }
@@ -116,10 +112,6 @@ func (s *Server) handleUsageQuery(w http.ResponseWriter, r *http.Request) {
 	}
 	if !s.bearerOK(r, dep) {
 		writeErr(w, http.StatusUnauthorized, "invalid usage token")
-		return
-	}
-	if _, ok := s.reg.Namespace(dep); !ok {
-		writeErr(w, http.StatusNotFound, "unknown deployment "+dep)
 		return
 	}
 	now := time.Now().UTC()
