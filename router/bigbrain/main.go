@@ -45,7 +45,7 @@ func main() {
 
 func run() int {
 	addr := flag.String("addr", env("BIGBRAIN_ADDR", defaultAddr), "HTTP listen address")
-	kubeconfig := flag.String("kubeconfig", "", "path to kubeconfig (empty is in-cluster; $KUBECONFIG is honored)")
+	kubeconfig := flag.String("kubeconfig", env("KUBECONFIG", ""), "path to kubeconfig (empty is in-cluster)")
 	labelPrefix := flag.String(
 		"label-prefix",
 		env("BIGBRAIN_LABEL_PREFIX", k8sclient.DefaultLabelPrefix),

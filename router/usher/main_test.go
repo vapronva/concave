@@ -976,6 +976,27 @@ func TestServeHTTP_RejectsChunkedOversizedBody(t *testing.T) {
 	}
 }
 
+func TestConsumeStream_ConnectFailureNudgesResolve(t *testing.T) {
+	t.Parallel()
+	tr := &tracker{
+		host:         "api.example",
+		resolveCh:    make(chan struct{}, 1),
+		streamClient: &http.Client{Transport: newStreamTransport()},
+		streamIdle:   streamIdleTimeout,
+	}
+	if tr.consumeStream(t.Context(), "http://127.0.0.1:1/leader-stream") {
+		t.Fatal("a refused stream must not count as healthy")
+	}
+	if !tr.streamGate.down.Load() {
+		t.Fatal("a connect failure must flip the stream gate down")
+	}
+	select {
+	case <-tr.resolveCh:
+	default:
+		t.Fatal("a connect failure must queue an immediate resolve")
+	}
+}
+
 func TestValidateConfig_Mono(t *testing.T) {
 	t.Parallel()
 	one := config{Deployments: []deploymentCfg{{Host: "api.example", Name: "api"}}}
