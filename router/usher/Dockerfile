@@ -23,8 +23,7 @@ COPY *.go ./
 
 RUN if [ -n "$MIRROR_GO_URL" ]; then go env -w GOPROXY="${MIRROR_GO_URL%/}|https://proxy.golang.org,direct"; fi
 
-RUN CGO_ENABLED=0 go build -ldflags="-s -w" -trimpath -o /usher . && \
-    chmod +x /usher
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -trimpath -o /usher .
 
 FROM docker.io/library/alpine:3.24
 
@@ -41,7 +40,5 @@ COPY --from=build /usher /usher
 EXPOSE 8080
 
 USER 65532:65532
-
-HEALTHCHECK --interval=10s --timeout=3s --retries=3 CMD wget --quiet --spider http://127.0.0.1:8080/usher/healthz || exit 1
 
 ENTRYPOINT ["/usher"]

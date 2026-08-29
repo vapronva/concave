@@ -242,7 +242,7 @@ func (t *tracker) currentLeader(site bool) *httputil.ReverseProxy {
 
 func (t *tracker) resolveOnce(ctx context.Context) {
 	defer t.resolved.Store(true)
-	lr, hasLeader, err := t.queryBigbrain(ctx)
+	lr, err := t.queryBigbrain(ctx)
 	if err != nil {
 		if !errors.Is(ctx.Err(), context.Canceled) && t.pollGate.fail() {
 			log.Printf("usher: %s leader poll failed: %v", t.host, err)
@@ -252,43 +252,35 @@ func (t *tracker) resolveOnce(ctx context.Context) {
 	if t.pollGate.ok() {
 		log.Printf("usher: %s leader poll recovered", t.host)
 	}
-	if !hasLeader {
-		t.applyLeader("", lr.Seq, lr.Epoch)
-		return
-	}
 	t.applyLeader(lr.LeaderURL, lr.Seq, lr.Epoch)
 }
 
-func (t *tracker) queryBigbrain(ctx context.Context) (leaderResponse, bool, error) {
+func (t *tracker) queryBigbrain(ctx context.Context) (leaderResponse, error) {
 	u := strings.TrimRight(t.bigbrainURL, "/") + "/registry/deployments/" + t.name + "/leader"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
-		return leaderResponse{}, false, err
+		return leaderResponse{}, err
 	}
 	resp, err := t.client.Do(req) //nolint:bodyclose // drainClose drains and closes the body
 	if err != nil {
-		return leaderResponse{}, false, err
+		return leaderResponse{}, err
 	}
 	defer drainClose(resp.Body)
-	if resp.StatusCode == http.StatusServiceUnavailable {
-		var lr leaderResponse
-		if err = json.NewDecoder(io.LimitReader(resp.Body, bodyReadLimit)).Decode(&lr); err != nil {
-			return leaderResponse{}, false, err
-		}
-		if lr.Epoch == 0 {
-			return leaderResponse{}, false, errors.New("bigbrain leader query: 503 without epoch is not authoritative")
-		}
-		lr.LeaderURL = ""
-		return lr, false, nil
-	}
-	if resp.StatusCode != http.StatusOK {
-		return leaderResponse{}, false, fmt.Errorf("bigbrain leader query: unexpected status %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusServiceUnavailable {
+		return leaderResponse{}, fmt.Errorf("bigbrain leader query: unexpected status %d", resp.StatusCode)
 	}
 	var lr leaderResponse
 	if err = json.NewDecoder(io.LimitReader(resp.Body, bodyReadLimit)).Decode(&lr); err != nil {
-		return leaderResponse{}, false, err
+		return leaderResponse{}, err
 	}
-	return lr, lr.LeaderURL != "", nil
+	if resp.StatusCode == http.StatusOK {
+		return lr, nil
+	}
+	if lr.Epoch == 0 {
+		return leaderResponse{}, errors.New("bigbrain leader query: 503 without epoch is not authoritative")
+	}
+	lr.LeaderURL = ""
+	return lr, nil
 }
 
 func (t *tracker) streamBigbrain(ctx context.Context) {
@@ -317,19 +309,17 @@ func (t *tracker) streamBigbrain(ctx context.Context) {
 func (t *tracker) consumeStream(ctx context.Context, u string) bool {
 	started := time.Now()
 	idle := t.streamIdle
-	if idle <= 0 {
-		idle = streamIdleTimeout
-	}
 	sctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	resp, err := t.openStream(sctx, u) //nolint:bodyclose // drainClose drains and closes the body
+	resp, err := t.openStream(sctx, u)
 	if err != nil {
 		if ctx.Err() == nil && t.streamGate.fail() {
 			log.Printf("usher: %s leader-stream connect failed: %v", t.host, err)
+			t.nudgeResolve()
 		}
 		return false
 	}
-	defer drainClose(resp.Body)
+	defer func() { _ = resp.Body.Close() }()
 	if t.streamGate.ok() {
 		log.Printf("usher: %s leader-stream connected", t.host)
 	}
@@ -444,14 +434,10 @@ func startTracker(
 	streamIdle time.Duration,
 	d deploymentCfg,
 ) *tracker {
-	name := d.Name
-	if name == "" {
-		name = firstLabel(d.Host)
-	}
 	t := &tracker{
 		host:           d.Host,
 		siteHost:       d.SiteHost,
-		name:           name,
+		name:           d.Name,
 		bigbrainURL:    bigbrainURL,
 		maxBodyBytes:   maxBodyBytes,
 		streamIdle:     streamIdle,
@@ -462,7 +448,7 @@ func startTracker(
 	}
 	go t.resolveLoop(ctx)
 	go t.streamBigbrain(ctx)
-	log.Printf("usher: configured host=%s siteHost=%q name=%s bigbrain=%q", d.Host, d.SiteHost, name, bigbrainURL)
+	log.Printf("usher: configured host=%s siteHost=%q name=%s bigbrain=%q", d.Host, d.SiteHost, d.Name, bigbrainURL)
 	return t
 }
 
@@ -520,16 +506,7 @@ func newStreamTransport() *http.Transport {
 	return tr
 }
 
-func newMux(routes map[string]route, monoHost string) http.Handler {
-	seen := make(map[*tracker]struct{}, len(routes))
-	trackers := make([]*tracker, 0, len(routes))
-	for _, rt := range routes {
-		if _, dup := seen[rt.tracker]; dup {
-			continue
-		}
-		seen[rt.tracker] = struct{}{}
-		trackers = append(trackers, rt.tracker)
-	}
+func newMux(routes map[string]route, trackers []*tracker, monoHost string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		host := strings.ToLower(stripPort(r.Host))
 		rt, ok := routes[host]
@@ -570,8 +547,8 @@ func serveProbe(w http.ResponseWriter, r *http.Request, trackers []*tracker) {
 }
 
 func main() {
-	cfgPath := flag.String("config", env("USHER_CONFIG", "/etc/usher/config.json"), "config file path")
-	addr := flag.String("addr", env("USHER_ADDR", ":8080"), "listen address")
+	cfgPath := flag.String("config", "/etc/usher/config.json", "config file path")
+	addr := flag.String("addr", ":8080", "listen address")
 	bigbrainURL := flag.String(
 		"bigbrain",
 		env("USHER_BIGBRAIN_URL", ""),
@@ -579,7 +556,7 @@ func main() {
 	)
 	mono := flag.Bool(
 		"mono",
-		envBool("USHER_MONO"),
+		false,
 		"route every request to the single configured deployment regardless of Host (requires exactly one deployment)",
 	)
 	flag.Parse()
@@ -601,10 +578,6 @@ func main() {
 	if connIdle == 0 {
 		log.Print("usher: connection idle watchdog disabled (USHER_CONN_IDLE_TIMEOUT=0)")
 	}
-	streamIdle, err := parseStreamIdle(os.Getenv("USHER_STREAM_IDLE_TIMEOUT"))
-	if err != nil {
-		log.Fatalf("invalid USHER_STREAM_IDLE_TIMEOUT: %v", err)
-	}
 	maxBody, err := parseMaxBodyBytes(os.Getenv("USHER_MAX_BODY_BYTES"))
 	if err != nil {
 		log.Fatalf("invalid USHER_MAX_BODY_BYTES: %v", err)
@@ -617,7 +590,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("usher: listen %s: %v", *addr, err)
 	}
-	os.Exit(run(cfg, *addr, *bigbrainURL, connIdle, streamIdle, maxBody, *mono, rawLn))
+	os.Exit(run(cfg, *addr, *bigbrainURL, connIdle, streamIdleTimeout, maxBody, *mono, rawLn))
 }
 
 func run(
@@ -630,11 +603,13 @@ func run(
 ) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	client := &http.Client{Timeout: httpClientTimeout}
+	client := &http.Client{Timeout: httpClientTimeout, Transport: newStreamTransport()}
 	routes := make(map[string]route, len(cfg.Deployments)*routesPerDeployment)
+	trackers := make([]*tracker, 0, len(cfg.Deployments))
 	var monoHost string
 	for _, d := range cfg.Deployments {
 		t := startTracker(ctx, client, bigbrainURL, maxBody, streamIdle, d)
+		trackers = append(trackers, t)
 		routes[strings.ToLower(d.Host)] = route{tracker: t}
 		if d.SiteHost != "" {
 			routes[strings.ToLower(d.SiteHost)] = route{tracker: t, site: true}
@@ -646,7 +621,7 @@ func run(
 	log.Printf("usher listening on %s, %d deployment(s), bigbrain=%q", addr, len(cfg.Deployments), bigbrainURL)
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           newMux(routes, monoHost),
+		Handler:           newMux(routes, trackers, monoHost),
 		ReadHeaderTimeout: readHeaderTimeout,
 		IdleTimeout:       idleTimeout,
 		MaxHeaderBytes:    maxHeaderBytes,
@@ -771,17 +746,6 @@ func validateConfig(cfg config, bigbrainURL string, mono bool) error {
 	return validateDeployments(cfg.Deployments)
 }
 
-func resolvedDeploymentName(d deploymentCfg) (string, error) {
-	name := d.Name
-	if name == "" {
-		name = firstLabel(d.Host)
-	}
-	if name == "" || url.PathEscape(name) != name {
-		return "", fmt.Errorf("deployment %s: name %q must be a non-empty URL path segment", d.Host, name)
-	}
-	return name, nil
-}
-
 func validateDeployments(deployments []deploymentCfg) error {
 	hosts := make(map[string]struct{}, len(deployments)*routesPerDeployment)
 	names := make(map[string]string, len(deployments))
@@ -789,9 +753,9 @@ func validateDeployments(deployments []deploymentCfg) error {
 		if d.Host == "" {
 			return errors.New("deployment host must not be empty")
 		}
-		name, err := resolvedDeploymentName(d)
-		if err != nil {
-			return err
+		name := d.Name
+		if name == "" || url.PathEscape(name) != name {
+			return fmt.Errorf("deployment %s: name %q must be a non-empty URL path segment", d.Host, name)
 		}
 		if prev, dup := names[name]; dup {
 			return fmt.Errorf("deployments %q and %q resolve to the same name %q", prev, d.Host, name)
@@ -801,10 +765,10 @@ func validateDeployments(deployments []deploymentCfg) error {
 			if host == "" {
 				continue
 			}
-			host = strings.ToLower(host)
-			if _, _, portErr := net.SplitHostPort(host); portErr == nil {
-				return fmt.Errorf("deployment host %q must not include a port", host)
+			if err := validateHost(host); err != nil {
+				return err
 			}
+			host = strings.ToLower(host)
 			if _, exists := hosts[host]; exists {
 				return fmt.Errorf("duplicate deployment host %q", host)
 			}
@@ -814,18 +778,14 @@ func validateDeployments(deployments []deploymentCfg) error {
 	return nil
 }
 
-func parseStreamIdle(v string) (time.Duration, error) {
-	if v == "" {
-		return streamIdleTimeout, nil
+func validateHost(host string) error {
+	if host != strings.TrimSpace(host) {
+		return fmt.Errorf("deployment host %q must not have surrounding whitespace", host)
 	}
-	d, err := time.ParseDuration(v)
-	if err != nil {
-		return 0, fmt.Errorf("parse %q: %w", v, err)
+	if _, _, err := net.SplitHostPort(host); err == nil {
+		return fmt.Errorf("deployment host %q must not include a port", host)
 	}
-	if d <= 0 {
-		return 0, fmt.Errorf("must be > 0, got %s", d)
-	}
-	return d, nil
+	return nil
 }
 
 func parseConnIdle(v string) (time.Duration, error) {
@@ -863,24 +823,11 @@ func env(k, d string) string {
 	return d
 }
 
-func envBool(k string) bool {
-	b, _ := strconv.ParseBool(os.Getenv(k))
-	return b
-}
-
 func stripPort(host string) string {
 	if h, _, err := net.SplitHostPort(host); err == nil {
 		return h
 	}
-	return strings.TrimSpace(host)
-}
-
-func firstLabel(host string) string {
-	h := stripPort(host)
-	if before, _, ok := strings.Cut(h, "."); ok {
-		return before
-	}
-	return h
+	return host
 }
 
 func drainClose(rc io.ReadCloser) {

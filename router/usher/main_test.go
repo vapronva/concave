@@ -423,7 +423,7 @@ func TestParseMaxBodyBytes(t *testing.T) {
 
 func TestValidateConfig(t *testing.T) {
 	t.Parallel()
-	cfg := config{Deployments: []deploymentCfg{{Host: "api.example"}}}
+	cfg := config{Deployments: []deploymentCfg{{Host: "api.example", Name: "api"}}}
 	if err := validateConfig(cfg, "", false); err == nil {
 		t.Fatal("missing bigbrain URL must fail")
 	}
@@ -431,8 +431,8 @@ func TestValidateConfig(t *testing.T) {
 		t.Fatalf("valid config rejected: %v", err)
 	}
 	dup := config{Deployments: []deploymentCfg{
-		{Host: "api.example", SiteHost: "site.example"},
-		{Host: "API.EXAMPLE"},
+		{Host: "api.example", SiteHost: "site.example", Name: "a"},
+		{Host: "API.EXAMPLE", Name: "b"},
 	}}
 	dupErr := validateConfig(dup, "http://bigbrain:8081", false)
 	if dupErr == nil || !strings.Contains(dupErr.Error(), "api.example") {
@@ -444,21 +444,23 @@ func TestValidateConfig(t *testing.T) {
 			t.Errorf("name %q must be rejected at boot", name)
 		}
 	}
-	emptyDerived := config{Deployments: []deploymentCfg{{Host: ".example"}}}
-	if err := validateConfig(emptyDerived, "http://bigbrain:8081", false); err == nil {
-		t.Fatal("host yielding an empty derived name must be rejected")
+	unnamed := config{Deployments: []deploymentCfg{{Host: "api.example"}}}
+	if err := validateConfig(unnamed, "http://bigbrain:8081", false); err == nil {
+		t.Fatal("a deployment without a name must be rejected")
 	}
-	ported := config{Deployments: []deploymentCfg{{Host: "api.example:8443"}}}
+	spaced := config{Deployments: []deploymentCfg{{Host: " api.example", Name: "api"}}}
+	if err := validateConfig(spaced, "http://bigbrain:8081", false); err == nil {
+		t.Fatal("host with surrounding whitespace must be rejected at boot")
+	}
+	ported := config{Deployments: []deploymentCfg{{Host: "api.example:8443", Name: "api"}}}
 	if err := validateConfig(ported, "http://bigbrain:8081", false); err == nil {
 		t.Fatal("ported host must be rejected at boot")
 	}
-	portedSite := config{Deployments: []deploymentCfg{{Host: "api.example", SiteHost: "site.example:8443"}}}
+	portedSite := config{Deployments: []deploymentCfg{
+		{Host: "api.example", SiteHost: "site.example:8443", Name: "api"},
+	}}
 	if err := validateConfig(portedSite, "http://bigbrain:8081", false); err == nil {
 		t.Fatal("ported siteHost must be rejected at boot")
-	}
-	derived := config{Deployments: []deploymentCfg{{Host: "team-app.example.com"}}}
-	if err := validateConfig(derived, "http://bigbrain:8081", false); err != nil {
-		t.Fatalf("derived name rejected: %v", err)
 	}
 	dupName := config{Deployments: []deploymentCfg{
 		{Host: "api.a.example", Name: "convex"},
@@ -467,13 +469,6 @@ func TestValidateConfig(t *testing.T) {
 	dupNameErr := validateConfig(dupName, "http://bigbrain:8081", false)
 	if dupNameErr == nil || !strings.Contains(dupNameErr.Error(), `"convex"`) {
 		t.Fatalf("duplicate-name error must name the colliding name, got %v", dupNameErr)
-	}
-	dupDerived := config{Deployments: []deploymentCfg{
-		{Host: "convex.a.example"},
-		{Host: "convex.b.example"},
-	}}
-	if err := validateConfig(dupDerived, "http://bigbrain:8081", false); err == nil {
-		t.Fatal("hosts deriving the same name must be rejected at boot")
 	}
 }
 
@@ -674,6 +669,7 @@ func TestLeaderSeqOrdering_AcrossPollAndStream(t *testing.T) {
 	tr := &tracker{
 		name:           "test",
 		bigbrainURL:    poll.URL,
+		streamIdle:     streamIdleTimeout,
 		client:         &http.Client{},
 		streamClient:   &http.Client{},
 		proxyTransport: newProxyTransport(),
@@ -827,7 +823,7 @@ func TestNewMux_HealthzOnlyOnUnknownHosts(t *testing.T) {
 	if !tr.setLeader(upstream.URL) {
 		t.Fatal("setLeader should install proxy")
 	}
-	mux := newMux(map[string]route{"api.example": {tracker: tr}}, "")
+	mux := newMux(map[string]route{"api.example": {tracker: tr}}, []*tracker{tr}, "")
 	edge := httptest.NewServer(mux)
 	defer edge.Close()
 	resp, err := http.Get(edge.URL + "/usher/healthz")
@@ -861,7 +857,7 @@ func TestNewMux_HealthzOnlyOnUnknownHosts(t *testing.T) {
 func TestNewMux_ReadyzGatesOnFirstResolve(t *testing.T) {
 	t.Parallel()
 	tr := &tracker{host: "api.example", resolveCh: make(chan struct{}, 1), proxyTransport: newProxyTransport()}
-	mux := newMux(map[string]route{"api.example": {tracker: tr}}, "")
+	mux := newMux(map[string]route{"api.example": {tracker: tr}}, []*tracker{tr}, "")
 	probe := func(path string) int {
 		rr := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet, path, nil)
@@ -884,7 +880,7 @@ func TestNewMux_ReadyzGatesOnFirstResolve(t *testing.T) {
 func TestNewMux_MethodAndHostGates(t *testing.T) {
 	t.Parallel()
 	tr := &tracker{host: "api.example", resolveCh: make(chan struct{}, 1), proxyTransport: newProxyTransport()}
-	mux := newMux(map[string]route{"api.example": {tracker: tr}}, "")
+	mux := newMux(map[string]route{"api.example": {tracker: tr}}, []*tracker{tr}, "")
 	cases := []struct {
 		method, host, path string
 		want               int
@@ -918,7 +914,7 @@ func TestNewMux_HostRoutingPreservesPublicHost(t *testing.T) {
 	if !tr.setLeader(upstream.URL) {
 		t.Fatal("setLeader should install proxy")
 	}
-	mux := newMux(map[string]route{"api.example": {tracker: tr}}, "")
+	mux := newMux(map[string]route{"api.example": {tracker: tr}}, []*tracker{tr}, "")
 	edge := httptest.NewServer(mux)
 	defer edge.Close()
 	req, err := http.NewRequest(http.MethodGet, edge.URL+"/api/query", nil)
@@ -982,11 +978,11 @@ func TestServeHTTP_RejectsChunkedOversizedBody(t *testing.T) {
 
 func TestValidateConfig_Mono(t *testing.T) {
 	t.Parallel()
-	one := config{Deployments: []deploymentCfg{{Host: "api.example"}}}
+	one := config{Deployments: []deploymentCfg{{Host: "api.example", Name: "api"}}}
 	if err := validateConfig(one, "http://bigbrain:8081", true); err != nil {
 		t.Fatalf("mono with exactly one deployment must pass: %v", err)
 	}
-	two := config{Deployments: []deploymentCfg{{Host: "a.example"}, {Host: "b.example"}}}
+	two := config{Deployments: []deploymentCfg{{Host: "a.example", Name: "a"}, {Host: "b.example", Name: "b"}}}
 	if err := validateConfig(two, "http://bigbrain:8081", true); err == nil {
 		t.Fatal("mono with two deployments must be rejected")
 	}
@@ -1008,7 +1004,7 @@ func TestNewMux_MonoRoutesUnknownHostToTheDeployment(t *testing.T) {
 	if !tr.setLeader(upstream.URL) {
 		t.Fatal("setLeader should install proxy")
 	}
-	mux := newMux(map[string]route{"api.example": {tracker: tr}}, "api.example")
+	mux := newMux(map[string]route{"api.example": {tracker: tr}}, []*tracker{tr}, "api.example")
 	edge := httptest.NewServer(mux)
 	defer edge.Close()
 	do := func(method, path, host string) (int, string) {
@@ -1070,7 +1066,7 @@ func TestNewMux_MonoExactSiteHostStillRoutesToSiteProxy(t *testing.T) {
 		"api.example":  {tracker: tr},
 		"site.example": {tracker: tr, site: true},
 	}
-	mux := newMux(routes, "api.example")
+	mux := newMux(routes, []*tracker{tr}, "api.example")
 	edge := httptest.NewServer(mux)
 	defer edge.Close()
 	req, err := http.NewRequest(http.MethodGet, edge.URL+"/myaction", nil)
