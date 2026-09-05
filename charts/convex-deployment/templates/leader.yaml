@@ -29,6 +29,6 @@ spec:
       terminationGracePeriodSeconds: 40
       automountServiceAccountToken: false
       containers:
-        {{- include "convex.backendContainer" (dict "ctx" . "role" "leader" "extraPorts" (list (dict "name" "site" "containerPort" 3211)) "probeInitialDelaySeconds" 10 "resourcesKey" "leader") | nindent 8 }}
+        {{- include "convex.backendContainer" (dict "ctx" . "role" "leader" "probeInitialDelaySeconds" 10 "resourcesKey" "leader") | nindent 8 }}
       volumes:
         {{- include "convex.dataVolume" . | nindent 8 }}

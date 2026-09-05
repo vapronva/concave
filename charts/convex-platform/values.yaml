@@ -4,9 +4,6 @@ labelPrefix: convex
 nameOverride: ""
 fullnameOverride: ""
 
-namespace:
-  system: convex-system
-
 deployments: []
 
 image:

@@ -21,7 +21,7 @@ kind: ConfigMap
 
 metadata:
   name: {{ include "convex.usherName" . }}-config
-  namespace: {{ .Values.namespace.system }}
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "convex.componentLabels" (dict "ctx" . "component" "usher") | nindent 4 }}
 
@@ -35,7 +35,7 @@ kind: Deployment
 
 metadata:
   name: {{ include "convex.usherName" . }}
-  namespace: {{ .Values.namespace.system }}
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "convex.componentLabels" (dict "ctx" . "component" "usher") | nindent 4 }}
 
@@ -82,7 +82,7 @@ spec:
             {{- end }}
           {{- $bbUrl := $u.bigbrainUrl }}
           {{- if and (not $bbUrl) .Values.bigbrain.enabled }}
-          {{- $bbUrl = printf "http://%s.%s.svc.cluster.local:%s" (include "convex.bigbrainName" .) .Values.namespace.system (include "convex.listenPort" .Values.bigbrain.listen) }}
+          {{- $bbUrl = printf "http://%s.%s.svc.cluster.local:%s" (include "convex.bigbrainName" .) .Release.Namespace (include "convex.listenPort" .Values.bigbrain.listen) }}
           {{- end }}
           {{- if or $bbUrl $u.extraEnv }}
           env:
@@ -132,7 +132,7 @@ kind: Service
 
 metadata:
   name: usher
-  namespace: {{ .Values.namespace.system }}
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "convex.componentLabels" (dict "ctx" . "component" "usher") | nindent 4 }}
 
@@ -149,7 +149,7 @@ kind: PodDisruptionBudget
 
 metadata:
   name: {{ include "convex.usherName" . }}
-  namespace: {{ .Values.namespace.system }}
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "convex.componentLabels" (dict "ctx" . "component" "usher") | nindent 4 }}
 

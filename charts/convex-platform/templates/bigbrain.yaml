@@ -15,7 +15,7 @@ kind: ServiceAccount
 
 metadata:
   name: {{ include "convex.bigbrainName" . }}
-  namespace: {{ .Values.namespace.system }}
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "convex.componentLabels" (dict "ctx" . "component" "bigbrain") | nindent 4 }}
 
@@ -57,7 +57,7 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: {{ include "convex.bigbrainName" $ }}
-    namespace: {{ $.Values.namespace.system }}
+    namespace: {{ $.Release.Namespace }}
 {{- end }}
 ---
 apiVersion: apps/v1
@@ -65,7 +65,7 @@ kind: Deployment
 
 metadata:
   name: {{ include "convex.bigbrainName" . }}
-  namespace: {{ .Values.namespace.system }}
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "convex.componentLabels" (dict "ctx" . "component" "bigbrain") | nindent 4 }}
 
@@ -96,8 +96,9 @@ spec:
         - name: bigbrain
           image: {{ include "convex-platform.image" (dict "ctx" . "spec" $b.image) }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          args: ["--addr={{ $b.listen }}"]
           env:
+            - name: BIGBRAIN_ADDR
+              value: {{ $b.listen | quote }}
             - name: BIGBRAIN_LABEL_PREFIX
               value: {{ include "convex.labelPrefix" . | quote }}
             - name: BIGBRAIN_DEPLOYMENTS
@@ -184,7 +185,7 @@ kind: Service
 
 metadata:
   name: {{ include "convex.bigbrainName" . }}
-  namespace: {{ .Values.namespace.system }}
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "convex.componentLabels" (dict "ctx" . "component" "bigbrain") | nindent 4 }}
 
@@ -210,7 +211,7 @@ metadata:
 spec:
   service:
     name: {{ include "convex.bigbrainName" . }}
-    namespace: {{ .Values.namespace.system }}
+    namespace: {{ .Release.Namespace }}
     port: {{ $b.metricsApiserver.port }}
   group: custom.metrics.k8s.io
   version: v1beta1
@@ -230,7 +231,7 @@ metadata:
 spec:
   service:
     name: {{ include "convex.bigbrainName" . }}
-    namespace: {{ .Values.namespace.system }}
+    namespace: {{ .Release.Namespace }}
     port: {{ $b.metricsApiserver.port }}
   group: custom.metrics.k8s.io
   version: v1beta2
@@ -255,7 +256,7 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: {{ include "convex.bigbrainName" . }}
-    namespace: {{ .Values.namespace.system }}
+    namespace: {{ .Release.Namespace }}
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -275,7 +276,7 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: {{ include "convex.bigbrainName" . }}
-    namespace: {{ .Values.namespace.system }}
+    namespace: {{ .Release.Namespace }}
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1
