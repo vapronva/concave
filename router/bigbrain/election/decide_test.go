@@ -1,4 +1,3 @@
-//nolint:testpackage // white-box
 package election
 
 import (

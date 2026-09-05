@@ -13,27 +13,15 @@ import (
 )
 
 type Config struct {
-	Interval               *time.Duration
-	PromoteDebounce        *int
-	FailbackEnabled        *bool
-	FailbackStability      *time.Duration
-	FailbackWarmthLagNs    *uint64
-	UnreachableLeaderGrace *time.Duration
-	LeaseUnverifiedGrace   *time.Duration
-	EmptyDiscoveryDebounce *int
-	ActuationTimeout       *time.Duration
-}
-
-type settings struct {
-	interval               time.Duration
-	promoteDebounce        int
-	failbackEnabled        bool
-	failbackStability      time.Duration
-	failbackWarmthLagNs    uint64
-	unreachableLeaderGrace time.Duration
-	leaseUnverifiedGrace   time.Duration
-	emptyDiscoveryDebounce int
-	actuationTimeout       time.Duration
+	Interval               time.Duration
+	PromoteDebounce        int
+	FailbackEnabled        bool
+	FailbackStability      time.Duration
+	FailbackWarmthLagNs    uint64
+	UnreachableLeaderGrace time.Duration
+	LeaseUnverifiedGrace   time.Duration
+	EmptyDiscoveryDebounce int
+	ActuationTimeout       time.Duration
 }
 
 const (
@@ -49,75 +37,47 @@ const (
 	pollTimeout                          = 2 * time.Second
 )
 
+func DefaultConfig() Config {
+	return Config{
+		Interval:               DefaultInterval,
+		PromoteDebounce:        DefaultPromoteDebounce,
+		FailbackEnabled:        true,
+		FailbackStability:      DefaultFailbackStability,
+		FailbackWarmthLagNs:    DefaultFailbackWarmthLagNs,
+		UnreachableLeaderGrace: DefaultUnreachableLeaderGrace,
+		LeaseUnverifiedGrace:   DefaultLeaseUnverifiedGrace,
+		EmptyDiscoveryDebounce: DefaultEmptyDiscoveryDebounce,
+		ActuationTimeout:       DefaultActuationTimeout,
+	}
+}
+
 func (c Config) Validate() error {
-	if c.Interval != nil && *c.Interval <= 0 {
-		return fmt.Errorf("interval must be > 0, got %s", *c.Interval)
+	if c.Interval <= 0 {
+		return fmt.Errorf("interval must be > 0, got %s", c.Interval)
 	}
-	if c.PromoteDebounce != nil && *c.PromoteDebounce < 0 {
-		return fmt.Errorf("promote-debounce must be >= 0, got %d", *c.PromoteDebounce)
+	if c.PromoteDebounce < 0 {
+		return fmt.Errorf("promote-debounce must be >= 0, got %d", c.PromoteDebounce)
 	}
-	if c.FailbackStability != nil && *c.FailbackStability < 0 {
-		return fmt.Errorf("failback-stability must be >= 0, got %s", *c.FailbackStability)
+	if c.FailbackStability < 0 {
+		return fmt.Errorf("failback-stability must be >= 0, got %s", c.FailbackStability)
 	}
-	if c.UnreachableLeaderGrace != nil && *c.UnreachableLeaderGrace < 0 {
-		return fmt.Errorf("unreachable-leader-grace must be >= 0, got %s", *c.UnreachableLeaderGrace)
+	if c.UnreachableLeaderGrace < 0 {
+		return fmt.Errorf("unreachable-leader-grace must be >= 0, got %s", c.UnreachableLeaderGrace)
 	}
-	if c.LeaseUnverifiedGrace != nil && *c.LeaseUnverifiedGrace != 0 && *c.LeaseUnverifiedGrace < time.Second {
-		return fmt.Errorf("lease-unverified-grace must be 0 (disabled) or >= 1s, got %s", *c.LeaseUnverifiedGrace)
+	if c.LeaseUnverifiedGrace != 0 && c.LeaseUnverifiedGrace < time.Second {
+		return fmt.Errorf("lease-unverified-grace must be 0 (disabled) or >= 1s, got %s", c.LeaseUnverifiedGrace)
 	}
-	if c.EmptyDiscoveryDebounce != nil && *c.EmptyDiscoveryDebounce < 0 {
-		return fmt.Errorf("empty-discovery-debounce must be >= 0, got %d", *c.EmptyDiscoveryDebounce)
+	if c.EmptyDiscoveryDebounce < 0 {
+		return fmt.Errorf("empty-discovery-debounce must be >= 0, got %d", c.EmptyDiscoveryDebounce)
 	}
-	if c.ActuationTimeout != nil && *c.ActuationTimeout <= 0 {
-		return fmt.Errorf("actuation-timeout must be > 0, got %s", *c.ActuationTimeout)
+	if c.ActuationTimeout <= 0 {
+		return fmt.Errorf("actuation-timeout must be > 0, got %s", c.ActuationTimeout)
 	}
 	return nil
 }
 
-func (c Config) withDefaults() settings {
-	s := settings{
-		interval:               DefaultInterval,
-		promoteDebounce:        DefaultPromoteDebounce,
-		failbackEnabled:        true,
-		failbackStability:      DefaultFailbackStability,
-		failbackWarmthLagNs:    DefaultFailbackWarmthLagNs,
-		unreachableLeaderGrace: DefaultUnreachableLeaderGrace,
-		leaseUnverifiedGrace:   DefaultLeaseUnverifiedGrace,
-		emptyDiscoveryDebounce: DefaultEmptyDiscoveryDebounce,
-		actuationTimeout:       DefaultActuationTimeout,
-	}
-	if c.Interval != nil {
-		s.interval = *c.Interval
-	}
-	if c.PromoteDebounce != nil {
-		s.promoteDebounce = *c.PromoteDebounce
-	}
-	if c.FailbackEnabled != nil {
-		s.failbackEnabled = *c.FailbackEnabled
-	}
-	if c.FailbackStability != nil {
-		s.failbackStability = *c.FailbackStability
-	}
-	if c.FailbackWarmthLagNs != nil {
-		s.failbackWarmthLagNs = *c.FailbackWarmthLagNs
-	}
-	if c.UnreachableLeaderGrace != nil {
-		s.unreachableLeaderGrace = *c.UnreachableLeaderGrace
-	}
-	if c.LeaseUnverifiedGrace != nil {
-		s.leaseUnverifiedGrace = *c.LeaseUnverifiedGrace
-	}
-	if c.EmptyDiscoveryDebounce != nil {
-		s.emptyDiscoveryDebounce = *c.EmptyDiscoveryDebounce
-	}
-	if c.ActuationTimeout != nil {
-		s.actuationTimeout = *c.ActuationTimeout
-	}
-	return s
-}
-
 type Controller struct {
-	cfg     settings
+	cfg     Config
 	k8s     *k8sclient.Client
 	backend *backend.Client
 	reg     *registry.Registry
@@ -143,7 +103,7 @@ func New(cfg Config, k8s *k8sclient.Client, b *backend.Client, reg *registry.Reg
 		log = slog.Default()
 	}
 	return &Controller{
-		cfg:     cfg.withDefaults(),
+		cfg:     cfg,
 		k8s:     k8s,
 		backend: b,
 		reg:     reg,
@@ -153,17 +113,17 @@ func New(cfg Config, k8s *k8sclient.Client, b *backend.Client, reg *registry.Reg
 }
 
 func (c *Controller) ActuationTimeout() time.Duration {
-	return c.cfg.actuationTimeout
+	return c.cfg.ActuationTimeout
 }
 
 func (c *Controller) Run(ctx context.Context) {
 	c.log.InfoContext(ctx, "election: controller starting",
-		"deployments", len(c.reg.Names()), "interval", c.cfg.interval.String(),
-		"promoteDebounce", c.cfg.promoteDebounce, "emptyDiscoveryDebounce", c.cfg.emptyDiscoveryDebounce,
-		"failbackEnabled", c.cfg.failbackEnabled, "failbackStability", c.cfg.failbackStability.String(),
-		"failbackWarmthLag", c.cfg.failbackWarmthLagNs,
-		"unreachableLeaderGrace", c.cfg.unreachableLeaderGrace.String(),
-		"leaseUnverifiedGrace", c.cfg.leaseUnverifiedGrace.String())
+		"deployments", len(c.reg.Names()), "interval", c.cfg.Interval.String(),
+		"promoteDebounce", c.cfg.PromoteDebounce, "emptyDiscoveryDebounce", c.cfg.EmptyDiscoveryDebounce,
+		"failbackEnabled", c.cfg.FailbackEnabled, "failbackStability", c.cfg.FailbackStability.String(),
+		"failbackWarmthLag", c.cfg.FailbackWarmthLagNs,
+		"unreachableLeaderGrace", c.cfg.UnreachableLeaderGrace.String(),
+		"leaseUnverifiedGrace", c.cfg.LeaseUnverifiedGrace.String())
 	var wg sync.WaitGroup
 	for _, name := range c.reg.Names() {
 		wg.Go(func() {
@@ -177,7 +137,7 @@ func (c *Controller) Run(ctx context.Context) {
 func (c *Controller) runDeployment(ctx context.Context, name string) {
 	c.log.InfoContext(ctx, "election: starting reconcile loop", "deployment", name)
 	defer c.log.InfoContext(ctx, "election: stopping reconcile loop", "deployment", name)
-	tick := time.NewTicker(c.cfg.interval)
+	tick := time.NewTicker(c.cfg.Interval)
 	defer tick.Stop()
 	c.reconcileSafe(ctx, name)
 	for {
@@ -254,11 +214,11 @@ func (c *Controller) reconcile(ctx context.Context, name string) {
 	now := time.Now()
 	dec := decide(obs, decideParams{
 		incumbent:            snap.incumbentPod,
-		leaseUnverifiedGrace: c.cfg.leaseUnverifiedGrace,
+		leaseUnverifiedGrace: c.cfg.LeaseUnverifiedGrace,
 		failback: failbackParams{
-			enabled:         c.cfg.failbackEnabled,
-			stabilityWindow: c.cfg.failbackStability,
-			warmthLagNs:     c.cfg.failbackWarmthLagNs,
+			enabled:         c.cfg.FailbackEnabled,
+			stabilityWindow: c.cfg.FailbackStability,
+			warmthLagNs:     c.cfg.FailbackWarmthLagNs,
 			now:             now,
 			prior:           snap.failback,
 		},
@@ -302,7 +262,7 @@ func (c *Controller) commitState(st *deploymentState, dec decision, emptyList bo
 		if st.incumbentUnreachableSince.IsZero() {
 			st.incumbentUnreachableSince = now
 		}
-		retain = now.Sub(st.incumbentUnreachableSince) < c.cfg.unreachableLeaderGrace
+		retain = now.Sub(st.incumbentUnreachableSince) < c.cfg.UnreachableLeaderGrace
 	} else if !emptyList {
 		st.incumbentUnreachableSince = time.Time{}
 	}

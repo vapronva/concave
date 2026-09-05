@@ -1,10 +1,15 @@
-//nolint:testpackage // white-box
 package election
 
 import (
 	"testing"
 	"time"
 )
+
+func withConfig(mutate func(*Config)) Config {
+	cfg := DefaultConfig()
+	mutate(&cfg)
+	return cfg
+}
 
 func TestConfigValidate(t *testing.T) {
 	t.Parallel()
@@ -13,20 +18,22 @@ func TestConfigValidate(t *testing.T) {
 		cfg  Config
 		ok   bool
 	}{
-		{"empty", Config{}, true},
-		{"zero interval", Config{Interval: new(time.Duration(0))}, false},
-		{"positive interval", Config{Interval: new(time.Second)}, true},
-		{"negative debounce", Config{PromoteDebounce: new(-1)}, false},
-		{"zero debounce", Config{PromoteDebounce: new(0)}, true},
-		{"negative stability", Config{FailbackStability: new(-time.Second)}, false},
-		{"zero stability", Config{FailbackStability: new(time.Duration(0))}, true},
-		{"negative unreachable grace", Config{UnreachableLeaderGrace: new(-time.Second)}, false},
-		{"zero unreachable grace", Config{UnreachableLeaderGrace: new(time.Duration(0))}, true},
-		{"sub-second lease grace rejected", Config{LeaseUnverifiedGrace: new(500 * time.Millisecond)}, false},
-		{"one-second lease grace", Config{LeaseUnverifiedGrace: new(time.Second)}, true},
-		{"zero lease grace disables", Config{LeaseUnverifiedGrace: new(time.Duration(0))}, true},
-		{"negative empty debounce", Config{EmptyDiscoveryDebounce: new(-1)}, false},
-		{"zero actuation timeout", Config{ActuationTimeout: new(time.Duration(0))}, false},
+		{"defaults", DefaultConfig(), true},
+		{"zero interval", withConfig(func(c *Config) { c.Interval = 0 }), false},
+		{"zero debounce", withConfig(func(c *Config) { c.PromoteDebounce = 0 }), true},
+		{"negative debounce", withConfig(func(c *Config) { c.PromoteDebounce = -1 }), false},
+		{"zero stability", withConfig(func(c *Config) { c.FailbackStability = 0 }), true},
+		{"negative stability", withConfig(func(c *Config) { c.FailbackStability = -time.Second }), false},
+		{"zero unreachable grace", withConfig(func(c *Config) { c.UnreachableLeaderGrace = 0 }), true},
+		{"negative unreachable grace", withConfig(func(c *Config) { c.UnreachableLeaderGrace = -time.Second }), false},
+		{
+			"sub-second lease grace rejected",
+			withConfig(func(c *Config) { c.LeaseUnverifiedGrace = 500 * time.Millisecond }),
+			false,
+		},
+		{"zero lease grace disables", withConfig(func(c *Config) { c.LeaseUnverifiedGrace = 0 }), true},
+		{"negative empty debounce", withConfig(func(c *Config) { c.EmptyDiscoveryDebounce = -1 }), false},
+		{"zero actuation timeout", withConfig(func(c *Config) { c.ActuationTimeout = 0 }), false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -42,25 +49,9 @@ func TestConfigValidate(t *testing.T) {
 	}
 }
 
-func TestWithDefaults_NilFillsOnly(t *testing.T) {
-	t.Parallel()
-	s := Config{}.withDefaults()
-	if s.interval != DefaultInterval || s.leaseUnverifiedGrace != DefaultLeaseUnverifiedGrace {
-		t.Fatalf("nil config must yield defaults, got %+v", s)
-	}
-	explicit := Config{
-		PromoteDebounce:      new(0),
-		FailbackStability:    new(time.Duration(0)),
-		LeaseUnverifiedGrace: new(time.Duration(0)),
-	}.withDefaults()
-	if explicit.promoteDebounce != 0 || explicit.failbackStability != 0 || explicit.leaseUnverifiedGrace != 0 {
-		t.Fatalf("explicit zeros must survive withDefaults, got %+v", explicit)
-	}
-}
-
 func TestSetDiscoveryDown_TransitionsLogOnce(t *testing.T) {
 	t.Parallel()
-	c := New(Config{}, nil, nil, nil, nil)
+	c := New(DefaultConfig(), nil, nil, nil, nil)
 	st := &deploymentState{}
 	if !c.setDiscoveryDown(st, true) {
 		t.Fatal("first failure must report a transition")

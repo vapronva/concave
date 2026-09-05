@@ -115,14 +115,15 @@ func (r *Registry) Update(name, leaderPod, leaderURL string) {
 	}
 }
 
-func (r *Registry) Leader(name string) (string, string, uint64, bool) {
+func (r *Registry) Leader(name string) (LeaderEvent, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	d, present := r.deps[name]
 	if !present {
-		return "", "", 0, false
+		return LeaderEvent{Name: name, Epoch: r.epoch}, false
 	}
-	return d.leaderPod, d.leaderURL, d.seq, d.leaderURL != ""
+	ev := LeaderEvent{Name: name, LeaderPod: d.leaderPod, LeaderURL: d.leaderURL, Seq: d.seq, Epoch: r.epoch}
+	return ev, d.leaderURL != ""
 }
 
 func (r *Registry) Published(name string) bool {

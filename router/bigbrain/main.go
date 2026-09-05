@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"flag"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -44,48 +43,35 @@ func main() {
 }
 
 func run() int {
-	addr := flag.String("addr", env("BIGBRAIN_ADDR", defaultAddr), "HTTP listen address")
-	kubeconfig := flag.String("kubeconfig", env("KUBECONFIG", ""), "path to kubeconfig (empty is in-cluster)")
-	labelPrefix := flag.String(
-		"label-prefix",
-		env("BIGBRAIN_LABEL_PREFIX", k8sclient.DefaultLabelPrefix),
-		"k8s label-key prefix for discovery (<prefix>/instance, <prefix>/role, <prefix>/component, <prefix>/leader-priority)",
-	)
-	bootstrap := flag.String(
-		"deployments",
-		env("BIGBRAIN_DEPLOYMENTS", ""),
-		"comma-separated name=namespace pairs to register at boot (e.g., convex-dev=convex-dev,convex-prod=convex-prod)",
-	)
-	electionCfg := electionFlags(flag.CommandLine)
-	insightsRingCap := flag.Int("insights-ring-cap", envInt("INSIGHTS_RING_CAP", defaultInsightsRingCap),
-		"in-memory insights ring-buffer capacity (rows retained per deployment)")
-	flag.Parse()
 	log := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(log)
-	reg, controlPlaneTokens, usageTokens, err := buildRegistry(*bootstrap, log)
+	addr := env("BIGBRAIN_ADDR", defaultAddr)
+	labelPrefix := env("BIGBRAIN_LABEL_PREFIX", k8sclient.DefaultLabelPrefix)
+	reg, controlPlaneTokens, usageTokens, err := buildRegistry(env("BIGBRAIN_DEPLOYMENTS", ""), log)
 	if err != nil {
 		return 1
 	}
-	k8s, err := k8sclient.New(*kubeconfig, *labelPrefix)
+	k8s, err := k8sclient.New(labelPrefix)
 	if err != nil {
 		log.Error("bigbrain: kubernetes client unavailable", "err", err)
 		return 1
 	}
-	cfg := electionCfg()
-	if err = validateRuntimeConfig(cfg, *insightsRingCap, log); err != nil {
+	cfg := electionConfigFromEnv()
+	insightsRingCap := envInt("INSIGHTS_RING_CAP", defaultInsightsRingCap)
+	if err = validateRuntimeConfig(cfg, insightsRingCap, log); err != nil {
 		return 1
 	}
 	ctrl := election.New(cfg, k8s, backend.New(controlPlaneTokens), reg, log)
 	actuation := ctrl.ActuationTimeout()
-	ins := insights.New(*insightsRingCap)
+	ins := insights.New(insightsRingCap)
 	srv := server.New(reg, ins, usageTokens, log)
 	if len(usageTokens) == 0 {
 		log.Warn("bigbrain: insights disabled because no deployment usage tokens are configured")
 	} else {
-		log.Info("bigbrain: insights enabled", "deployments", len(usageTokens), "ringCap", *insightsRingCap)
+		log.Info("bigbrain: insights enabled", "deployments", len(usageTokens), "ringCap", insightsRingCap)
 	}
 	httpSrv := &http.Server{
-		Addr:              *addr,
+		Addr:              addr,
 		Handler:           srv.Handler(),
 		ReadHeaderTimeout: readHeaderTimeout,
 		ReadTimeout:       readTimeout,
@@ -94,11 +80,11 @@ func run() int {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	metricsDone, apiserverErr := startMetricsAPIServer(ctx, stop, k8s, reg, *labelPrefix, log)
+	metricsDone, apiserverErr := startMetricsAPIServer(ctx, stop, k8s, reg, labelPrefix, log)
 	ctrlDone := runController(ctx, ctrl)
 	serveErr := make(chan error, 1)
 	go func() {
-		log.Info("bigbrain: listening", "addr", *addr)
+		log.Info("bigbrain: listening", "addr", addr)
 		serr := httpSrv.ListenAndServe()
 		if serr != nil && !errors.Is(serr, http.ErrServerClosed) {
 			log.Error("bigbrain: http server failed", "err", serr)
@@ -121,43 +107,20 @@ func run() int {
 	return 0
 }
 
-func electionFlags(fs *flag.FlagSet) func() election.Config {
-	interval := fs.Duration("interval", envDuration("BIGBRAIN_INTERVAL", election.DefaultInterval),
-		"reconcile interval")
-	debounce := fs.Int("promote-debounce", envInt("BIGBRAIN_PROMOTE_DEBOUNCE", election.DefaultPromoteDebounce),
-		"leaderless polls before promoting")
-	emptyDebounce := fs.Int("empty-discovery-debounce",
-		envInt("BIGBRAIN_EMPTY_DISCOVERY_DEBOUNCE", election.DefaultEmptyDiscoveryDebounce),
-		"consecutive empty discovery results before publishing leaderless")
-	failbackEnabled := fs.Bool("failback-enabled", envBool("BIGBRAIN_FAILBACK_ENABLED", true),
-		"fail back to a recovered higher-priority pod (the primary) once it is warm and stable")
-	failbackStability := fs.Duration("failback-stability",
-		envDuration("BIGBRAIN_FAILBACK_STABILITY", election.DefaultFailbackStability),
-		"how long the higher-priority pod must stay warm and stable before failback")
-	failbackWarmthLag := fs.Uint64("failback-warmth-lag",
-		envUint64("BIGBRAIN_FAILBACK_WARMTH_LAG", election.DefaultFailbackWarmthLagNs),
-		"max latest_ts lag for the candidate to count as warm/caught-up")
-	unreachableGrace := fs.Duration("unreachable-leader-grace",
-		envDuration("BIGBRAIN_UNREACHABLE_LEADER_GRACE", election.DefaultUnreachableLeaderGrace),
-		"how long an unreachable incumbent keeps its lease before being treated as gone")
-	leaseUnverifiedGrace := fs.Duration("lease-unverified-grace",
-		envDuration("BIGBRAIN_LEASE_UNVERIFIED_GRACE", election.DefaultLeaseUnverifiedGrace),
-		"how long a reachable leader may fail to verify its own lease before losing its claim (0 disables)")
-	actuationTimeout := fs.Duration("actuation-timeout",
-		envDuration("BIGBRAIN_ACTUATION_TIMEOUT", election.DefaultActuationTimeout),
-		"budget for a single promote/demote call; each pod in a batch gets its own")
-	return func() election.Config {
-		return election.Config{
-			Interval:               interval,
-			PromoteDebounce:        debounce,
-			EmptyDiscoveryDebounce: emptyDebounce,
-			FailbackEnabled:        failbackEnabled,
-			FailbackStability:      failbackStability,
-			FailbackWarmthLagNs:    failbackWarmthLag,
-			UnreachableLeaderGrace: unreachableGrace,
-			LeaseUnverifiedGrace:   leaseUnverifiedGrace,
-			ActuationTimeout:       actuationTimeout,
-		}
+func electionConfigFromEnv() election.Config {
+	return election.Config{
+		Interval:               envDuration("BIGBRAIN_INTERVAL", election.DefaultInterval),
+		PromoteDebounce:        envInt("BIGBRAIN_PROMOTE_DEBOUNCE", election.DefaultPromoteDebounce),
+		EmptyDiscoveryDebounce: envInt("BIGBRAIN_EMPTY_DISCOVERY_DEBOUNCE", election.DefaultEmptyDiscoveryDebounce),
+		FailbackEnabled:        envBool("BIGBRAIN_FAILBACK_ENABLED", true),
+		FailbackStability:      envDuration("BIGBRAIN_FAILBACK_STABILITY", election.DefaultFailbackStability),
+		FailbackWarmthLagNs:    envUint64("BIGBRAIN_FAILBACK_WARMTH_LAG", election.DefaultFailbackWarmthLagNs),
+		UnreachableLeaderGrace: envDuration(
+			"BIGBRAIN_UNREACHABLE_LEADER_GRACE",
+			election.DefaultUnreachableLeaderGrace,
+		),
+		LeaseUnverifiedGrace: envDuration("BIGBRAIN_LEASE_UNVERIFIED_GRACE", election.DefaultLeaseUnverifiedGrace),
+		ActuationTimeout:     envDuration("BIGBRAIN_ACTUATION_TIMEOUT", election.DefaultActuationTimeout),
 	}
 }
 
@@ -165,20 +128,24 @@ func buildRegistry(
 	bootstrap string,
 	log *slog.Logger,
 ) (*registry.Registry, map[string]string, map[string]string, error) {
-	reg := registry.New()
 	deployments, err := parseDeployments(bootstrap)
 	if err != nil {
-		log.Error("bigbrain: invalid --deployments/BIGBRAIN_DEPLOYMENTS", "err", err)
+		log.Error("bigbrain: invalid BIGBRAIN_DEPLOYMENTS", "err", err)
 		return nil, nil, nil, err
 	}
-	controlPlaneTokens, usageTokens, err := loadDeploymentTokens(reg, deployments, log)
+	if len(deployments) == 0 {
+		log.Error("bigbrain: refusing to start without registered deployments")
+		return nil, nil, nil, errors.New("no registered deployments")
+	}
+	reg := registry.New()
+	for _, d := range deployments {
+		reg.EnsureDeployment(d.name, d.namespace)
+		log.Info("bigbrain: registered bootstrap deployment", "name", d.name, "namespace", d.namespace)
+	}
+	controlPlaneTokens, usageTokens, err := loadDeploymentTokens(deployments)
 	if err != nil {
 		log.Error("bigbrain: missing deployment control-plane token", "err", err)
 		return nil, nil, nil, err
-	}
-	if len(reg.Names()) == 0 {
-		log.Error("bigbrain: refusing to start without registered deployments")
-		return nil, nil, nil, errors.New("no registered deployments")
 	}
 	return reg, controlPlaneTokens, usageTokens, nil
 }
@@ -186,7 +153,7 @@ func buildRegistry(
 func validateRuntimeConfig(cfg election.Config, insightsRingCap int, log *slog.Logger) error {
 	if insightsRingCap <= 0 {
 		err := fmt.Errorf("insights ring cap must be > 0, got %d", insightsRingCap)
-		log.Error("bigbrain: invalid --insights-ring-cap/INSIGHTS_RING_CAP", "err", err)
+		log.Error("bigbrain: invalid INSIGHTS_RING_CAP", "err", err)
 		return err
 	}
 	if err := cfg.Validate(); err != nil {
@@ -229,15 +196,6 @@ func shutdown(
 		})
 	}
 	wg.Wait()
-}
-
-func runController(ctx context.Context, ctrl *election.Controller) <-chan struct{} {
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		ctrl.Run(ctx)
-	}()
-	return done
 }
 
 func startMetricsAPIServer(
@@ -299,15 +257,19 @@ func startMetricsAPIServer(
 	return done, apiserverErr
 }
 
-func loadDeploymentTokens(
-	reg *registry.Registry,
-	deployments []deploymentRef,
-	log *slog.Logger,
-) (map[string]string, map[string]string, error) {
+func runController(ctx context.Context, ctrl *election.Controller) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ctrl.Run(ctx)
+	}()
+	return done
+}
+
+func loadDeploymentTokens(deployments []deploymentRef) (map[string]string, map[string]string, error) {
 	controlPlaneTokens := make(map[string]string, len(deployments))
 	usageTokens := make(map[string]string, len(deployments))
 	for i, d := range deployments {
-		reg.EnsureDeployment(d.name, d.namespace)
 		token := env(fmt.Sprintf("BIGBRAIN_CONTROL_PLANE_TOKEN_%d", i), "")
 		if token == "" {
 			return nil, nil, fmt.Errorf("deployment %s (index %d) has no BIGBRAIN_CONTROL_PLANE_TOKEN_%d", d.name, i, i)
@@ -316,7 +278,6 @@ func loadDeploymentTokens(
 		if usage := env(fmt.Sprintf("BIGBRAIN_USAGE_TOKEN_%d", i), ""); usage != "" {
 			usageTokens[d.name] = usage
 		}
-		log.Info("bigbrain: registered bootstrap deployment", "name", d.name, "namespace", d.namespace)
 	}
 	return controlPlaneTokens, usageTokens, nil
 }

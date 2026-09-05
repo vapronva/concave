@@ -158,12 +158,11 @@ func (s *Server) handleGetLeader(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusTooEarly, "leadership not yet reconciled for "+name)
 		return
 	}
-	pod, url, seq, ok := s.reg.Leader(name)
+	ev, ok := s.reg.Leader(name)
 	if !ok {
-		writeJSON(w, http.StatusServiceUnavailable, registry.LeaderEvent{Name: name, Seq: seq, Epoch: s.reg.Epoch()})
+		writeJSON(w, http.StatusServiceUnavailable, ev)
 		return
 	}
-	ev := registry.LeaderEvent{Name: name, LeaderPod: pod, LeaderURL: url, Seq: seq, Epoch: s.reg.Epoch()}
 	writeJSON(w, http.StatusOK, ev)
 }
 
@@ -184,8 +183,7 @@ func (s *Server) handleLeaderStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(http.StatusOK)
 	if s.reg.Published(name) {
-		pod, url, seq, _ := s.reg.Leader(name)
-		ev := registry.LeaderEvent{Name: name, LeaderPod: pod, LeaderURL: url, Seq: seq, Epoch: s.reg.Epoch()}
+		ev, _ := s.reg.Leader(name)
 		if !emitFrame(w, rc, leaderFrame(ev)) {
 			return
 		}

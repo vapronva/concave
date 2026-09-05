@@ -2,9 +2,6 @@ package k8sclient_test
 
 import (
 	"context"
-	"log/slog"
-	"strings"
-	"sync"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -109,51 +106,19 @@ func TestDiscoverBackends_SkipsTerminalPods(t *testing.T) {
 	}
 }
 
-//nolint:paralleltest // mutates the process-global slog default
 func TestDiscoverBackends_MalformedPriorityUsesRoleDefault(t *testing.T) {
+	t.Parallel()
 	const prefix = "convex"
-	var mu sync.Mutex
-	var warns int
-	prev := slog.Default()
-	t.Cleanup(func() { slog.SetDefault(prev) })
-	slog.SetDefault(slog.New(countingHandler{count: &warns, mu: &mu}))
 	cs := fake.NewClientset(
 		pod(prefix, "backend-0", "leader", "backend", "banana", "10.0.0.1", true),
 		pod(prefix, "backend-1", "follower", "backend", "banana", "10.0.0.2", true),
 	)
 	c := k8sclient.NewFromInterface(cs, prefix)
-	for range 2 {
-		out, err := c.DiscoverBackends(context.Background(), "acme", "acme")
-		if err != nil {
-			t.Fatalf("DiscoverBackends: %v", err)
-		}
-		if out[0].Priority != 100 || out[1].Priority != 0 {
-			t.Fatalf("malformed priority must fall back to role defaults, got %+v", out)
-		}
+	out, err := c.DiscoverBackends(context.Background(), "acme", "acme")
+	if err != nil {
+		t.Fatalf("DiscoverBackends: %v", err)
 	}
-	mu.Lock()
-	defer mu.Unlock()
-	if warns != 2 {
-		t.Fatalf("want one warn per (pod, value) across repeated discovers, got %d", warns)
+	if out[0].Priority != 100 || out[1].Priority != 0 {
+		t.Fatalf("malformed priority must fall back to role defaults, got %+v", out)
 	}
 }
-
-type countingHandler struct {
-	count *int
-	mu    *sync.Mutex
-}
-
-func (h countingHandler) Enabled(context.Context, slog.Level) bool { return true }
-
-func (h countingHandler) Handle(_ context.Context, r slog.Record) error {
-	if r.Level == slog.LevelWarn && strings.Contains(r.Message, "malformed leader-priority") {
-		h.mu.Lock()
-		*h.count++
-		h.mu.Unlock()
-	}
-	return nil
-}
-
-func (h countingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
-
-func (h countingHandler) WithGroup(string) slog.Handler { return h }

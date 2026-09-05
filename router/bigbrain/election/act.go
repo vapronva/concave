@@ -22,7 +22,7 @@ func (c *Controller) act(
 			"deployment", name, "leader", d.leaderPod, "claimedLeaders", d.liveLeaderCount, "demotes", len(d.demotes))
 	}
 	c.setLeader(name, st, d.leaderPod, d.leaderURL)
-	c.runActions(ctx, name, st, d.demotes)
+	c.demoteAll(ctx, name, st, d.demotes)
 	if d.failbackTarget != nil {
 		c.actFailback(ctx, name, st, d.leaderPod, *d.failbackTarget)
 	}
@@ -50,11 +50,11 @@ func (c *Controller) actFailback(
 
 func (c *Controller) actEmptyDiscovery(ctx context.Context, name, ns string, st *deploymentState, streak int) {
 	switch {
-	case streak < c.cfg.emptyDiscoveryDebounce:
+	case streak < c.cfg.EmptyDiscoveryDebounce:
 		c.log.WarnContext(ctx, "election: discovery returned no backend pods; retaining last-known leader",
-			"deployment", name, "namespace", ns, "streak", streak, "need", c.cfg.emptyDiscoveryDebounce)
+			"deployment", name, "namespace", ns, "streak", streak, "need", c.cfg.EmptyDiscoveryDebounce)
 		return
-	case streak == c.cfg.emptyDiscoveryDebounce:
+	case streak == c.cfg.EmptyDiscoveryDebounce:
 		c.log.WarnContext(ctx, "election: discovery persistently empty; publishing leaderless",
 			"deployment", name, "namespace", ns, "ticks", streak)
 	default:
@@ -75,14 +75,14 @@ func (c *Controller) actLeaderless(
 	streak int,
 	retain bool,
 ) {
-	if streak < c.cfg.promoteDebounce {
+	if streak < c.cfg.PromoteDebounce {
 		c.log.DebugContext(ctx, "election: leaderless, retaining last-known leader during hysteresis",
-			"deployment", name, "streak", streak, "need", c.cfg.promoteDebounce)
+			"deployment", name, "streak", streak, "need", c.cfg.PromoteDebounce)
 		return
 	}
 	if retain {
 		c.log.WarnContext(ctx, "election: incumbent unreachable but still discovered; retaining leader within grace",
-			"deployment", name, "streak", streak, "grace", c.cfg.unreachableLeaderGrace)
+			"deployment", name, "streak", streak, "grace", c.cfg.UnreachableLeaderGrace)
 		return
 	}
 	if d.promoteTarget == nil {
@@ -112,7 +112,7 @@ func (c *Controller) actLeaderless(
 }
 
 func (c *Controller) promoteAndLog(base context.Context, name, kind string, target observation) {
-	actx, cancel := context.WithTimeout(base, c.cfg.actuationTimeout)
+	actx, cancel := context.WithTimeout(base, c.cfg.ActuationTimeout)
 	defer cancel()
 	code, err := c.backend.Promote(actx, name, target.be.URL)
 	if err != nil {
@@ -135,8 +135,8 @@ func (c *Controller) promoteAndLog(base context.Context, name, kind string, targ
 	}
 }
 
-func (c *Controller) runActions(ctx context.Context, name string, st *deploymentState, actions []action) {
-	if len(actions) == 0 {
+func (c *Controller) demoteAll(ctx context.Context, name string, st *deploymentState, targets []demoteTarget) {
+	if len(targets) == 0 {
 		return
 	}
 	if !c.tryAcquire(&st.demoting) {
@@ -145,7 +145,7 @@ func (c *Controller) runActions(ctx context.Context, name string, st *deployment
 	base := context.WithoutCancel(ctx)
 	c.actGo(name, func() {
 		defer c.release(&st.demoting)
-		for _, a := range actions {
+		for _, a := range targets {
 			code, err := c.demoteOne(base, name, a.url)
 			if err != nil {
 				c.log.ErrorContext(base, "election: demote failed", "deployment", name, "pod", a.pod, "err", err)
@@ -158,7 +158,7 @@ func (c *Controller) runActions(ctx context.Context, name string, st *deployment
 				c.log.InfoContext(base, "election: demote deferred; backend is mid-transition, will retry",
 					"deployment", name, "pod", a.pod, "status", code)
 			case http.StatusInternalServerError:
-				c.log.WarnContext(base, "election: demote self-fenced; backend is restarting as follower",
+				c.log.WarnContext(base, "election: demote failed on the backend; will retry next tick",
 					"deployment", name, "pod", a.pod)
 			case http.StatusForbidden:
 				c.log.ErrorContext(base, "election: demote forbidden; control-plane token mismatch",
@@ -172,7 +172,7 @@ func (c *Controller) runActions(ctx context.Context, name string, st *deployment
 }
 
 func (c *Controller) demoteOne(base context.Context, name, url string) (int, error) {
-	actx, cancel := context.WithTimeout(base, c.cfg.actuationTimeout)
+	actx, cancel := context.WithTimeout(base, c.cfg.ActuationTimeout)
 	defer cancel()
 	return c.backend.Demote(actx, name, url)
 }

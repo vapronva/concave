@@ -1,4 +1,3 @@
-//nolint:testpackage // white-box
 package election
 
 import (
@@ -11,8 +10,8 @@ import (
 
 func leaderOf(t *testing.T, reg *registry.Registry, name string) (string, bool) {
 	t.Helper()
-	pod, _, _, ok := reg.Leader(name)
-	return pod, ok
+	ev, ok := reg.Leader(name)
+	return ev.LeaderPod, ok
 }
 
 func TestActLeaderless_RetainsLastKnownLeaderDuringHysteresis(t *testing.T) {
@@ -20,7 +19,7 @@ func TestActLeaderless_RetainsLastKnownLeaderDuringHysteresis(t *testing.T) {
 	reg := registry.New()
 	reg.EnsureDeployment("dev", "convex-dev")
 	const debounce = 3
-	c := New(Config{PromoteDebounce: new(debounce)}, nil, nil, reg, quietLogger())
+	c := New(withConfig(func(c *Config) { c.PromoteDebounce = debounce }), nil, nil, reg, quietLogger())
 	st := c.deploymentState("dev")
 	ctx := context.Background()
 	c.setLeader("dev", st, "backend-0", "http://10.0.0.1:3210")
@@ -46,7 +45,7 @@ func TestActLeaderless_RetainsUnreachableIncumbentWithinGrace(t *testing.T) {
 	reg := registry.New()
 	reg.EnsureDeployment("dev", "convex-dev")
 	const debounce = 3
-	c := New(Config{PromoteDebounce: new(debounce)}, nil, nil, reg, quietLogger())
+	c := New(withConfig(func(c *Config) { c.PromoteDebounce = debounce }), nil, nil, reg, quietLogger())
 	st := c.deploymentState("dev")
 	c.setLeader("dev", st, "backend-0", "http://10.0.0.1:3210")
 	leaderless := decision{liveLeaderCount: 0, incumbentUnreachable: true, promoteTarget: &observation{}}
@@ -58,7 +57,13 @@ func TestActLeaderless_RetainsUnreachableIncumbentWithinGrace(t *testing.T) {
 
 func TestCommitState_UnreachableIncumbentGraceExpiry(t *testing.T) {
 	t.Parallel()
-	c := New(Config{UnreachableLeaderGrace: new(60 * time.Second)}, nil, nil, registry.New(), quietLogger())
+	c := New(
+		withConfig(func(c *Config) { c.UnreachableLeaderGrace = 60 * time.Second }),
+		nil,
+		nil,
+		registry.New(),
+		quietLogger(),
+	)
 	st := c.deploymentState("dev")
 	base := time.Now()
 	d := decision{liveLeaderCount: 0, incumbentUnreachable: true}
@@ -76,7 +81,13 @@ func TestCommitState_UnreachableIncumbentGraceExpiry(t *testing.T) {
 
 func TestCommitState_EmptyDiscoveryDoesNotRestartUnreachableGrace(t *testing.T) {
 	t.Parallel()
-	c := New(Config{UnreachableLeaderGrace: new(60 * time.Second)}, nil, nil, registry.New(), quietLogger())
+	c := New(
+		withConfig(func(c *Config) { c.UnreachableLeaderGrace = 60 * time.Second }),
+		nil,
+		nil,
+		registry.New(),
+		quietLogger(),
+	)
 	st := c.deploymentState("dev")
 	base := time.Now()
 	unreachable := decision{liveLeaderCount: 0, incumbentUnreachable: true}
@@ -95,7 +106,7 @@ func TestCommitState_EmptyListDoesNotAdvanceStreak(t *testing.T) {
 	t.Parallel()
 	reg := registry.New()
 	reg.EnsureDeployment("dev", "convex-dev")
-	c := New(Config{PromoteDebounce: new(3)}, nil, nil, reg, quietLogger())
+	c := New(withConfig(func(c *Config) { c.PromoteDebounce = 3 }), nil, nil, reg, quietLogger())
 	st := c.deploymentState("dev")
 	emptyDecision := decision{liveLeaderCount: 0}
 	for range 10 {
@@ -107,7 +118,7 @@ func TestCommitState_EmptyListDoesNotAdvanceStreak(t *testing.T) {
 
 func TestCommitState_TransitioningDoesNotAdvanceStreak(t *testing.T) {
 	t.Parallel()
-	c := New(Config{PromoteDebounce: new(3)}, nil, nil, registry.New(), quietLogger())
+	c := New(withConfig(func(c *Config) { c.PromoteDebounce = 3 }), nil, nil, registry.New(), quietLogger())
 	st := c.deploymentState("dev")
 	transitioning := decision{liveLeaderCount: 0, hasTransitioning: true}
 	for range 10 {
@@ -122,7 +133,7 @@ func TestCommitState_TransitioningDoesNotAdvanceStreak(t *testing.T) {
 
 func TestCommitState_LeaderfulClearsStreak(t *testing.T) {
 	t.Parallel()
-	c := New(Config{}, nil, nil, registry.New(), quietLogger())
+	c := New(DefaultConfig(), nil, nil, registry.New(), quietLogger())
 	st := c.deploymentState("dev")
 	st.leaderlessStreak = 5
 	if got, _, _ := c.commitState(st, decision{liveLeaderCount: 1}, false, time.Now()); got != 0 {
@@ -135,7 +146,7 @@ func TestActLeaderless_RetainsLeaderWhenPromotionBlockedByInflight(t *testing.T)
 	reg := registry.New()
 	reg.EnsureDeployment("prod", "convex-prod")
 	const debounce = 3
-	c := New(Config{PromoteDebounce: new(debounce)}, nil, nil, reg, quietLogger())
+	c := New(withConfig(func(c *Config) { c.PromoteDebounce = debounce }), nil, nil, reg, quietLogger())
 	st := c.deploymentState("prod")
 	c.setLeader("prod", st, "backend-0", "http://10.0.0.1:3210")
 	st.promoting = true

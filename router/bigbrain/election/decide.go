@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-type action struct {
+type demoteTarget struct {
 	pod string
 	url string
 }
@@ -17,7 +17,7 @@ type decision struct {
 	incumbentUnreachable bool
 	hasTransitioning     bool
 	promoteTarget        *observation
-	demotes              []action
+	demotes              []demoteTarget
 	failbackTarget       *observation
 	failbackState        failbackState
 }
@@ -165,7 +165,7 @@ func decide(obs []observation, p decideParams) decision {
 	d.leaderPod, d.leaderURL = leader.be.Pod, leader.be.URL
 	for _, o := range claims {
 		if o.be.Pod != leader.be.Pod {
-			d.demotes = append(d.demotes, action{pod: o.be.Pod, url: o.be.URL})
+			d.demotes = append(d.demotes, demoteTarget{pod: o.be.Pod, url: o.be.URL})
 		}
 	}
 	if len(claims) == 1 {

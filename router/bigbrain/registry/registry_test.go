@@ -13,16 +13,16 @@ func TestRegistry_Leader(t *testing.T) {
 	t.Parallel()
 	r := registry.New()
 	r.EnsureDeployment("dev", "convex-dev")
-	if _, _, _, ok := r.Leader("dev"); ok {
+	if _, ok := r.Leader("dev"); ok {
 		t.Fatal("fresh deployment should have no leader")
 	}
 	r.Update("dev", "backend-0", "http://x:3210")
-	pod, url, seq, ok := r.Leader("dev")
-	if !ok || pod != "backend-0" || url != "http://x:3210" {
-		t.Fatalf("want backend-0/http://x:3210, got %q/%q ok=%v", pod, url, ok)
+	ev, ok := r.Leader("dev")
+	if !ok || ev.LeaderPod != "backend-0" || ev.LeaderURL != "http://x:3210" {
+		t.Fatalf("want backend-0/http://x:3210, got %q/%q ok=%v", ev.LeaderPod, ev.LeaderURL, ok)
 	}
-	if seq == 0 {
-		t.Fatal("a published leader must carry a non-zero seq")
+	if ev.Seq == 0 || ev.Epoch != r.Epoch() {
+		t.Fatalf("a published leader must carry a non-zero seq and the registry epoch, got %+v", ev)
 	}
 }
 
@@ -31,22 +31,24 @@ func TestRegistry_SeqMonotonicPerDistinctLeaderState(t *testing.T) {
 	r := registry.New()
 	r.EnsureDeployment("dev", "convex-dev")
 	r.Update("dev", "backend-0", "http://a:3210")
-	_, _, seq1, _ := r.Leader("dev")
+	first, _ := r.Leader("dev")
+	seq1 := first.Seq
 	if seq1 == 0 {
 		t.Fatalf("a published leader must carry a non-zero seq, got %d", seq1)
 	}
 	r.Update("dev", "backend-0", "http://a:3210")
-	if _, _, seq2, _ := r.Leader("dev"); seq2 != seq1 {
-		t.Fatalf("an unchanged Update must not advance seq: %d -> %d", seq1, seq2)
+	if second, _ := r.Leader("dev"); second.Seq != seq1 {
+		t.Fatalf("an unchanged Update must not advance seq: %d -> %d", seq1, second.Seq)
 	}
 	r.Update("dev", "backend-1", "http://b:3210")
-	_, _, seq3, _ := r.Leader("dev")
+	third, _ := r.Leader("dev")
+	seq3 := third.Seq
 	if seq3 <= seq1 {
 		t.Fatalf("a leader change must strictly advance seq: %d -> %d", seq1, seq3)
 	}
 	r.Update("dev", "", "")
-	if _, _, seq4, ok := r.Leader("dev"); ok || seq4 <= seq3 {
-		t.Fatalf("a leaderless publish must strictly advance seq: %d -> %d (ok=%v)", seq3, seq4, ok)
+	if fourth, ok := r.Leader("dev"); ok || fourth.Seq <= seq3 {
+		t.Fatalf("a leaderless publish must strictly advance seq: %d -> %d (ok=%v)", seq3, fourth.Seq, ok)
 	}
 }
 
@@ -72,9 +74,9 @@ func TestRegistry_SubscriberEvents(t *testing.T) {
 		if ev.LeaderPod != "backend-0" {
 			t.Fatalf("want backend-0, got %q", ev.LeaderPod)
 		}
-		_, _, seq, _ := r.Leader("dev")
-		if ev.Seq == 0 || ev.Seq != seq {
-			t.Fatalf("event seq %d must match Leader() seq %d and be non-zero", ev.Seq, seq)
+		current, _ := r.Leader("dev")
+		if ev.Seq == 0 || ev.Seq != current.Seq {
+			t.Fatalf("event seq %d must match Leader() seq %d and be non-zero", ev.Seq, current.Seq)
 		}
 		if ev.Epoch != r.Epoch() {
 			t.Fatalf("event epoch %d must match registry epoch %d", ev.Epoch, r.Epoch())
@@ -191,7 +193,7 @@ func TestRegistry_PublishedLifecycle(t *testing.T) {
 	if !r.Published("dev") || !r.AllPublished() {
 		t.Fatal("an explicit leaderless Update must publish")
 	}
-	if _, _, _, ok := r.Leader("dev"); ok {
+	if _, ok := r.Leader("dev"); ok {
 		t.Fatal("published leaderless deployment must still report no leader")
 	}
 	r.EnsureDeployment("prod", "convex-prod")

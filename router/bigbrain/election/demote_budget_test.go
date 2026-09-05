@@ -1,4 +1,3 @@
-//nolint:testpackage // white-box
 package election
 
 import (
@@ -34,14 +33,14 @@ func TestRunActions_StalledPodDoesNotStarveLaterDemotes(t *testing.T) {
 	reg := registry.New()
 	reg.EnsureDeployment("dev", "convex-dev")
 	c := New(
-		Config{ActuationTimeout: &actuation},
+		withConfig(func(c *Config) { c.ActuationTimeout = actuation }),
 		nil,
 		backend.New(map[string]string{}),
 		reg,
 		quietLogger(),
 	)
 	st := c.deploymentState("dev")
-	c.runActions(context.Background(), "dev", st, []action{
+	c.demoteAll(context.Background(), "dev", st, []demoteTarget{
 		{pod: "backend-0", url: stalled.URL},
 		{pod: "backend-1", url: responsive.URL},
 	})

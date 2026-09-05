@@ -1,6 +1,7 @@
 package insights_test
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -16,7 +17,7 @@ func TestIngestRecognizesOCCAndReadLimit(t *testing.T) {
 		{"FunctionCall": map[string]any{
 			"is_occ": true, "udf_id": "f1", "id": "e1", "request_id": "r1",
 			"component_path": "_default", "occ_table_name": "users",
-			"occ_retry_count": 2, "status": "success",
+			"occ_retry_count": json.Number("2"), "status": "success",
 		}},
 		{"FunctionCall": map[string]any{
 			"is_occ": false, "udf_id": "f2",
@@ -25,7 +26,11 @@ func TestIngestRecognizesOCCAndReadLimit(t *testing.T) {
 			"udf_id": "g1", "id": "e2", "request_id": "r2",
 			"success": true,
 			"calls": []any{
-				map[string]any{"table_name": "items", "bytes_read": 1_000_000, "documents_read": 10},
+				map[string]any{
+					"table_name":     "items",
+					"bytes_read":     json.Number("1000000"),
+					"documents_read": json.Number("10"),
+				},
 			},
 		}},
 		{"UnknownVariant": map[string]any{"v": 1}},
@@ -120,7 +125,7 @@ func TestQueryOCCAggregation(t *testing.T) {
 				"is_occ": true, "udf_id": "counters:increment",
 				"id": "id" + string(rune('A'+k)), "request_id": "r" + string(rune('A'+k)),
 				"component_path": "_default", "occ_table_name": "counters",
-				"occ_retry_count": 1, "status": "retried",
+				"occ_retry_count": json.Number("1"), "status": "retried",
 			}},
 		})
 	}
@@ -215,13 +220,17 @@ func TestIngestQueryRoundTripRowShapes(t *testing.T) {
 		{"FunctionCall": map[string]any{
 			"is_occ": true, "udf_id": "mod:occFn", "id": "occ1", "request_id": "rq1",
 			"component_path": "-root-component-", "occ_table_name": "docs",
-			"occ_retry_count": 3, "status": "retried",
+			"occ_retry_count": json.Number("3"), "status": "retried",
 		}},
 		{"InsightReadLimit": map[string]any{
 			"udf_id": "mod:readFn", "id": "rd1", "request_id": "rq2",
 			"component_path": "-root-component-", "success": false,
 			"calls": []any{
-				map[string]any{"table_name": "big", "bytes_read": 2_000_000, "documents_read": 40_000},
+				map[string]any{
+					"table_name":     "big",
+					"bytes_read":     json.Number("2000000"),
+					"documents_read": json.Number("40000"),
+				},
 			},
 		}},
 	})

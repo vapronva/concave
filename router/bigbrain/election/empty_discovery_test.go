@@ -1,4 +1,3 @@
-//nolint:testpackage // white-box
 package election
 
 import (
@@ -20,7 +19,7 @@ func emptyDiscoveryController(t *testing.T, debounce int) (*Controller, *registr
 	k8s := k8sclient.NewFromInterface(fake.NewClientset(), "convex")
 	reg := registry.New()
 	reg.EnsureDeployment("dev", "convex-dev")
-	c := New(Config{EmptyDiscoveryDebounce: new(debounce)}, k8s, nil, reg, quietLogger())
+	c := New(withConfig(func(c *Config) { c.EmptyDiscoveryDebounce = debounce }), k8s, nil, reg, quietLogger())
 	return c, reg, c.deploymentState("dev")
 }
 
@@ -39,10 +38,11 @@ func TestReconcile_EmptyDiscoveryDebouncePublishesLeaderless(t *testing.T) {
 	if !reg.Published("dev") || !reg.AllPublished() {
 		t.Fatal("persistently empty discovery must publish explicit leaderless")
 	}
-	if _, _, _, ok := reg.Leader("dev"); ok {
+	ev, ok := reg.Leader("dev")
+	if ok {
 		t.Fatal("published state must be leaderless")
 	}
-	if _, _, seq, _ := reg.Leader("dev"); seq == 0 {
+	if ev.Seq == 0 {
 		t.Fatal("leaderless publish must carry a non-zero seq")
 	}
 }
@@ -88,7 +88,7 @@ func TestReconcile_DiscoveryErrorsNeverTriggerEmptyDebounce(t *testing.T) {
 	k8s := k8sclient.NewFromInterface(cs, "convex")
 	reg := registry.New()
 	reg.EnsureDeployment("dev", "convex-dev")
-	c := New(Config{EmptyDiscoveryDebounce: new(debounce)}, k8s, nil, reg, quietLogger())
+	c := New(withConfig(func(c *Config) { c.EmptyDiscoveryDebounce = debounce }), k8s, nil, reg, quietLogger())
 	st := c.deploymentState("dev")
 	ctx := context.Background()
 	c.setLeader("dev", st, "backend-0", "http://10.0.0.1:3210")

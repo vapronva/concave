@@ -306,22 +306,22 @@ func timestampsOf(grp []Row) []time.Time {
 	return times
 }
 
-func bucket(times []time.Time) []map[string]any {
-	m := make(map[string]int)
+func bucket(times []time.Time) []hourlyCount {
+	counts := make(map[string]int)
 	for _, t := range times {
-		h := t.UTC().Format("2006-01-02 15:00:00")
-		m[h]++
+		counts[t.UTC().Format("2006-01-02 15:00:00")]++
 	}
-	out := make([]map[string]any, 0, len(m))
-	for h, c := range m {
-		out = append(out, map[string]any{"hour": h, "count": c})
+	out := make([]hourlyCount, 0, len(counts))
+	for hour, count := range counts {
+		out = append(out, hourlyCount{Hour: hour, Count: count})
 	}
-	sort.Slice(out, func(i, j int) bool {
-		left, _ := out[i]["hour"].(string)
-		right, _ := out[j]["hour"].(string)
-		return left < right
-	})
+	sort.Slice(out, func(i, j int) bool { return out[i].Hour < out[j].Hour })
 	return out
+}
+
+type hourlyCount struct {
+	Hour  string `json:"hour"`
+	Count int    `json:"count"`
 }
 
 func makeRow(deployment, kind string, p map[string]any) (Row, bool) {
@@ -362,13 +362,10 @@ func makeRow(deployment, kind string, p map[string]any) (Row, bool) {
 }
 
 func eventTime(p map[string]any) time.Time {
-	switch v := p["timestamp"].(type) {
-	case json.Number:
+	if v, ok := p["timestamp"].(json.Number); ok {
 		if ms, err := v.Int64(); err == nil {
 			return time.UnixMilli(ms).UTC()
 		}
-	case float64:
-		return time.UnixMilli(int64(v)).UTC()
 	}
 	return time.Now().UTC()
 }
@@ -412,14 +409,7 @@ func getBool(m map[string]any, k string) bool {
 }
 
 func getInt(m map[string]any, k string) int {
-	switch v := m[k].(type) {
-	case int:
-		return v
-	case int64:
-		return int(v)
-	case float64:
-		return int(v)
-	case json.Number:
+	if v, ok := m[k].(json.Number); ok {
 		if n, err := strconv.ParseInt(v.String(), 10, 64); err == nil {
 			return int(n)
 		}

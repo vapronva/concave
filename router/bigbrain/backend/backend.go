@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"time"
 )
 
 type Leadership struct {
@@ -21,22 +20,15 @@ type Leadership struct {
 const (
 	maxBodyBytes            = 4096
 	controlPlaneTokenHeader = "X-Convex-Control-Plane-Token" //nolint:gosec // HTTP header name, not a credential
-	clientTimeout           = 10 * time.Second
 )
 
 type Client struct {
-	poll   *http.Client
-	act    *http.Client
+	http   *http.Client
 	tokens map[string]string
 }
 
 func New(tokens map[string]string) *Client {
-	transport := http.DefaultTransport
-	return &Client{
-		poll:   &http.Client{Transport: transport, Timeout: clientTimeout},
-		act:    &http.Client{Transport: transport},
-		tokens: tokens,
-	}
+	return &Client{http: &http.Client{}, tokens: tokens}
 }
 
 func (c *Client) Leadership(ctx context.Context, deployment, base string) (Leadership, error) {
@@ -45,7 +37,7 @@ func (c *Client) Leadership(ctx context.Context, deployment, base string) (Leade
 		return Leadership{}, err
 	}
 	c.setControlPlaneToken(req, deployment)
-	status, body, err := do(c.poll, req)
+	status, body, err := do(c.http, req)
 	if err != nil {
 		return Leadership{}, err
 	}
@@ -73,7 +65,7 @@ func (c *Client) post(ctx context.Context, deployment, url string) (int, error) 
 		return 0, err
 	}
 	c.setControlPlaneToken(req, deployment)
-	status, _, err := do(c.act, req)
+	status, _, err := do(c.http, req)
 	return status, err
 }
 

@@ -1,4 +1,3 @@
-//nolint:testpackage // white-box
 package election
 
 import (
@@ -73,7 +72,7 @@ func TestController_ReconcileConcurrentWithActuation(t *testing.T) {
 	reg := registry.New()
 	reg.EnsureDeployment("race", "race")
 	c := New(
-		Config{Interval: new(time.Millisecond), PromoteDebounce: new(1)},
+		withConfig(func(c *Config) { c.Interval = time.Millisecond; c.PromoteDebounce = 1 }),
 		k8s, backend.New(nil), reg, quietLogger(),
 	)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -96,7 +95,7 @@ func TestController_ReconcileConcurrentWithActuation(t *testing.T) {
 
 func TestController_SnapshotCommitConcurrent(t *testing.T) {
 	t.Parallel()
-	c := New(Config{}, nil, nil, registry.New(), quietLogger())
+	c := New(DefaultConfig(), nil, nil, registry.New(), quietLogger())
 	st := c.deploymentState("d")
 	in := []observation{
 		obs("backend-0", false, 90, -1),

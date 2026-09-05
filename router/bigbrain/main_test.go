@@ -1,69 +1,11 @@
 package main
 
 import (
-	"flag"
 	"log/slog"
 	"testing"
-	"time"
 
 	"git.horse/vapronva/concave/router/bigbrain/election"
-	"git.horse/vapronva/concave/router/bigbrain/registry"
 )
-
-func clearElectionEnv(t *testing.T) {
-	t.Helper()
-	for _, k := range []string{
-		"BIGBRAIN_INTERVAL", "BIGBRAIN_PROMOTE_DEBOUNCE", "BIGBRAIN_EMPTY_DISCOVERY_DEBOUNCE",
-		"BIGBRAIN_FAILBACK_ENABLED", "BIGBRAIN_FAILBACK_STABILITY", "BIGBRAIN_FAILBACK_WARMTH_LAG",
-		"BIGBRAIN_UNREACHABLE_LEADER_GRACE",
-	} {
-		t.Setenv(k, "")
-	}
-}
-
-func TestElectionFlags_ExplicitZeroAndUnsetEnv(t *testing.T) {
-	clearElectionEnv(t)
-	t.Setenv("BIGBRAIN_PROMOTE_DEBOUNCE", "0")
-	t.Setenv("BIGBRAIN_EMPTY_DISCOVERY_DEBOUNCE", "7")
-	t.Setenv("BIGBRAIN_FAILBACK_ENABLED", "false")
-	fs := flag.NewFlagSet("test", flag.ContinueOnError)
-	cfgFn := electionFlags(fs)
-	if err := fs.Parse(nil); err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	cfg := cfgFn()
-	if cfg.PromoteDebounce == nil || *cfg.PromoteDebounce != 0 {
-		t.Fatalf("an explicit zero env must reach the config, got %v", cfg.PromoteDebounce)
-	}
-	if cfg.EmptyDiscoveryDebounce == nil || *cfg.EmptyDiscoveryDebounce != 7 {
-		t.Fatalf("set env must reach the config, got %v", cfg.EmptyDiscoveryDebounce)
-	}
-	if cfg.FailbackEnabled == nil || *cfg.FailbackEnabled {
-		t.Fatalf("explicit false env must reach the config, got %v", cfg.FailbackEnabled)
-	}
-	if *cfg.Interval != election.DefaultInterval || *cfg.FailbackStability != election.DefaultFailbackStability ||
-		*cfg.FailbackWarmthLagNs != election.DefaultFailbackWarmthLagNs ||
-		*cfg.UnreachableLeaderGrace != election.DefaultUnreachableLeaderGrace {
-		t.Fatalf("unset envs must yield the election defaults, got %+v", cfg)
-	}
-}
-
-func TestElectionFlags_FlagOverridesEnv(t *testing.T) {
-	clearElectionEnv(t)
-	t.Setenv("BIGBRAIN_PROMOTE_DEBOUNCE", "9")
-	fs := flag.NewFlagSet("test", flag.ContinueOnError)
-	cfgFn := electionFlags(fs)
-	if err := fs.Parse([]string{"-promote-debounce=2", "-unreachable-leader-grace=5s"}); err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	cfg := cfgFn()
-	if cfg.PromoteDebounce == nil || *cfg.PromoteDebounce != 2 {
-		t.Fatalf("a passed flag must override the env, got %v", cfg.PromoteDebounce)
-	}
-	if cfg.UnreachableLeaderGrace == nil || *cfg.UnreachableLeaderGrace != 5*time.Second {
-		t.Fatalf("a passed flag must count as set, got %v", cfg.UnreachableLeaderGrace)
-	}
-}
 
 func TestParseDeployments_Valid(t *testing.T) {
 	t.Parallel()
@@ -113,8 +55,7 @@ func TestLoadDeploymentTokens_PairsTokensByIndex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseDeployments: %v", err)
 	}
-	reg := registry.New()
-	cp, usage, err := loadDeploymentTokens(reg, deployments, slog.New(slog.DiscardHandler))
+	cp, usage, err := loadDeploymentTokens(deployments)
 	if err != nil {
 		t.Fatalf("loadDeploymentTokens: %v", err)
 	}
@@ -123,9 +64,6 @@ func TestLoadDeploymentTokens_PairsTokensByIndex(t *testing.T) {
 	}
 	if len(usage) != 1 || usage["b"] != "usage-b" {
 		t.Fatalf("usage token pairing broken: %v", usage)
-	}
-	if ns, ok := reg.Namespace("a"); !ok || ns != "ns-a" {
-		t.Fatalf("deployment a not registered with its namespace: %q ok=%v", ns, ok)
 	}
 }
 
@@ -136,7 +74,54 @@ func TestLoadDeploymentTokens_MissingTokenErrors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseDeployments: %v", err)
 	}
-	if _, _, lerr := loadDeploymentTokens(registry.New(), deployments, slog.New(slog.DiscardHandler)); lerr == nil {
+	if _, _, lerr := loadDeploymentTokens(deployments); lerr == nil {
 		t.Fatal("missing BIGBRAIN_CONTROL_PLANE_TOKEN_1 must error")
+	}
+}
+
+func TestElectionConfigFromEnv(t *testing.T) {
+	for _, k := range []string{
+		"BIGBRAIN_INTERVAL", "BIGBRAIN_PROMOTE_DEBOUNCE", "BIGBRAIN_EMPTY_DISCOVERY_DEBOUNCE",
+		"BIGBRAIN_FAILBACK_ENABLED", "BIGBRAIN_FAILBACK_STABILITY", "BIGBRAIN_FAILBACK_WARMTH_LAG",
+		"BIGBRAIN_UNREACHABLE_LEADER_GRACE", "BIGBRAIN_LEASE_UNVERIFIED_GRACE", "BIGBRAIN_ACTUATION_TIMEOUT",
+	} {
+		t.Setenv(k, "")
+	}
+	if got := electionConfigFromEnv(); got != election.DefaultConfig() {
+		t.Fatalf("unset envs must yield the election defaults, got %+v", got)
+	}
+	t.Setenv("BIGBRAIN_PROMOTE_DEBOUNCE", "0")
+	t.Setenv("BIGBRAIN_EMPTY_DISCOVERY_DEBOUNCE", "7")
+	t.Setenv("BIGBRAIN_FAILBACK_ENABLED", "false")
+	t.Setenv("BIGBRAIN_LEASE_UNVERIFIED_GRACE", "0s")
+	got := electionConfigFromEnv()
+	if got.PromoteDebounce != 0 || got.LeaseUnverifiedGrace != 0 {
+		t.Fatalf("explicit zeros must reach the config, got %+v", got)
+	}
+	if got.EmptyDiscoveryDebounce != 7 || got.FailbackEnabled {
+		t.Fatalf("set envs must reach the config, got %+v", got)
+	}
+	if got.Interval != election.DefaultInterval || got.ActuationTimeout != election.DefaultActuationTimeout {
+		t.Fatalf("untouched knobs must keep their defaults, got %+v", got)
+	}
+}
+
+func TestBuildRegistry_RegistersNamespaces(t *testing.T) {
+	t.Setenv("BIGBRAIN_CONTROL_PLANE_TOKEN_0", "cp-a")
+	t.Setenv("BIGBRAIN_CONTROL_PLANE_TOKEN_1", "cp-b")
+	reg, cp, usage, err := buildRegistry("a=ns-a,b", slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatalf("buildRegistry: %v", err)
+	}
+	for name, want := range map[string]string{"a": "ns-a", "b": "b"} {
+		if ns, ok := reg.Namespace(name); !ok || ns != want {
+			t.Fatalf("deployment %s: namespace %q ok=%v, want %q", name, ns, ok, want)
+		}
+	}
+	if len(cp) != 2 || len(usage) != 0 {
+		t.Fatalf("tokens: control-plane %v usage %v", cp, usage)
+	}
+	if _, _, _, berr := buildRegistry("", slog.New(slog.DiscardHandler)); berr == nil {
+		t.Fatal("an empty deployment set must refuse to start")
 	}
 }
