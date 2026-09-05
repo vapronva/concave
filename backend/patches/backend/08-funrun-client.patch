@@ -11,7 +11,7 @@ index bbdcaec82..9db9f167f 100644
      module_paths::CanonicalizedComponentModulePath,
      reference::Reference,
 diff --git a/crates/common/src/http/mod.rs b/crates/common/src/http/mod.rs
-index 6a04b99b3..0b94dd858 100644
+index 5456c4bbd..f7ba31aca 100644
 --- a/crates/common/src/http/mod.rs
 +++ b/crates/common/src/http/mod.rs
 @@ -212,8 +212,7 @@ impl From<HttpRequest> for HttpRequestStream {
@@ -24,7 +24,7 @@ index 6a04b99b3..0b94dd858 100644
  
  impl HeapSize for HttpRequest {
      fn heap_size(&self) -> usize {
-@@ -626,7 +625,6 @@ impl ConvexHttpService {
+@@ -634,7 +633,6 @@ impl ConvexHttpService {
              .await
          }
      }
@@ -32,7 +32,7 @@ index 6a04b99b3..0b94dd858 100644
  }
  
  /// Serves an HTTP server using the given service.
-@@ -994,6 +992,10 @@ where
+@@ -1002,6 +1000,10 @@ where
  
  #[allow(clippy::declare_interior_mutable_const)]
  pub const CONVEX_REQUEST_ID_HEADER: HeaderName = HeaderName::from_static("convex-request-id");
@@ -43,7 +43,7 @@ index 6a04b99b3..0b94dd858 100644
  
  pub struct ExtractRequestId(pub RequestId);
  
-@@ -1309,23 +1311,6 @@ impl<T: fmt::Display> fmt::Display for LogOptFmt<T> {
+@@ -1317,23 +1319,6 @@ impl<T: fmt::Display> fmt::Display for LogOptFmt<T> {
      }
  }
  
@@ -68,17 +68,15 @@ index 6a04b99b3..0b94dd858 100644
  /// convenience) from allowing browsers to make these requests.
  pub fn platform_api_cors() -> CorsLayer {
 diff --git a/crates/common/src/knobs.rs b/crates/common/src/knobs.rs
-index d08620d39..0917988e9 100644
+index cf42648c2..498924fca 100644
 --- a/crates/common/src/knobs.rs
 +++ b/crates/common/src/knobs.rs
-@@ -618,6 +618,17 @@ pub static MAX_REPEATABLE_TIMESTAMP_IDLE_FREQUENCY: LazyLock<Duration> = LazyLoc
+@@ -618,6 +618,15 @@ pub static MAX_REPEATABLE_TIMESTAMP_IDLE_FREQUENCY: LazyLock<Duration> = LazyLoc
  pub static MAX_REPEATABLE_TIMESTAMP_COMMIT_DELAY: LazyLock<Duration> =
      LazyLock::new(|| Duration::from_secs(env_config("MAX_REPEATABLE_TIMESTAMP_COMMIT_DELAY", 5)));
  
 +/// How often a dynamic-role leader verifies that it still owns the persistence
 +/// lease.
-+pub static LEASE_WATCH_POLL_INTERVAL: LazyLock<Duration> =
-+    LazyLock::new(|| Duration::from_millis(env_config("LEASE_WATCH_POLL_INTERVAL_MS", 1500)));
 +
 +/// Bounds how long a stepping-down leader waits to drain in-flight writes
 +/// before giving up and preempting (restart-as-follower drops the lease via
@@ -89,7 +87,7 @@ index d08620d39..0917988e9 100644
  /// The maximum delay between runs of retention, this is now only used for error
  /// backoff and the initial delay when backend is started.
  pub static MAX_RETENTION_DELAY_SECONDS: LazyLock<Duration> =
-@@ -944,6 +955,11 @@ pub static ISOLATE_QUEUE_CONGESTED_TIMEOUT: LazyLock<Duration> =
+@@ -944,6 +953,11 @@ pub static ISOLATE_QUEUE_CONGESTED_TIMEOUT: LazyLock<Duration> =
  pub static MAX_ISOLATE_WORKERS: LazyLock<usize> =
      LazyLock::new(|| env_config("MAX_ISOLATE_WORKERS", 300));
  
@@ -101,7 +99,7 @@ index d08620d39..0917988e9 100644
  /// The size of the pending commits in the committer queue. This is a FIFO
  /// queue, so if the queue is too large, we run into a risk of all requests
  /// waiting too long and no requests going through during overload. The size of
-@@ -1270,6 +1286,12 @@ pub static SOURCE_MAP_CACHE_QUEUE_SIZE: LazyLock<usize> =
+@@ -1270,6 +1284,12 @@ pub static SOURCE_MAP_CACHE_QUEUE_SIZE: LazyLock<usize> =
  pub static FUNRUN_INDEX_CACHE_SIZE: LazyLock<u64> =
      LazyLock::new(|| env_config("FUNRUN_INDEX_CACHE_SIZE", 50_000_000)); // 50 MB
  
@@ -114,7 +112,7 @@ index d08620d39..0917988e9 100644
  /// The maximum number of concurrent index cache requests in Funrun.
  pub static FUNRUN_INDEX_CACHE_CONCURRENCY: LazyLock<usize> =
      LazyLock::new(|| env_config("FUNRUN_INDEX_CACHE_CONCURRENCY", 200));
-@@ -1294,6 +1316,15 @@ pub static FUNRUN_MODULE_QUEUE_SIZE: LazyLock<usize> =
+@@ -1294,6 +1314,13 @@ pub static FUNRUN_MODULE_QUEUE_SIZE: LazyLock<usize> =
  pub static FUNRUN_CODE_CACHE_SIZE: LazyLock<u64> =
      LazyLock::new(|| env_config("FUNRUN_CODE_CACHE_SIZE", 500_000_000));
  
@@ -124,13 +122,11 @@ index d08620d39..0917988e9 100644
 +    LazyLock::new(|| env_config("FUNRUN_SNAPSHOT_CACHE_SIZE", 16));
 +
 +/// How long a cached funrun cold-load snapshot stays valid before eviction.
-+pub static FUNRUN_SNAPSHOT_CACHE_TTL: LazyLock<Duration> =
-+    LazyLock::new(|| Duration::from_secs(env_config("FUNRUN_SNAPSHOT_CACHE_TTL_SECONDS", 60)));
 +
  /// The maximum number of fetch clients Funrun would create.
  pub static FUNRUN_FETCH_CLIENT_CACHE_SIZE: LazyLock<usize> =
      LazyLock::new(|| env_config("FUNRUN_FETCH_CLIENT_CACHE_SIZE", 100));
-@@ -1312,10 +1343,28 @@ pub static FUNRUN_FETCH_CLIENT_CACHE_SIZE: LazyLock<usize> =
+@@ -1312,10 +1339,28 @@ pub static FUNRUN_FETCH_CLIENT_CACHE_SIZE: LazyLock<usize> =
  pub static FUNRUN_CLIENT_MAX_REQUESTS_PER_UPSTREAM: LazyLock<usize> =
      LazyLock::new(|| env_config("FUNRUN_CLIENT_MAX_REQUESTS_PER_UPSTREAM", 15));
  
@@ -473,10 +469,10 @@ index 000000000..0b7216a3c
 +}
 diff --git a/crates/function_runner/src/remote.rs b/crates/function_runner/src/remote.rs
 new file mode 100644
-index 000000000..ffdd2ca11
+index 000000000..751b5469e
 --- /dev/null
 +++ b/crates/function_runner/src/remote.rs
-@@ -0,0 +1,872 @@
+@@ -0,0 +1,885 @@
 +use std::{
 +    collections::{
 +        BTreeMap,
@@ -484,10 +480,6 @@ index 000000000..ffdd2ca11
 +    },
 +    net::SocketAddr,
 +    sync::{
-+        atomic::{
-+            AtomicU64,
-+            Ordering,
-+        },
 +        Arc,
 +        LazyLock,
 +    },
@@ -552,6 +544,7 @@ index 000000000..ffdd2ca11
 +    },
 +    udf_config::types::UdfConfig,
 +};
++use parking_lot::Mutex;
 +use pb::error_metadata::ErrorMetadataStatusExt;
 +use sync_types::{
 +    CanonicalizedModulePath,
@@ -602,9 +595,12 @@ index 000000000..ffdd2ca11
 +});
 +
 +fn parse_funrun_target(addr: &str) -> anyhow::Result<(String, u16)> {
++    anyhow::ensure!(
++        !addr.starts_with("https://"),
++        "CONVEX_FUNRUN_ADDR is plaintext (http:// or host:port); the funrun hop has no TLS: {addr}"
++    );
 +    let rest = addr
-+        .strip_prefix("https://")
-+        .or_else(|| addr.strip_prefix("http://"))
++        .strip_prefix("http://")
 +        .unwrap_or(addr)
 +        .trim_end_matches('/');
 +    let (host, port) = if let Some(bracketed) = rest.strip_prefix('[') {
@@ -627,6 +623,7 @@ index 000000000..ffdd2ca11
 +}
 +
 +const FUNRUN_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
++const LOCAL_ISOLATE_PERCENT_PER_CLIENT: usize = 100;
 +const FUNRUN_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
 +const FUNRUN_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(5);
 +
@@ -640,6 +637,66 @@ index 000000000..ffdd2ca11
 +        .keep_alive_while_idle(true))
 +}
 +
++fn spawn_endpoint_refresher<RT: Runtime>(
++    rt: &RT,
++    host: String,
++    port: u16,
++    tx: tokio::sync::mpsc::Sender<Change<SocketAddr, Endpoint>>,
++    empty_since: Arc<Mutex<Option<Instant>>>,
++) {
++    let refresh_rt = rt.clone();
++    rt.spawn_background("funrun_lb_refresh", async move {
++        let mut current = BTreeSet::new();
++        loop {
++            match lookup_host((host.as_str(), port)).await {
++                Ok(addrs) => {
++                    let unique: BTreeSet<SocketAddr> = addrs.collect();
++                    if !unique.is_empty() {
++                        let mut next: BTreeSet<SocketAddr> =
++                            unique.intersection(&current).copied().collect();
++                        for addr in unique.difference(&current) {
++                            if let Ok(endpoint) = funrun_endpoint(&format!("http://{addr}"))
++                                && tx.send(Change::Insert(*addr, endpoint)).await.is_ok()
++                            {
++                                next.insert(*addr);
++                            }
++                        }
++                        for addr in current.difference(&unique) {
++                            let _ = tx.send(Change::Remove(*addr)).await;
++                        }
++                        if next != current {
++                            if next.len() <= 1 {
++                                tracing::warn!(
++                                    "[funrun-lb] {} endpoint(s) for {host}:{port}; need a \
++                                     headless Service",
++                                    next.len()
++                                );
++                            } else {
++                                tracing::info!("[funrun-lb] p2c across {} endpoint(s)", next.len());
++                            }
++                            current = next;
++                        }
++                    }
++                },
++                Err(e) => {
++                    tracing::warn!("[funrun-lb] DNS resolution for {host}:{port} failed: {e}")
++                },
++            }
++            {
++                let mut empty_since = empty_since.lock();
++                if current.is_empty() {
++                    empty_since.get_or_insert_with(Instant::now);
++                } else {
++                    *empty_since = None;
++                }
++            }
++            refresh_rt
++                .wait(*common::knobs::FUNRUN_LB_REFRESH_INTERVAL)
++                .await;
++        }
++    });
++}
++
 +pub struct RemoteFunctionRunner<RT: Runtime> {
 +    channel: Channel,
 +    local: FunctionRunnerCore<RT, DeploymentStorage>,
@@ -649,8 +706,7 @@ index 000000000..ffdd2ca11
 +    callback_transport_url: Option<String>,
 +    rt: RT,
 +    instance_secret: DeploymentSecret,
-+    endpoints_epoch: Instant,
-+    endpoints_empty_since: Arc<AtomicU64>,
++    endpoints_empty_since: Arc<Mutex<Option<Instant>>>,
 +}
 +
 +enum RunFunctionAttemptError {
@@ -671,73 +727,15 @@ index 000000000..ffdd2ca11
 +        storage: DeploymentStorage,
 +    ) -> anyhow::Result<Self> {
 +        let (host, port) = parse_funrun_target(&funrun_addr)?;
-+        let endpoints_epoch = Instant::now();
-+        let endpoints_empty_since = Arc::new(AtomicU64::new(1));
-+        let channel = {
-+            let (channel, tx) = Channel::balance_channel::<SocketAddr>(64);
-+            let refresh_rt = rt.clone();
-+            let empty_since = endpoints_empty_since.clone();
-+            rt.spawn_background("funrun_lb_refresh", async move {
-+                let mut current = BTreeSet::new();
-+                loop {
-+                    match lookup_host((host.as_str(), port)).await {
-+                        Ok(addrs) => {
-+                            let unique: BTreeSet<SocketAddr> = addrs.collect();
-+                            if !unique.is_empty() {
-+                                let mut next: BTreeSet<SocketAddr> =
-+                                    unique.intersection(&current).copied().collect();
-+                                for addr in unique.difference(&current) {
-+                                    if let Ok(endpoint) = funrun_endpoint(&format!("http://{addr}"))
-+                                    {
-+                                        if tx.send(Change::Insert(*addr, endpoint)).await.is_ok() {
-+                                            next.insert(*addr);
-+                                        }
-+                                    }
-+                                }
-+                                for addr in current.difference(&unique) {
-+                                    let _ = tx.send(Change::Remove(*addr)).await;
-+                                }
-+                                if next != current {
-+                                    if next.len() <= 1 {
-+                                        tracing::warn!(
-+                                            "[funrun-lb] {} endpoint(s) for {host}:{port}; need a \
-+                                             headless Service",
-+                                            next.len()
-+                                        );
-+                                    } else {
-+                                        tracing::info!(
-+                                            "[funrun-lb] p2c across {} endpoint(s)",
-+                                            next.len()
-+                                        );
-+                                    }
-+                                    current = next;
-+                                }
-+                            }
-+                        },
-+                        Err(e) => {
-+                            tracing::warn!(
-+                                "[funrun-lb] DNS resolution for {host}:{port} failed: {e}"
-+                            )
-+                        },
-+                    }
-+                    if current.is_empty() {
-+                        let _ = empty_since.compare_exchange(
-+                            0,
-+                            endpoints_epoch.elapsed().as_nanos().max(1) as u64,
-+                            Ordering::Relaxed,
-+                            Ordering::Relaxed,
-+                        );
-+                    } else {
-+                        empty_since.store(0, Ordering::Relaxed);
-+                    }
-+                    refresh_rt
-+                        .wait(*common::knobs::FUNRUN_LB_REFRESH_INTERVAL)
-+                        .await;
-+                }
-+            });
-+            channel
-+        };
-+        let local = FunctionRunnerCore::new(rt.clone(), storage, 100, funrun_isolate_worker(&rt))?;
++        let endpoints_empty_since = Arc::new(Mutex::new(Some(Instant::now())));
++        let (channel, tx) = Channel::balance_channel::<SocketAddr>(64);
++        spawn_endpoint_refresher(&rt, host, port, tx, endpoints_empty_since.clone());
++        let local = FunctionRunnerCore::new(
++            rt.clone(),
++            storage,
++            LOCAL_ISOLATE_PERCENT_PER_CLIENT,
++            funrun_isolate_worker(&rt),
++        )?;
 +        let callback_transport_url = std::env::var("CONVEX_FUNRUN_CALLBACK_URL")
 +            .ok()
 +            .filter(|v| !v.is_empty());
@@ -758,12 +756,11 @@ index 000000000..ffdd2ca11
 +            callback_transport_url,
 +            rt,
 +            instance_secret,
-+            endpoints_epoch,
 +            endpoints_empty_since,
 +        })
 +    }
 +
-+    fn funrun_auth_header(&self) -> String {
++    fn auth_header(&self) -> String {
 +        let unix_seconds = self.rt.unix_timestamp().as_secs();
 +        funrun_auth_header(&self.instance_secret, &self.deployment.name, unix_seconds)
 +    }
@@ -772,7 +769,7 @@ index 000000000..ffdd2ca11
 +        let mut request = tonic::Request::new(message);
 +        request.metadata_mut().insert(
 +            FUNRUN_AUTH_METADATA_KEY,
-+            self.funrun_auth_header()
++            self.auth_header()
 +                .parse()
 +                .context("invalid funrun auth header")?,
 +        );
@@ -796,20 +793,15 @@ index 000000000..ffdd2ca11
 +    }
 +
 +    fn ensure_endpoints_available(&self) -> anyhow::Result<()> {
-+        let empty_since = self.endpoints_empty_since.load(Ordering::Relaxed);
-+        if empty_since == 0 {
-+            return Ok(());
-+        }
-+        let elapsed_nanos = self.endpoints_epoch.elapsed().as_nanos() as u64;
-+        if elapsed_nanos.saturating_sub(empty_since)
-+            < common::knobs::FUNRUN_EMPTY_ENDPOINTS_FAIL_FAST.as_nanos() as u64
++        if let Some(empty_since) = *self.endpoints_empty_since.lock()
++            && empty_since.elapsed() >= *common::knobs::FUNRUN_EMPTY_ENDPOINTS_FAIL_FAST
 +        {
-+            return Ok(());
++            anyhow::bail!(ErrorMetadata::rejected_before_execution(
++                "FunrunUnavailable",
++                "funrun DNS has resolved no endpoints for over 30s; check the funrun Service",
++            ))
 +        }
-+        anyhow::bail!(ErrorMetadata::rejected_before_execution(
-+            "FunrunUnavailable",
-+            "funrun DNS has resolved no endpoints for over 30s; check the funrun Service",
-+        ))
++        Ok(())
 +    }
 +
 +    async fn run_function_attempt(
@@ -866,27 +858,20 @@ index 000000000..ffdd2ca11
 +        })
 +    }
 +
-+    async fn run_function_remote(
++    fn run_function_request(
 +        &self,
 +        udf_type: UdfType,
 +        identity: Identity,
 +        ts: RepeatableTimestamp,
 +        existing_writes: FunctionWrites,
-+        log_line_sender: Option<mpsc::UnboundedSender<LogLine>>,
 +        function_metadata: Option<FunctionMetadata>,
 +        default_system_env_vars: BTreeMap<EnvVarName, EnvVarValue>,
 +        in_memory_index_last_modified: BTreeMap<IndexId, Timestamp>,
 +        context: ExecutionContext,
-+    ) -> anyhow::Result<(
-+        Option<FunctionFinalTransaction>,
-+        FunctionOutcome,
-+        FunctionUsageStats,
-+    )> {
-+        let inert_identity: InertIdentity = identity.clone().into();
-+        let path_and_args = function_metadata.as_ref().map(|m| m.path_and_args.clone());
-+        let component = path_and_args
++    ) -> anyhow::Result<pb::funrun::RunFunctionRequest> {
++        let component = function_metadata
 +            .as_ref()
-+            .map(|p| p.path().component)
++            .map(|m| m.path_and_args.path().component)
 +            .unwrap_or(common::components::ComponentId::Root);
 +        let auth_header = token_to_authorization_header(identity.clone().into())?;
 +        let callback_token = self.key_broker.issue_action_token(component);
@@ -895,7 +880,7 @@ index 000000000..ffdd2ca11
 +            .into_iter()
 +            .map(pb::common::PendingDocumentUpdate::try_from)
 +            .collect::<anyhow::Result<Vec<_>>>()?;
-+        let (path_and_args_proto, journal_proto) = match function_metadata {
++        let (path_and_args, journal) = match function_metadata {
 +            Some(FunctionMetadata {
 +                path_and_args,
 +                journal,
@@ -905,14 +890,14 @@ index 000000000..ffdd2ca11
 +            ),
 +            None => (None, None),
 +        };
-+        let request = pb::funrun::RunFunctionRequest {
++        Ok(pb::funrun::RunFunctionRequest {
 +            instance_name: self.deployment.name.clone(),
 +            udf_type: pb::common::UdfType::from(udf_type) as i32,
 +            identity: Some(identity.try_into()?),
 +            ts: Some(ts.into()),
 +            existing_writes,
-+            path_and_args: path_and_args_proto,
-+            journal: journal_proto,
++            path_and_args,
++            journal,
 +            default_system_env_vars: default_system_env_vars
 +                .into_iter()
 +                .map(|(name, value)| pb::funrun::EnvVar {
@@ -932,11 +917,40 @@ index 000000000..ffdd2ca11
 +            callback_transport_url: self.callback_transport_url.clone(),
 +            callback_token: Some(callback_token),
 +            auth_header,
-+        };
++        })
++    }
++
++    async fn run_function_remote(
++        &self,
++        udf_type: UdfType,
++        identity: Identity,
++        ts: RepeatableTimestamp,
++        existing_writes: FunctionWrites,
++        log_line_sender: Option<mpsc::UnboundedSender<LogLine>>,
++        function_metadata: Option<FunctionMetadata>,
++        default_system_env_vars: BTreeMap<EnvVarName, EnvVarValue>,
++        in_memory_index_last_modified: BTreeMap<IndexId, Timestamp>,
++        context: ExecutionContext,
++    ) -> anyhow::Result<(
++        Option<FunctionFinalTransaction>,
++        FunctionOutcome,
++        FunctionUsageStats,
++    )> {
++        let inert_identity: InertIdentity = identity.clone().into();
++        let path_and_args = function_metadata.as_ref().map(|m| m.path_and_args.clone());
++        let request = self.run_function_request(
++            udf_type,
++            identity,
++            ts,
++            existing_writes,
++            function_metadata,
++            default_system_env_vars,
++            in_memory_index_last_modified,
++            context,
++        )?;
 +        let max_attempts = (*common::knobs::FUNRUN_CLIENT_MAX_RETRIES as u32).saturating_add(1);
 +        let has_deadline = matches!(udf_type, UdfType::Query | UdfType::Mutation);
 +        let mut attempt: u32 = 0;
-+        let mut request = Some(request);
 +        let result = 'attempts: loop {
 +            let last_attempt = attempt + 1 >= max_attempts;
 +            let mut parts_forwarded = false;
@@ -944,12 +958,7 @@ index 000000000..ffdd2ca11
 +                if let Err(e) = self.ensure_endpoints_available() {
 +                    break 'attempt RunFunctionAttemptError::NoEndpoints(e);
 +                }
-+                let req = if last_attempt {
-+                    request.take().expect("funrun request already consumed")
-+                } else {
-+                    request.clone().expect("funrun request missing")
-+                };
-+                let req = self.authenticated_request(req)?;
++                let req = self.authenticated_request(request.clone())?;
 +                let timer = funrun_client_rpc_timer(udf_type);
 +                let attempt_fut =
 +                    self.run_function_attempt(req, &log_line_sender, &mut parts_forwarded);
@@ -1659,10 +1668,10 @@ index 68beae10e..71651f64c 100644
          for handle in self.handles.lock().iter() {
 diff --git a/crates/keybroker/src/funrun_auth.rs b/crates/keybroker/src/funrun_auth.rs
 new file mode 100644
-index 000000000..3df3f1656
+index 000000000..96936ce89
 --- /dev/null
 +++ b/crates/keybroker/src/funrun_auth.rs
-@@ -0,0 +1,159 @@
+@@ -0,0 +1,156 @@
 +use aws_lc_rs::hmac;
 +
 +use crate::DeploymentSecret;
@@ -1693,10 +1702,6 @@ index 000000000..3df3f1656
 +    const_hex::encode(tag.as_ref())
 +}
 +
-+fn funrun_auth_token(secret: &DeploymentSecret, instance_name: &str, unix_seconds: u64) -> String {
-+    funrun_auth_token_for_window(secret, instance_name, window_for(unix_seconds))
-+}
-+
 +pub fn funrun_auth_header(
 +    secret: &DeploymentSecret,
 +    instance_name: &str,
@@ -1704,7 +1709,7 @@ index 000000000..3df3f1656
 +) -> String {
 +    format!(
 +        "Bearer {}",
-+        funrun_auth_token(secret, instance_name, unix_seconds)
++        funrun_auth_token_for_window(secret, instance_name, window_for(unix_seconds))
 +    )
 +}
 +
@@ -1743,8 +1748,9 @@ index 000000000..3df3f1656
 +mod tests {
 +    use super::{
 +        funrun_auth_header,
-+        funrun_auth_token,
++        funrun_auth_token_for_window,
 +        verify_funrun_auth_header,
++        window_for,
 +        WINDOW_SECONDS,
 +    };
 +    use crate::DeploymentSecret;
@@ -1770,7 +1776,7 @@ index 000000000..3df3f1656
 +            "Bearer", &secret, "carnitas", now
 +        ));
 +        assert!(!verify_funrun_auth_header(
-+            &funrun_auth_token(&secret, "carnitas", now),
++            &funrun_auth_token_for_window(&secret, "carnitas", window_for(now)),
 +            &secret,
 +            "carnitas",
 +            now

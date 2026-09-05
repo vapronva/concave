@@ -58,10 +58,10 @@ index 000000000..fee975de7
 +workspace = true
 diff --git a/crates/funrun_server/src/callbacks.rs b/crates/funrun_server/src/callbacks.rs
 new file mode 100644
-index 000000000..8f9c87528
+index 000000000..b6cff6bed
 --- /dev/null
 +++ b/crates/funrun_server/src/callbacks.rs
-@@ -0,0 +1,607 @@
+@@ -0,0 +1,594 @@
 +use anyhow::Context;
 +use async_trait::async_trait;
 +use common::{
@@ -157,10 +157,10 @@ index 000000000..8f9c87528
 +        if let Some(user_agent) = &context.request_metadata.user_agent {
 +            req = req.header("Convex-Request-Client-User-Agent", user_agent.as_str());
 +        }
-+        if *identity == self.request_identity {
-+            if let Some(auth) = &self.auth_header {
-+                req = req.header(http::header::AUTHORIZATION, auth);
-+            }
++        if *identity == self.request_identity
++            && let Some(auth) = &self.auth_header
++        {
++            req = req.header(http::header::AUTHORIZATION, auth);
 +        }
 +        req
 +    }
@@ -175,8 +175,8 @@ index 000000000..8f9c87528
 +    ) -> anyhow::Result<FunctionResult> {
 +        let args_raw: Box<RawValue> = RawValue::from_string(args.get().to_owned())?;
 +        let body = RunFunctionBody {
-+            path: Some(function_path.udf_path.to_string()),
-+            component_path: Some(function_path.component.to_string()),
++            path: function_path.udf_path.to_string(),
++            component_path: function_path.component.to_string(),
 +            args: args_raw,
 +        };
 +        let response = self
@@ -185,11 +185,7 @@ index 000000000..8f9c87528
 +            .send()
 +            .await
 +            .with_context(|| format!("funrun action callback to {path} failed"))?;
-+        let status = response.status();
-+        let text = response.text().await?;
-+        if !status.is_success() {
-+            return Err(callback_status_error(path, status, text));
-+        }
++        let text = checked(response).await?.text().await?;
 +        let parsed: RunFunctionResponse = serde_json::from_str(&text)
 +            .with_context(|| format!("funrun callback {path} returned unparseable body: {text}"))?;
 +        let result = match parsed {
@@ -207,18 +203,13 @@ index 000000000..8f9c87528
 +    }
 +}
 +
-+fn callback_status_error(path: &str, status: reqwest::StatusCode, text: String) -> anyhow::Error {
++fn callback_status_error(path: &str, status: http::StatusCode, text: String) -> anyhow::Error {
 +    let err = anyhow::anyhow!("funrun callback {path} returned {status}: {text}");
-+    let metadata = http::StatusCode::from_u16(status.as_u16())
-+        .ok()
-+        .and_then(|code| {
-+            errors::ErrorMetadata::from_http_status_code(
-+                code,
-+                "CallbackFailed",
-+                format!("funrun callback {path} returned {status}"),
-+            )
-+        });
-+    match metadata {
++    match errors::ErrorMetadata::from_http_status_code(
++        status,
++        "CallbackFailed",
++        format!("funrun callback {path} returned {status}"),
++    ) {
 +        Some(metadata) => err.context(metadata),
 +        None => err,
 +    }
@@ -244,10 +235,8 @@ index 000000000..8f9c87528
 +#[derive(Serialize)]
 +#[serde(rename_all = "camelCase")]
 +struct RunFunctionBody {
-+    #[serde(skip_serializing_if = "Option::is_none")]
-+    path: Option<String>,
-+    #[serde(skip_serializing_if = "Option::is_none")]
-+    component_path: Option<String>,
++    path: String,
++    component_path: String,
 +    args: Box<RawValue>,
 +}
 +
@@ -267,9 +256,8 @@ index 000000000..8f9c87528
 +#[derive(Serialize)]
 +#[serde(rename_all = "camelCase")]
 +struct ScheduleJobBody {
-+    udf_path: Option<String>,
-+    #[serde(skip_serializing_if = "Option::is_none")]
-+    component_path: Option<String>,
++    udf_path: String,
++    component_path: String,
 +    udf_args: Box<RawValue>,
 +    scheduled_ts: f64,
 +}
@@ -289,9 +277,8 @@ index 000000000..8f9c87528
 +#[derive(Serialize)]
 +#[serde(rename_all = "camelCase")]
 +struct CreateFunctionHandleBody {
-+    udf_path: Option<String>,
-+    #[serde(skip_serializing_if = "Option::is_none")]
-+    component_path: Option<String>,
++    udf_path: String,
++    component_path: String,
 +}
 +
 +#[derive(Deserialize)]
@@ -418,8 +405,8 @@ index 000000000..8f9c87528
 +    ) -> anyhow::Result<DeveloperDocumentId> {
 +        let udf_args: Box<RawValue> = RawValue::from_string(udf_args.get().to_owned())?;
 +        let body = ScheduleJobBody {
-+            udf_path: Some(scheduled_path.udf_path.to_string()),
-+            component_path: Some(scheduled_path.component.to_string()),
++            udf_path: scheduled_path.udf_path.to_string(),
++            component_path: scheduled_path.component.to_string(),
 +            udf_args,
 +            scheduled_ts: scheduled_ts.as_secs_f64(),
 +        };
@@ -455,8 +442,8 @@ index 000000000..8f9c87528
 +        path: CanonicalizedComponentFunctionPath,
 +    ) -> anyhow::Result<FunctionHandle> {
 +        let body = CreateFunctionHandleBody {
-+            udf_path: Some(path.udf_path.to_string()),
-+            component_path: Some(path.component.to_string()),
++            udf_path: path.udf_path.to_string(),
++            component_path: path.component.to_string(),
 +        };
 +        let response = self
 +            .request(
@@ -627,8 +614,8 @@ index 000000000..8f9c87528
 +    #[test]
 +    fn run_function_body_keeps_root_component_path_absolute() {
 +        let body = RunFunctionBody {
-+            path: Some("app.js:bump".to_string()),
-+            component_path: Some(ComponentPath::root().to_string()),
++            path: "app.js:bump".to_string(),
++            component_path: ComponentPath::root().to_string(),
 +            args: serde_json::value::RawValue::from_string("{}".to_string()).unwrap(),
 +        };
 +        let encoded = serde_json::to_value(&body).unwrap();
@@ -758,10 +745,12 @@ index 000000000..8f8f88182
 +}
 diff --git a/crates/funrun_server/src/main.rs b/crates/funrun_server/src/main.rs
 new file mode 100644
-index 000000000..ad2c3990a
+index 000000000..caedd8f30
 --- /dev/null
 +++ b/crates/funrun_server/src/main.rs
-@@ -0,0 +1,257 @@
+@@ -0,0 +1,271 @@
++#![recursion_limit = "256"]
++
 +use std::sync::{
 +    atomic::{
 +        AtomicBool,
@@ -814,7 +803,7 @@ index 000000000..ad2c3990a
 +        config.listen,
 +    );
 +    let registry = Arc::new(InstanceRegistry::new(runtime.clone(), &config)?);
-+    registry.prewarm_all().await;
++    registry.prewarm().await;
 +    spawn_pod_deletion_cost_updater(&runtime, registry.clone());
 +    let service = FunrunService::new(runtime.clone(), registry.clone())?;
 +    let server = pb::funrun::funrun_server::FunrunServer::new(service)
@@ -908,6 +897,48 @@ index 000000000..ad2c3990a
 +        .context("convex-funrun health server exited")
 +}
 +
++const SERVICE_ACCOUNT_DIR: &str = "/var/run/secrets/kubernetes.io/serviceaccount";
++
++async fn in_cluster_client() -> anyhow::Result<reqwest::Client> {
++    let ca = tokio::fs::read(format!("{SERVICE_ACCOUNT_DIR}/ca.crt"))
++        .await
++        .context("reading the in-cluster serviceaccount CA certificate")?;
++    Ok(reqwest::Client::builder()
++        .add_root_certificate(reqwest::Certificate::from_pem(&ca)?)
++        .timeout(std::time::Duration::from_secs(10))
++        .build()?)
++}
++
++async fn patch_pod_deletion_cost(
++    client: &reqwest::Client,
++    url: &str,
++    cost: i64,
++) -> anyhow::Result<()> {
++    let token = tokio::fs::read_to_string(format!("{SERVICE_ACCOUNT_DIR}/token"))
++        .await
++        .context("reading the serviceaccount token")?;
++    let body = format!(
++        "{{\"metadata\":{{\"annotations\":{{\"controller.kubernetes.io/pod-deletion-cost\":\"\
++         {cost}\"}}}}}}"
++    );
++    let response = client
++        .patch(url)
++        .bearer_auth(token.trim())
++        .header(
++            reqwest::header::CONTENT_TYPE,
++            "application/strategic-merge-patch+json",
++        )
++        .body(body)
++        .send()
++        .await?;
++    anyhow::ensure!(
++        response.status().is_success(),
++        "pod patch returned HTTP {}",
++        response.status()
++    );
++    Ok(())
++}
++
 +fn spawn_pod_deletion_cost_updater(
 +    runtime: &ProdRuntime,
 +    registry: Arc<InstanceRegistry<ProdRuntime>>,
@@ -927,15 +958,7 @@ index 000000000..ad2c3990a
 +    };
 +    let url = format!("https://kubernetes.default.svc/api/v1/namespaces/{namespace}/pods/{pod}");
 +    runtime.spawn_background("funrun_pod_deletion_cost", async move {
-+        let client = match tokio::fs::read("/var/run/secrets/kubernetes.io/serviceaccount/ca.crt")
-+            .await
-+            .context("reading the in-cluster serviceaccount CA certificate")
-+            .and_then(|ca| Ok(reqwest::Certificate::from_pem(&ca)?))
-+            .and_then(|cert| {
-+                Ok(reqwest::Client::builder()
-+                    .add_root_certificate(cert)
-+                    .build()?)
-+            }) {
++        let client = match in_cluster_client().await {
 +            Ok(client) => client,
 +            Err(e) => {
 +                tracing::warn!(
@@ -946,6 +969,7 @@ index 000000000..ad2c3990a
 +        };
 +        tracing::info!("[convex-funrun] pod-deletion-cost updater active for {namespace}/{pod}");
 +        let mut last: Option<i64> = None;
++        let mut failures: u32 = 0;
 +        loop {
 +            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
 +            let (busy, total) = registry.isolate_workers();
@@ -953,45 +977,22 @@ index 000000000..ad2c3990a
 +            if last == Some(cost) {
 +                continue;
 +            }
-+            let token = match tokio::fs::read_to_string(
-+                "/var/run/secrets/kubernetes.io/serviceaccount/token",
-+            )
-+            .await
-+            {
-+                Ok(token) => token,
-+                Err(e) => {
-+                    tracing::debug!("[convex-funrun] pod-deletion-cost: token read failed: {e}");
-+                    continue;
-+                },
-+            };
-+            let body = format!(
-+                "{{\"metadata\":{{\"annotations\":{{\"controller.kubernetes.io/pod-deletion-cost\"\
-+                 :\"{cost}\"}}}}}}"
-+            );
-+            match client
-+                .patch(&url)
-+                .bearer_auth(token.trim())
-+                .header(
-+                    reqwest::header::CONTENT_TYPE,
-+                    "application/strategic-merge-patch+json",
-+                )
-+                .body(body)
-+                .send()
-+                .await
-+            {
-+                Ok(resp) if resp.status().is_success() => {
++            match patch_pod_deletion_cost(&client, &url, cost).await {
++                Ok(()) => {
 +                    last = Some(cost);
++                    failures = 0;
 +                    tracing::debug!(
 +                        "[convex-funrun] pod-deletion-cost={cost} (isolates {busy}/{total})"
 +                    );
 +                },
-+                Ok(resp) => {
-+                    tracing::debug!(
-+                        "[convex-funrun] pod-deletion-cost patch: HTTP {}",
-+                        resp.status()
-+                    )
++                Err(e) => {
++                    failures += 1;
++                    if failures == 1 {
++                        tracing::warn!("[convex-funrun] pod-deletion-cost patch failed: {e:#}");
++                    } else {
++                        tracing::debug!("[convex-funrun] pod-deletion-cost patch failed: {e:#}");
++                    }
 +                },
-+                Err(e) => tracing::debug!("[convex-funrun] pod-deletion-cost patch failed: {e}"),
 +            }
 +        }
 +    });
@@ -1749,19 +1750,13 @@ index 000000000..27f02b7fe
 +}
 diff --git a/crates/funrun_server/src/snapshot.rs b/crates/funrun_server/src/snapshot.rs
 new file mode 100644
-index 000000000..e4de99bf2
+index 000000000..544041673
 --- /dev/null
 +++ b/crates/funrun_server/src/snapshot.rs
-@@ -0,0 +1,758 @@
+@@ -0,0 +1,600 @@
 +use std::{
-+    collections::{
-+        BTreeMap,
-+        HashMap,
-+    },
-+    sync::{
-+        Arc,
-+        OnceLock,
-+    },
++    collections::BTreeMap,
++    sync::Arc,
 +    time::Duration,
 +};
 +
@@ -1802,6 +1797,7 @@ index 000000000..e4de99bf2
 +use indexing::{
 +    index_cache::IndexCache,
 +    index_reader::IndexReader,
++    index_registry::IndexRegistry,
 +};
 +use keybroker::FunctionRunnerKeyBroker;
 +use model::{
@@ -1813,8 +1809,10 @@ index 000000000..e4de99bf2
 +};
 +use moka::future::Cache;
 +use parking_lot::Mutex;
-+use search::searcher::InProcessSearcher;
-+use storage::Storage;
++use search::{
++    searcher::InProcessSearcher,
++    TextIndexManager,
++};
 +use sync_types::Timestamp;
 +use tokio::sync::OnceCell;
 +
@@ -1832,29 +1830,25 @@ index 000000000..e4de99bf2
 +    },
 +};
 +
-+fn max_percent_per_client(num_tenants: usize) -> usize {
-+    let tenants = num_tenants.max(1);
-+    (100 / tenants).max(10)
-+}
++const MAX_PERCENT_PER_CLIENT: usize = 100;
++const SNAPSHOT_CACHE_TTL: Duration = Duration::from_secs(60);
 +
 +pub struct InstanceRegistry<RT: Runtime> {
 +    rt: RT,
 +    db: clusters::DbDriverTag,
 +    require_ssl: bool,
-+    instances: HashMap<String, Arc<FunrunInstanceConfig>>,
++    instance: Arc<FunrunInstanceConfig>,
 +    shared_isolate: SharedIsolateResources<RT>,
 +    searcher: Arc<dyn search::Searcher>,
-+    states: Arc<Mutex<HashMap<String, RegistryEntry<RT>>>>,
-+    lag_samples: Arc<Mutex<HashMap<String, InstanceLagSample>>>,
-+    load_errors: Arc<Mutex<HashMap<String, InstanceLoadError>>>,
++    state: Arc<OnceCell<Arc<InstanceState<RT>>>>,
++    lag_sample: Arc<Mutex<Option<InstanceLagSample>>>,
++    load_error: Arc<Mutex<Option<InstanceLoadError>>>,
 +}
-+
-+type RegistryEntry<RT> = Arc<OnceCell<Arc<InstanceState<RT>>>>;
 +
 +#[derive(Clone)]
 +struct InstanceLagSample {
-+    warm_timestamp: String,
-+    persistence_timestamp: Option<String>,
++    warm_timestamp: Timestamp,
++    persistence_timestamp: Option<Timestamp>,
 +    lag_seconds: Option<f64>,
 +    error: Option<String>,
 +}
@@ -1867,43 +1861,35 @@ index 000000000..e4de99bf2
 +
 +impl<RT: Runtime> InstanceRegistry<RT> {
 +    pub fn new(rt: RT, config: &FunrunConfig) -> anyhow::Result<Self> {
-+        let instances: HashMap<String, Arc<FunrunInstanceConfig>> = HashMap::from([(
-+            config.instance.instance_name.clone(),
-+            Arc::new(config.instance.clone()),
-+        )]);
-+        let cap = max_percent_per_client(instances.len());
 +        let shared_isolate = SharedIsolateResources::new_with_max_workers(
 +            rt.clone(),
-+            cap,
++            MAX_PERCENT_PER_CLIENT,
 +            *MAX_ISOLATE_WORKERS,
 +            funrun_isolate_worker(&rt),
 +        )?;
 +        tracing::info!(
-+            "[convex-funrun] shared isolate pool: {} workers, per-tenant cap {}% ({} tenant(s))",
++            "[convex-funrun] shared isolate pool: {} workers",
 +            shared_isolate.max_isolate_workers(),
-+            cap,
-+            instances.len(),
 +        );
 +        let searcher: Arc<dyn search::Searcher> = Arc::new(InProcessSearcher::new(rt.clone())?);
-+        let states = Arc::new(Mutex::new(HashMap::new()));
-+        let lag_samples = Arc::new(Mutex::new(HashMap::new()));
-+        let load_errors = Arc::new(Mutex::new(HashMap::new()));
++        let state = Arc::new(OnceCell::new());
++        let lag_sample = Arc::new(Mutex::new(None));
 +        Self::spawn_isolate_pool_sampler(
 +            rt.clone(),
 +            shared_isolate.clone(),
-+            states.clone(),
-+            lag_samples.clone(),
++            state.clone(),
++            lag_sample.clone(),
 +        );
 +        Ok(Self {
 +            rt,
 +            db: config.db,
 +            require_ssl: config.require_ssl,
-+            instances,
++            instance: Arc::new(config.instance.clone()),
 +            shared_isolate,
 +            searcher,
-+            states,
-+            lag_samples,
-+            load_errors,
++            state,
++            lag_sample,
++            load_error: Arc::new(Mutex::new(None)),
 +        })
 +    }
 +
@@ -1922,96 +1908,78 @@ index 000000000..e4de99bf2
 +        &self,
 +        instance_name: &str,
 +    ) -> anyhow::Result<Arc<FunrunInstanceConfig>> {
-+        lookup_instance_config(&self.instances, instance_name)
++        anyhow::ensure!(
++            instance_name == self.instance.instance_name,
++            "funrun pod is not configured for instance {instance_name:?} (FUNRUN_INSTANCE_NAME)"
++        );
++        Ok(self.instance.clone())
 +    }
 +
 +    pub async fn get_or_create(
 +        &self,
 +        instance_name: &str,
 +    ) -> anyhow::Result<Arc<InstanceState<RT>>> {
-+        let config = lookup_instance_config(&self.instances, instance_name)?;
-+        let (rt, db, require_ssl) = (self.rt.clone(), self.db, self.require_ssl);
-+        let shared_isolate = self.shared_isolate.clone();
-+        let searcher = self.searcher.clone();
-+        let load_errors = self.load_errors.clone();
-+        let error_rt = self.rt.clone();
-+        let name = instance_name.to_owned();
-+        let state = get_or_init_entry(&self.states, instance_name, || async move {
-+            let state = InstanceState::load(rt, &config, db, require_ssl, shared_isolate, searcher)
++        let config = self.instance_config(instance_name)?;
++        self.state
++            .get_or_try_init(|| async {
++                let state = InstanceState::load(
++                    self.rt.clone(),
++                    &config,
++                    self.db,
++                    self.require_ssl,
++                    self.shared_isolate.clone(),
++                    self.searcher.clone(),
++                )
 +                .await
 +                .map(Arc::new);
-+            let mut errors = load_errors.lock();
-+            match &state {
-+                Ok(_) => {
-+                    errors.remove(&name);
-+                },
-+                Err(e) => {
-+                    errors.insert(
-+                        name.clone(),
-+                        InstanceLoadError {
-+                            message: format!("{e:#}"),
-+                            unix_ts: error_rt.unix_timestamp().as_secs(),
-+                        },
-+                    );
-+                },
-+            }
-+            drop(errors);
-+            state
-+        })
-+        .await?;
-+        Ok(state)
++                *self.load_error.lock() = state.as_ref().err().map(|e| InstanceLoadError {
++                    message: format!("{e:#}"),
++                    unix_ts: self.rt.unix_timestamp().as_secs(),
++                });
++                state
++            })
++            .await
++            .cloned()
 +    }
 +
-+    pub async fn prewarm_all(&self) {
-+        for instance_name in self.instances.keys() {
-+            if let Err(e) = self.get_or_create(instance_name).await {
-+                tracing::error!(
-+                    "[convex-funrun] prewarm failed for {instance_name}: {e:#}; will retry on \
-+                     demand"
-+                );
-+            }
++    pub async fn prewarm(&self) {
++        if let Err(e) = self.get_or_create(&self.instance.instance_name).await {
++            tracing::error!("[convex-funrun] prewarm failed: {e:#}; will retry on demand");
 +        }
 +    }
 +
 +    pub fn health_report(&self, max_lag: Duration) -> HealthReport {
-+        let samples = self.lag_samples.lock().clone();
-+        let load_errors = self.load_errors.lock().clone();
-+        let instances = self
-+            .instances
-+            .keys()
-+            .map(|name| {
-+                let sample = samples.get(name);
-+                let load_error = load_errors.get(name);
-+                let healthy = match sample {
-+                    Some(sample) => match sample.lag_seconds {
-+                        Some(lag) => lag <= max_lag.as_secs_f64(),
-+                        None => sample.error.is_none(),
-+                    },
-+                    None => load_error.is_none(),
-+                };
-+                InstanceHealth {
-+                    name: name.clone(),
-+                    healthy,
-+                    warm_timestamp: sample.map(|s| s.warm_timestamp.clone()),
-+                    persistence_timestamp: sample.and_then(|s| s.persistence_timestamp.clone()),
-+                    lag_seconds: sample.and_then(|s| s.lag_seconds),
-+                    error: sample.and_then(|s| s.error.clone()),
-+                    last_load_error: load_error.map(|e| e.message.clone()),
-+                    last_load_error_unix_ts: load_error.map(|e| e.unix_ts),
-+                }
-+            })
-+            .collect();
++        let sample = self.lag_sample.lock().clone();
++        let load_error = self.load_error.lock().clone();
++        let instance_healthy = match &sample {
++            Some(sample) => match sample.lag_seconds {
++                Some(lag) => lag <= max_lag.as_secs_f64(),
++                None => sample.error.is_none(),
++            },
++            None => load_error.is_none(),
++        };
 +        HealthReport {
 +            healthy: self.pool_healthy(),
-+            instances,
++            instance: InstanceHealth {
++                name: self.instance.instance_name.clone(),
++                healthy: instance_healthy,
++                warm_timestamp: sample.as_ref().map(|s| s.warm_timestamp.to_string()),
++                persistence_timestamp: sample
++                    .as_ref()
++                    .and_then(|s| s.persistence_timestamp.map(|ts| ts.to_string())),
++                lag_seconds: sample.as_ref().and_then(|s| s.lag_seconds),
++                error: sample.and_then(|s| s.error),
++                last_load_error: load_error.as_ref().map(|e| e.message.clone()),
++                last_load_error_unix_ts: load_error.map(|e| e.unix_ts),
++            },
 +        }
 +    }
 +
 +    fn spawn_isolate_pool_sampler(
 +        rt: RT,
 +        shared_isolate: SharedIsolateResources<RT>,
-+        states: Arc<Mutex<HashMap<String, RegistryEntry<RT>>>>,
-+        lag_samples: Arc<Mutex<HashMap<String, InstanceLagSample>>>,
++        state: Arc<OnceCell<Arc<InstanceState<RT>>>>,
++        lag_sample: Arc<Mutex<Option<InstanceLagSample>>>,
 +    ) {
 +        let worker_rt = rt.clone();
 +        rt.spawn_background("funrun_isolate_pool_sampler", async move {
@@ -2020,20 +1988,10 @@ index 000000000..e4de99bf2
 +                    shared_isolate.active_isolate_workers(),
 +                    shared_isolate.max_isolate_workers(),
 +                );
-+                let loaded: Vec<(String, Arc<InstanceState<RT>>)> = {
-+                    let guard = states.lock();
-+                    guard
-+                        .iter()
-+                        .filter_map(|(name, entry)| {
-+                            entry.get().map(|state| (name.clone(), state.clone()))
-+                        })
-+                        .collect()
-+                };
-+                let mut fresh = HashMap::with_capacity(loaded.len());
-+                for (name, state) in loaded {
-+                    fresh.insert(name, sample_instance_lag(&state).await);
++                if let Some(state) = state.get() {
++                    let sample = sample_instance_lag(state).await;
++                    *lag_sample.lock() = Some(sample);
 +                }
-+                *lag_samples.lock() = fresh;
 +                worker_rt.wait(Duration::from_secs(2)).await;
 +            }
 +        });
@@ -2044,52 +2002,18 @@ index 000000000..e4de99bf2
 +    let warm = state.database.now_ts_for_reads();
 +    match new_static_repeatable_recent(state.reader.as_ref()).await {
 +        Ok(latest) => InstanceLagSample {
-+            warm_timestamp: warm.to_string(),
-+            persistence_timestamp: Some(latest.to_string()),
++            warm_timestamp: *warm,
++            persistence_timestamp: Some(*latest),
 +            lag_seconds: Some(latest.secs_since_f64(*warm).max(0.0)),
 +            error: None,
 +        },
 +        Err(e) => InstanceLagSample {
-+            warm_timestamp: warm.to_string(),
++            warm_timestamp: *warm,
 +            persistence_timestamp: None,
 +            lag_seconds: None,
 +            error: Some(format!("{e:#}")),
 +        },
 +    }
-+}
-+
-+fn lookup_instance_config(
-+    instances: &HashMap<String, Arc<FunrunInstanceConfig>>,
-+    instance_name: &str,
-+) -> anyhow::Result<Arc<FunrunInstanceConfig>> {
-+    instances.get(instance_name).cloned().with_context(|| {
-+        format!(
-+            "funrun pod is not configured for instance {instance_name:?} (FUNRUN_INSTANCE_NAME)"
-+        )
-+    })
-+}
-+
-+async fn get_or_init_entry<RT, Fut>(
-+    states: &Mutex<HashMap<String, RegistryEntry<RT>>>,
-+    key: &str,
-+    build: impl FnOnce() -> Fut,
-+) -> anyhow::Result<Arc<InstanceState<RT>>>
-+where
-+    RT: Runtime,
-+    Fut: std::future::Future<Output = anyhow::Result<Arc<InstanceState<RT>>>>,
-+{
-+    let (cell, existing) = {
-+        let mut guard = states.lock();
-+        let entry = guard
-+            .entry(key.to_owned())
-+            .or_insert_with(|| Arc::new(OnceCell::new()));
-+        (entry.clone(), entry.get().cloned())
-+    };
-+    if let Some(value) = existing {
-+        return Ok(value);
-+    }
-+    let value = cell.get_or_try_init(build).await?;
-+    Ok(value.clone())
 +}
 +
 +pub struct InstanceState<RT: Runtime> {
@@ -2099,7 +2023,6 @@ index 000000000..e4de99bf2
 +    reader: Arc<dyn PersistenceReader>,
 +    pub retention_validator: Arc<dyn RetentionValidator>,
 +    searcher: Arc<dyn search::Searcher>,
-+    search_storage: Arc<dyn Storage>,
 +    pub core: FunctionRunnerCore<RT, DeploymentStorage>,
 +    database: Database<RT>,
 +    snapshot_cache: Cache<Timestamp, SnapshotInputs>,
@@ -2121,6 +2044,7 @@ index 000000000..e4de99bf2
 +            require_ssl,
 +            false,
 +            &config.instance_name,
++            None,
 +            rt.clone(),
 +        )
 +        .await?;
@@ -2165,7 +2089,7 @@ index 000000000..e4de99bf2
 +        );
 +        let snapshot_cache = Cache::builder()
 +            .max_capacity(*common::knobs::FUNRUN_SNAPSHOT_CACHE_SIZE)
-+            .time_to_live(*common::knobs::FUNRUN_SNAPSHOT_CACHE_TTL)
++            .time_to_live(SNAPSHOT_CACHE_TTL)
 +            .build();
 +        Ok(Self {
 +            rt,
@@ -2174,7 +2098,6 @@ index 000000000..e4de99bf2
 +            reader,
 +            retention_validator,
 +            searcher,
-+            search_storage,
 +            core,
 +            database,
 +            snapshot_cache,
@@ -2183,7 +2106,7 @@ index 000000000..e4de99bf2
 +    }
 +
 +    async fn read_storage_type(database: &Database<RT>) -> anyhow::Result<StorageType> {
-+        let mut tx = database.begin(keybroker::Identity::system()).await?;
++        let mut tx = database.begin_system().await?;
 +        DatabaseGlobalsModel::new(&mut tx)
 +            .database_globals()
 +            .await?
@@ -2224,20 +2147,12 @@ index 000000000..e4de99bf2
 +                            .await?,
 +                        )),
 +                    };
-+                let search_storage_cell = Arc::new(OnceLock::new());
-+                let _ = search_storage_cell.set(self.search_storage.clone());
-+                let text_index_snapshot: Arc<dyn TransactionTextSnapshot> =
-+                    Arc::new(TextIndexManagerSnapshot::new(
-+                        snapshot.index_registry,
-+                        snapshot.text_indexes,
-+                        self.searcher.clone(),
-+                        search_storage_cell,
-+                    ));
 +                Ok(SnapshotInputs {
 +                    index_reader,
 +                    bootstrap_metadata,
 +                    table_count_snapshot,
-+                    text_index_snapshot,
++                    text_index_snapshot: self
++                        .text_snapshot(snapshot.index_registry, snapshot.text_indexes),
 +                })
 +            },
 +            Err(warm_err) => {
@@ -2367,21 +2282,11 @@ index 000000000..e4de99bf2
 +                &warm.virtual_system_mapping,
 +            )
 +            .await?;
-+        let table_count_snapshot: Arc<dyn TableCountSnapshot> = Arc::new(Some(counts));
-+        let search_storage_cell = Arc::new(OnceLock::new());
-+        let _ = search_storage_cell.set(self.search_storage.clone());
-+        let text_index_snapshot: Arc<dyn TransactionTextSnapshot> =
-+            Arc::new(TextIndexManagerSnapshot::new(
-+                warm.index_registry,
-+                warm.text_indexes,
-+                self.searcher.clone(),
-+                search_storage_cell,
-+            ));
 +        Ok(SnapshotInputs {
 +            index_reader,
 +            bootstrap_metadata: self.database.bootstrap_metadata.clone(),
-+            table_count_snapshot,
-+            text_index_snapshot,
++            table_count_snapshot: Arc::new(Some(counts)),
++            text_index_snapshot: self.text_snapshot(warm.index_registry, warm.text_indexes),
 +        })
 +    }
 +
@@ -2399,31 +2304,35 @@ index 000000000..e4de99bf2
 +        )
 +        .await?;
 +        snapshot.load_table_summaries().await?;
-+        let bootstrap_metadata = snapshot.bootstrap_metadata.clone();
-+        let table_count_snapshot: Arc<dyn TableCountSnapshot> =
-+            Arc::new(snapshot.snapshot.table_counts);
-+        let search_storage_cell = Arc::new(OnceLock::new());
-+        let _ = search_storage_cell.set(self.search_storage.clone());
-+        let text_index_snapshot: Arc<dyn TransactionTextSnapshot> =
-+            Arc::new(TextIndexManagerSnapshot::new(
-+                snapshot.snapshot.index_registry,
-+                snapshot.snapshot.text_indexes,
-+                self.searcher.clone(),
-+                search_storage_cell,
-+            ));
 +        Ok(SnapshotInputs {
 +            index_reader,
-+            bootstrap_metadata,
-+            table_count_snapshot,
-+            text_index_snapshot,
++            bootstrap_metadata: snapshot.bootstrap_metadata.clone(),
++            table_count_snapshot: Arc::new(snapshot.snapshot.table_counts),
++            text_index_snapshot: self.text_snapshot(
++                snapshot.snapshot.index_registry,
++                snapshot.snapshot.text_indexes,
++            ),
 +        })
++    }
++
++    fn text_snapshot(
++        &self,
++        index_registry: IndexRegistry,
++        text_indexes: TextIndexManager,
++    ) -> Arc<dyn TransactionTextSnapshot> {
++        Arc::new(TextIndexManagerSnapshot::new(
++            index_registry,
++            text_indexes,
++            self.searcher.clone(),
++            self.database.search_storage.clone(),
++        ))
 +    }
 +}
 +
 +#[derive(serde::Serialize)]
 +pub struct HealthReport {
 +    pub healthy: bool,
-+    pub instances: Vec<InstanceHealth>,
++    pub instance: InstanceHealth,
 +}
 +
 +#[derive(serde::Serialize)]
@@ -2444,70 +2353,4 @@ index 000000000..e4de99bf2
 +    pub bootstrap_metadata: BootstrapMetadata,
 +    pub table_count_snapshot: Arc<dyn TableCountSnapshot>,
 +    pub text_index_snapshot: Arc<dyn TransactionTextSnapshot>,
-+}
-+
-+#[cfg(test)]
-+mod tests {
-+    use std::sync::Arc;
-+
-+    use keybroker::DeploymentSecret;
-+
-+    use super::{
-+        lookup_instance_config,
-+        max_percent_per_client,
-+    };
-+    use crate::config::FunrunInstanceConfig;
-+
-+    const SECRET: &str = "0000000000000000000000000000000000000000000000000000000000000001";
-+
-+    fn fleet(names: &[&str]) -> std::collections::HashMap<String, Arc<FunrunInstanceConfig>> {
-+        names
-+            .iter()
-+            .map(|n| {
-+                (
-+                    (*n).to_owned(),
-+                    Arc::new(FunrunInstanceConfig {
-+                        instance_name: (*n).to_owned(),
-+                        instance_secret: DeploymentSecret::try_from(SECRET).unwrap(),
-+                        db_spec: "postgres://localhost/x".to_owned(),
-+                    }),
-+                )
-+            })
-+            .collect()
-+    }
-+
-+    #[test]
-+    fn unknown_instance_errors_cleanly() {
-+        let instances = fleet(&["known"]);
-+        assert_eq!(
-+            lookup_instance_config(&instances, "known")
-+                .unwrap()
-+                .instance_name,
-+            "known"
-+        );
-+        let err = match lookup_instance_config(&instances, "nope") {
-+            Ok(_) => panic!("expected an error for an unknown instance"),
-+            Err(e) => e,
-+        };
-+        assert!(
-+            err.to_string().contains("not configured for instance"),
-+            "{err}"
-+        );
-+        assert!(err.to_string().contains("nope"), "{err}");
-+    }
-+
-+    #[test]
-+    fn single_tenant_cap_is_full_pool() {
-+        assert_eq!(max_percent_per_client(1), 100);
-+    }
-+
-+    #[test]
-+    fn auto_cap_splits_fleet_evenly_with_floor() {
-+        assert_eq!(max_percent_per_client(2), 50);
-+        assert_eq!(max_percent_per_client(4), 25);
-+        assert_eq!(max_percent_per_client(10), 10);
-+        assert_eq!(max_percent_per_client(20), 10);
-+        assert_eq!(max_percent_per_client(100), 10);
-+        assert_eq!(max_percent_per_client(0), 100);
-+    }
 +}

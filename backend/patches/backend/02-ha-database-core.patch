@@ -1,5 +1,5 @@
 diff --git a/crates/database/src/committer.rs b/crates/database/src/committer.rs
-index 676ccc9ae..0e20f97ea 100644
+index 676ccc9ae..335d166f5 100644
 --- a/crates/database/src/committer.rs
 +++ b/crates/database/src/committer.rs
 @@ -42,6 +42,7 @@ use common::{
@@ -193,7 +193,7 @@ index 676ccc9ae..0e20f97ea 100644
              },
              _ = rt.wait(*SEND_COMMIT_MESSAGE_TIMEOUT_MILLIS) => {
                  anyhow::bail!(metrics::committer_full_error());
-@@ -1574,6 +1698,20 @@ impl CommitterClient {
+@@ -1574,6 +1698,21 @@ impl CommitterClient {
          self.handle.lock().shutdown();
      }
  
@@ -203,7 +203,8 @@ index 676ccc9ae..0e20f97ea 100644
 +        self.sender
 +            .send(message)
 +            .await
-+            .map_err(|_| anyhow::anyhow!("committer already shut down; cannot recover writer"))?;
++            .ok()
++            .context("committer already shut down; cannot recover writer")?;
 +        let writer = rx
 +            .await
 +            .context("committer dropped during writer-recovery handshake")??;
@@ -214,7 +215,7 @@ index 676ccc9ae..0e20f97ea 100644
      async fn check_generated_ids<RT: Runtime>(
          &self,
          transaction: &Transaction<RT>,
-@@ -1654,6 +1792,9 @@ enum CommitterMessage {
+@@ -1654,6 +1793,9 @@ enum CommitterMessage {
      FinishTableSummaryBootstrap {
          result: oneshot::Sender<anyhow::Result<()>>,
      },
@@ -225,19 +226,18 @@ index 676ccc9ae..0e20f97ea 100644
  
  // Within a single transaction that writes multiple documents, this is the order
 diff --git a/crates/database/src/database.rs b/crates/database/src/database.rs
-index 27693cbb2..afed2e1a2 100644
+index 27693cbb2..12d0ee88d 100644
 --- a/crates/database/src/database.rs
 +++ b/crates/database/src/database.rs
-@@ -59,6 +59,8 @@ use common::{
+@@ -59,6 +59,7 @@ use common::{
          DATA_SYNC_PAGE_BYTES_LIMIT,
          DATA_SYNC_PAGE_SIZE_LIMIT,
          DEFAULT_DOCUMENTS_PAGE_SIZE,
 +        DEMOTION_DRAIN_TIMEOUT,
-+        LEASE_WATCH_POLL_INTERVAL,
          LIST_SNAPSHOT_MAX_AGE_SECS,
          PERSISTENCE_INDEX_ID_ALLOCATION_ENABLED,
          SNAPSHOT_LIST_TIME_LIMIT,
-@@ -66,6 +68,7 @@ use common::{
+@@ -66,6 +67,7 @@ use common::{
      pause::Fault,
      persistence::{
          new_idle_repeatable_ts,
@@ -245,7 +245,7 @@ index 27693cbb2..afed2e1a2 100644
          ConflictStrategy,
          DocumentLogEntry,
          DocumentRevisionStream,
-@@ -203,6 +206,10 @@ use crate::{
+@@ -203,6 +205,10 @@ use crate::{
          bootstrap_system_tables,
          DEFAULT_BOOTSTRAP_TABLE_NUMBERS,
      },
@@ -256,7 +256,7 @@ index 27693cbb2..afed2e1a2 100644
      metrics::{
          self,
          load_indexes_into_memory_timer,
-@@ -210,11 +217,15 @@ use crate::{
+@@ -210,11 +216,15 @@ use crate::{
          verify_invariants_timer,
      },
      retention::{
@@ -273,7 +273,7 @@ index 27693cbb2..afed2e1a2 100644
      search_index_bootstrap::SearchIndexBootstrapWorker,
      snapshot_manager::{
          Snapshot,
-@@ -310,9 +321,7 @@ const MAX_VECTOR_ATTEMPTS: u32 = 5;
+@@ -310,9 +320,7 @@ const MAX_VECTOR_ATTEMPTS: u32 = 5;
  /// See the diagram in `database/README.md` for more details.
  #[derive(Clone)]
  pub struct Database<RT: Runtime> {
@@ -284,7 +284,7 @@ index 27693cbb2..afed2e1a2 100644
      snapshot_manager: Reader<SnapshotManager>,
      /// Table shapes maintained asynchronously by the `TableSummaryWorker`,
      /// `None` until the worker has published for the first time.
-@@ -320,11 +329,8 @@ pub struct Database<RT: Runtime> {
+@@ -320,11 +328,8 @@ pub struct Database<RT: Runtime> {
      pub(crate) runtime: RT,
      reader: Arc<dyn PersistenceReader>,
      write_commits_since_load: Arc<AtomicUsize>,
@@ -296,7 +296,7 @@ index 27693cbb2..afed2e1a2 100644
      virtual_system_mapping: VirtualSystemMapping,
      pub bootstrap_metadata: BootstrapMetadata,
      invalidation_callback: InvalidationMetricCallback,
-@@ -335,6 +341,22 @@ pub struct Database<RT: Runtime> {
+@@ -335,6 +340,22 @@ pub struct Database<RT: Runtime> {
      component_paths_snapshot_cache: AsyncLru<RT, Timestamp, BTreeMap<ComponentId, ComponentPath>>,
      list_snapshot_table_iterator_cache:
          Arc<tokio::sync::Mutex<Option<ListSnapshotTableIteratorCacheEntry<RT>>>>,
@@ -319,7 +319,7 @@ index 27693cbb2..afed2e1a2 100644
  }
  
  struct ListSnapshotTableIteratorCacheEntry<RT: Runtime> {
-@@ -1084,6 +1106,7 @@ impl<RT: Runtime> Database<RT> {
+@@ -1084,6 +1105,7 @@ impl<RT: Runtime> Database<RT> {
          let invalidation_callback = InvalidationMetricCallback::new();
          let subscriptions =
              SubscriptionsWorker::start(log_owner, runtime.clone(), invalidation_callback.clone());
@@ -327,7 +327,7 @@ index 27693cbb2..afed2e1a2 100644
          let committer = Committer::start(
              log_writer,
              snapshot_writer,
-@@ -1094,6 +1117,7 @@ impl<RT: Runtime> Database<RT> {
+@@ -1094,6 +1116,7 @@ impl<RT: Runtime> Database<RT> {
              virtual_system_mapping.clone(),
              index_cache_handle.clone(),
              deployment_name,
@@ -335,7 +335,7 @@ index 27693cbb2..afed2e1a2 100644
          );
          let table_mapping_snapshot_cache =
              AsyncLru::new(runtime.clone(), 20, 2, 200, "table_mapping_snapshot");
-@@ -1103,19 +1127,21 @@ impl<RT: Runtime> Database<RT> {
+@@ -1103,19 +1126,21 @@ impl<RT: Runtime> Database<RT> {
              AsyncLru::new(runtime.clone(), 20, 2, 200, "component_paths_snapshot");
          let list_snapshot_table_iterator_cache = Arc::new(tokio::sync::Mutex::new(None));
          let database = Self {
@@ -363,7 +363,7 @@ index 27693cbb2..afed2e1a2 100644
              virtual_system_mapping,
              bootstrap_metadata,
              invalidation_callback,
-@@ -1123,11 +1149,401 @@ impl<RT: Runtime> Database<RT> {
+@@ -1123,11 +1148,394 @@ impl<RT: Runtime> Database<RT> {
              by_id_indexes_snapshot_cache,
              component_paths_snapshot_cache,
              list_snapshot_table_iterator_cache,
@@ -679,78 +679,71 @@ index 27693cbb2..afed2e1a2 100644
 +        let worker = async move {
 +            const MAX_NON_TRANSIENT_PROBE_FAILURES: usize = 3;
 +            const TRANSIENT_HEARTBEAT_EVERY: usize = 20;
++            const POLL_INTERVAL: Duration = Duration::from_millis(1500);
 +            let mut non_transient_failures = 0;
 +            let mut transient_failures: usize = 0;
-+            let mut first_probe = true;
 +            loop {
-+                if !first_probe {
-+                    runtime.wait(*LEASE_WATCH_POLL_INTERVAL).await;
-+                }
-+                first_probe = false;
-+                let held = match rw_persistence.lease_held().await {
-+                    Ok(held) => {
++                match rw_persistence.lease_held().await {
++                    Ok(true) => {
 +                        non_transient_failures = 0;
 +                        transient_failures = 0;
 +                        *probe_last_ok.lock() = Some(std::time::Instant::now());
-+                        held
 +                    },
-+                    Err(e) => {
-+                        if common::errors::is_transient_db_error(&e) {
-+                            non_transient_failures = 0;
-+                            transient_failures += 1;
-+                            if transient_failures % TRANSIENT_HEARTBEAT_EVERY == 0 {
-+                                tracing::warn!(
-+                                    "[lease-watch] {transient_failures} consecutive transient \
-+                                     probe errors; lease ownership unverified: {e:#}"
-+                                );
-+                            }
-+                        } else {
-+                            transient_failures = 0;
-+                            non_transient_failures += 1;
-+                            if non_transient_failures >= MAX_NON_TRANSIENT_PROBE_FAILURES {
-+                                tracing::error!(
-+                                    "[lease-watch] probe failed {non_transient_failures} times \
-+                                     with non-transient errors; firing preempt: {e:#}"
-+                                );
-+                                preempt_signal.signal(anyhow::anyhow!(
-+                                    "lease-watch cannot verify lease ownership after \
-+                                     {non_transient_failures} non-transient failures: {e:#}"
-+                                ));
-+                                return;
-+                            }
++                    Ok(false) => {
++                        *probe_last_ok.lock() = Some(std::time::Instant::now());
++                        break;
++                    },
++                    Err(e) if common::errors::is_transient_db_error(&e) => {
++                        non_transient_failures = 0;
++                        transient_failures += 1;
++                        if transient_failures % TRANSIENT_HEARTBEAT_EVERY == 0 {
 +                            tracing::warn!(
-+                                "[lease-watch] non-transient probe error \
-+                                 ({non_transient_failures}/{MAX_NON_TRANSIENT_PROBE_FAILURES}): \
-+                                 {e:#}"
++                                "[lease-watch] {transient_failures} consecutive transient probe \
++                                 errors; lease ownership unverified: {e:#}"
 +                            );
 +                        }
-+                        continue;
 +                    },
-+                };
-+                if held {
-+                    continue;
++                    Err(e) => {
++                        transient_failures = 0;
++                        non_transient_failures += 1;
++                        if non_transient_failures >= MAX_NON_TRANSIENT_PROBE_FAILURES {
++                            tracing::error!(
++                                "[lease-watch] probe failed {non_transient_failures} times with \
++                                 non-transient errors; firing preempt: {e:#}"
++                            );
++                            preempt_signal.signal(anyhow::anyhow!(
++                                "lease-watch cannot verify lease ownership after \
++                                 {non_transient_failures} non-transient failures: {e:#}"
++                            ));
++                            return;
++                        }
++                        tracing::warn!(
++                            "[lease-watch] non-transient probe error \
++                             ({non_transient_failures}/{MAX_NON_TRANSIENT_PROBE_FAILURES}): {e:#}"
++                        );
++                    },
 +                }
-+                tracing::warn!(
-+                    "[lease-watch] lease LOST (probe returned 0 rows); self-demoting to kill the \
-+                     zombie-advertising window"
++                runtime.wait(POLL_INTERVAL).await;
++            }
++            tracing::warn!(
++                "[lease-watch] lease LOST (probe returned 0 rows); self-demoting to kill the \
++                 zombie-advertising window"
++            );
++            let handled = {
++                let handler = handler.lock().clone();
++                match handler {
++                    Some(handler) => handler().await,
++                    None => false,
++                }
++            };
++            if !handled {
++                tracing::error!(
++                    "[lease-watch] in-process self-demote unavailable/failed; firing preempt \
++                     (restart-as-follower)"
 +                );
-+                let handled = {
-+                    let handler = handler.lock().clone();
-+                    match handler {
-+                        Some(handler) => handler().await,
-+                        None => false,
-+                    }
-+                };
-+                if !handled {
-+                    tracing::error!(
-+                        "[lease-watch] in-process self-demote unavailable/failed; firing preempt \
-+                         (restart-as-follower)"
-+                    );
-+                    preempt_signal.signal(anyhow::anyhow!(
-+                        "lease lost and in-process demotion unavailable/failed; restarting"
-+                    ));
-+                }
-+                return;
++                preempt_signal.signal(anyhow::anyhow!(
++                    "lease lost and in-process demotion unavailable/failed; restarting"
++                ));
 +            }
 +        };
 +        let new_handle = self.runtime.spawn("lease_watch", worker);
@@ -765,7 +758,7 @@ index 27693cbb2..afed2e1a2 100644
      /// Sets the invalidation callback for tracking which mutations invalidate
      /// subscriptions. Must be called after `load` and before any subscriptions
      /// are invalidated.
-@@ -1194,45 +1610,73 @@ impl<RT: Runtime> Database<RT> {
+@@ -1194,45 +1602,73 @@ impl<RT: Runtime> Database<RT> {
          Ok(Some(Arc::new(snapshot.into())))
      }
  
@@ -833,7 +826,7 @@ index 27693cbb2..afed2e1a2 100644
 +            committer.shutdown();
 +        }
 +        subscriptions.shutdown();
-+        if let Some(handle) = &self.index_cache_handle() {
++        if let Some(handle) = self.index_cache_handle() {
              handle.remove_deployment();
          }
 -        self.retention_workers.shutdown().await?;
@@ -853,7 +846,7 @@ index 27693cbb2..afed2e1a2 100644
      }
  
      /// Load the set of documents and tombstones in the given table between
-@@ -1705,7 +2149,7 @@ impl<RT: Runtime> Database<RT> {
+@@ -1705,7 +2141,7 @@ impl<RT: Runtime> Database<RT> {
                      .read_snapshot(ts)?;
              let mut reader = Arc::new(persistence_snapshot) as Arc<dyn IndexReader>;
              if let Some(snapshot) = snapshot
@@ -862,7 +855,7 @@ index 27693cbb2..afed2e1a2 100644
              {
                  // TODO: it is probably OK to still use the index cache even if
                  // we don't have an index_registry at the same timestamp.
-@@ -1969,11 +2413,11 @@ impl<RT: Runtime> Database<RT> {
+@@ -1969,11 +2405,11 @@ impl<RT: Runtime> Database<RT> {
                      RepeatablePersistence::new(
                          self.reader.clone(),
                          repeatable_ts,
@@ -876,7 +869,7 @@ index 27693cbb2..afed2e1a2 100644
                  index_cache,
              ),
              Arc::new(TextIndexManagerSnapshot::new(
-@@ -2038,7 +2482,7 @@ impl<RT: Runtime> Database<RT> {
+@@ -2038,7 +2474,7 @@ impl<RT: Runtime> Database<RT> {
              snapshot,
              table_summaries: None,
              persistence_snapshot: repeatable_persistence.read_snapshot(ts)?,
@@ -885,7 +878,7 @@ index 27693cbb2..afed2e1a2 100644
              persistence_reader: self.reader.clone(),
              retention_validator: self.retention_validator(),
          })
-@@ -2060,7 +2504,7 @@ impl<RT: Runtime> Database<RT> {
+@@ -2060,7 +2496,7 @@ impl<RT: Runtime> Database<RT> {
          task::consume_budget().await;
          let readonly = transaction.is_readonly();
          let result = self
@@ -894,7 +887,7 @@ index 27693cbb2..afed2e1a2 100644
              .commit(transaction, write_source.into())
              .await?;
          if !readonly {
-@@ -2074,7 +2518,7 @@ impl<RT: Runtime> Database<RT> {
+@@ -2074,7 +2510,7 @@ impl<RT: Runtime> Database<RT> {
          &self,
          tables: BTreeSet<TableName>,
      ) -> anyhow::Result<()> {
@@ -903,7 +896,7 @@ index 27693cbb2..afed2e1a2 100644
      }
  
      pub fn write_commits_since_load(&self) -> usize {
-@@ -2085,14 +2529,15 @@ impl<RT: Runtime> Database<RT> {
+@@ -2085,14 +2521,15 @@ impl<RT: Runtime> Database<RT> {
      /// N.B. Only use this function for user subscriptions. System subscriptions
      /// should use `subscribe_and_wait_for_invalidation`.
      pub async fn subscribe(&self, token: Token) -> anyhow::Result<Subscription> {
@@ -921,7 +914,7 @@ index 27693cbb2..afed2e1a2 100644
          let invalid_ts = subscription.wait_for_invalidation().await;
          let current_ts = self.now_ts_for_reads();
          metrics::log_subscription_invalidation_lag(invalid_ts, *current_ts);
-@@ -2546,11 +2991,19 @@ impl<RT: Runtime> Database<RT> {
+@@ -2546,11 +2983,19 @@ impl<RT: Runtime> Database<RT> {
          ts: Timestamp,
      ) -> anyhow::Result<Result<Token, Option<Timestamp>>> {
          let _timer = metrics::refresh_token_timer();
@@ -944,7 +937,7 @@ index 27693cbb2..afed2e1a2 100644
      }
  
      pub fn memory_consistency_check(&self) -> anyhow::Result<()> {
-@@ -2703,7 +3156,7 @@ impl<RT: Runtime> Database<RT> {
+@@ -2703,7 +3148,7 @@ impl<RT: Runtime> Database<RT> {
          &self,
          search_type: SearchType,
      ) -> SearchFlusherWakeSubscriber {
@@ -955,10 +948,10 @@ index 27693cbb2..afed2e1a2 100644
  
 diff --git a/crates/database/src/follower_tailer.rs b/crates/database/src/follower_tailer.rs
 new file mode 100644
-index 000000000..3149e5a94
+index 000000000..cbed33dd4
 --- /dev/null
 +++ b/crates/database/src/follower_tailer.rs
-@@ -0,0 +1,438 @@
+@@ -0,0 +1,413 @@
 +use std::{
 +    ops::Bound,
 +    sync::Arc,
@@ -992,6 +985,7 @@ index 000000000..3149e5a94
 +};
 +use errors::ErrorMetadataAnyhowExt;
 +use futures::{
++    future::Fuse,
 +    select_biased,
 +    FutureExt,
 +    TryStreamExt,
@@ -1031,7 +1025,8 @@ index 000000000..3149e5a94
 +        let (reply_tx, reply_rx) = oneshot::channel();
 +        promote_tx
 +            .send(reply_tx)
-+            .map_err(|_| anyhow::anyhow!("follower tailer exited before promotion handshake"))?;
++            .ok()
++            .context("follower tailer exited before promotion handshake")?;
 +        let state = reply_rx
 +            .await
 +            .context("follower tailer dropped during promotion handshake")??;
@@ -1112,12 +1107,9 @@ index 000000000..3149e5a94
 +                                &mut e.context("FollowerLogTailer bootstrap cold reload failed"),
 +                            )
 +                            .await;
-+                            select_biased! {
-+                                reply = promote_rx => {
-+                                    self.handle_promote(reply, tailed_ts).await;
-+                                    return;
-+                                },
-+                                _ = self.runtime.wait(delay) => {},
++                            if let Some(reply) = self.pause(delay, &mut promote_rx).await {
++                                self.handle_promote(reply, tailed_ts).await;
++                                return;
 +                            }
 +                        },
 +                    }
@@ -1131,12 +1123,9 @@ index 000000000..3149e5a94
 +                        backoff.failures(),
 +                        delay.as_secs_f32(),
 +                    );
-+                    select_biased! {
-+                        reply = promote_rx => {
-+                            self.handle_promote(reply, tailed_ts).await;
-+                            return;
-+                        },
-+                        _ = self.runtime.wait(delay) => {},
++                    if let Some(reply) = self.pause(delay, &mut promote_rx).await {
++                        self.handle_promote(reply, tailed_ts).await;
++                        return;
 +                    }
 +                },
 +            }
@@ -1196,13 +1185,21 @@ index 000000000..3149e5a94
 +                    delay
 +                },
 +            };
-+            select_biased! {
-+                reply = promote_rx => {
-+                    self.handle_promote(reply, tailed_ts).await;
-+                    return;
-+                },
-+                _ = self.runtime.wait(wait) => {},
++            if let Some(reply) = self.pause(wait, &mut promote_rx).await {
++                self.handle_promote(reply, tailed_ts).await;
++                return;
 +            }
++        }
++    }
++
++    async fn pause(
++        &self,
++        delay: Duration,
++        mut promote_rx: &mut Fuse<oneshot::Receiver<PromoteRequest>>,
++    ) -> Option<Result<PromoteRequest, oneshot::error::RecvError>> {
++        select_biased! {
++            reply = promote_rx => Some(reply),
++            _ = self.runtime.wait(delay) => None,
 +        }
 +    }
 +
@@ -1231,18 +1228,13 @@ index 000000000..3149e5a94
 +            Ok(tailed_ts)
 +        }
 +        .await;
-+        let response = match result {
-+            Ok(tailed_ts) => {
-+                tracing::info!(
-+                    "[follower-tailer] FINAL fast-forward complete; tailed_ts {tailed_ts}"
-+                );
-+                Ok(PromotedTailerState {
-+                    writer: self.snapshot_writer,
-+                    tailed_ts,
-+                })
-+            },
-+            Err(e) => Err(e),
-+        };
++        let response = result.map(|tailed_ts| {
++            tracing::info!("[follower-tailer] FINAL fast-forward complete; tailed_ts {tailed_ts}");
++            PromotedTailerState {
++                writer: self.snapshot_writer,
++                tailed_ts,
++            }
++        });
 +        let _ = reply_tx.send(response);
 +    }
 +
@@ -1251,64 +1243,6 @@ index 000000000..3149e5a94
 +        tailed_ts: &mut RepeatableTimestamp,
 +        target: RepeatableTimestamp,
 +    ) -> anyhow::Result<()> {
-+        if *target <= **tailed_ts {
-+            return Ok(());
-+        }
-+        let repeatable_persistence = RepeatablePersistence::new(
-+            self.reader.clone(),
-+            target,
-+            self.retention_validator.clone(),
-+        );
-+        let bootstrap_tables = {
-+            let snapshot = self.snapshot_writer.read().latest_snapshot();
-+            BootstrapTableIds::new(snapshot.table_mapping())
-+        };
-+        let range = TimestampRange::new((Bound::Excluded(**tailed_ts), Bound::Included(*target)));
-+        let transactions =
-+            stream_transactions(bootstrap_tables, &repeatable_persistence, range, Order::Asc);
-+        futures::pin_mut!(transactions);
-+        while let Some(txn) = transactions.try_next().await? {
-+            self.apply_transaction(txn)?;
-+        }
-+        {
-+            let mut snapshot_manager = self.snapshot_writer.write();
-+            snapshot_manager.bump_persisted_max_repeatable_ts(*target)?;
-+        }
-+        *tailed_ts = target;
-+        Ok(())
-+    }
-+
-+    async fn bootstrap_search_into_snapshot(
-+        &mut self,
-+        at: RepeatableTimestamp,
-+    ) -> anyhow::Result<()> {
-+        let (index_registry, table_mapping) = {
-+            let snapshot = self.snapshot_writer.read().latest_snapshot();
-+            (
-+                snapshot.index_registry.clone(),
-+                snapshot.table_mapping().clone(),
-+            )
-+        };
-+        let repeatable_persistence =
-+            RepeatablePersistence::new(self.reader.clone(), at, self.retention_validator.clone());
-+        let bootstrapped = bootstrap_search_indexes(
-+            index_registry,
-+            &repeatable_persistence,
-+            table_mapping.namespace(TableNamespace::Global),
-+        )
-+        .await?;
-+        let mut snapshot_manager = self.snapshot_writer.write();
-+        let mut pending_writes = crate::write_log::PendingWrites::new();
-+        snapshot_manager.overwrite_last_snapshot_text_and_vector_indexes(
-+            bootstrapped.text_index_manager,
-+            bootstrapped.vector_index_manager,
-+            &mut pending_writes,
-+        );
-+        Ok(())
-+    }
-+
-+    async fn tail_once(&mut self, tailed_ts: &mut RepeatableTimestamp) -> anyhow::Result<()> {
-+        let target = new_static_repeatable_recent(self.reader.as_ref()).await?;
 +        if *target <= **tailed_ts {
 +            return Ok(());
 +        }
@@ -1347,6 +1281,40 @@ index 000000000..3149e5a94
 +            );
 +        }
 +        Ok(())
++    }
++
++    async fn bootstrap_search_into_snapshot(
++        &mut self,
++        at: RepeatableTimestamp,
++    ) -> anyhow::Result<()> {
++        let (index_registry, table_mapping) = {
++            let snapshot = self.snapshot_writer.read().latest_snapshot();
++            (
++                snapshot.index_registry.clone(),
++                snapshot.table_mapping().clone(),
++            )
++        };
++        let repeatable_persistence =
++            RepeatablePersistence::new(self.reader.clone(), at, self.retention_validator.clone());
++        let bootstrapped = bootstrap_search_indexes(
++            index_registry,
++            &repeatable_persistence,
++            table_mapping.namespace(TableNamespace::Global),
++        )
++        .await?;
++        let mut snapshot_manager = self.snapshot_writer.write();
++        let mut pending_writes = crate::write_log::PendingWrites::new();
++        snapshot_manager.overwrite_last_snapshot_text_and_vector_indexes(
++            bootstrapped.text_index_manager,
++            bootstrapped.vector_index_manager,
++            &mut pending_writes,
++        );
++        Ok(())
++    }
++
++    async fn tail_once(&mut self, tailed_ts: &mut RepeatableTimestamp) -> anyhow::Result<()> {
++        let target = new_static_repeatable_recent(self.reader.as_ref()).await?;
++        self.fast_forward_to(tailed_ts, target).await
 +    }
 +
 +    fn apply_transaction(

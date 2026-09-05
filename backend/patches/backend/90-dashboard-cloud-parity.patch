@@ -28,26 +28,6 @@ index 6c018be51..0b891fcc1 100644
        {...props}
      >
        {children}
-diff --git a/npm-packages/dashboard-common/package.json b/npm-packages/dashboard-common/package.json
-index f5cc1a36a..08befdba5 100644
---- a/npm-packages/dashboard-common/package.json
-+++ b/npm-packages/dashboard-common/package.json
-@@ -50,6 +50,7 @@
-     "react-day-picker": "~9.14.0",
-     "react-hotkeys-hook": "~4.6.0",
-     "react-resizable-panels": "~2.1.1",
-+    "react-sparklines": "~1.7.0",
-     "react-virtualized-auto-sizer": "1.0.26",
-     "react-window": "1.8.11",
-     "react-window-infinite-loader": "^1.0.8",
-@@ -82,6 +83,7 @@
-     "@types/prettier-old-sync": "npm:@types/prettier@2.7.3",
-     "@types/react": "^18.0.0",
-     "@types/react-dom": "^18.0.0",
-+    "@types/react-sparklines": "~1.7.5",
-     "@types/react-window": "^1.8.5",
-     "@types/react-window-infinite-loader": "^1.0.4",
-     "@types/semver": "^7.3.13",
 diff --git a/npm-packages/dashboard-common/src/features/health/components/ChartForInsight.tsx b/npm-packages/dashboard-common/src/features/health/components/ChartForInsight.tsx
 new file mode 100644
 index 000000000..8bff059c4
@@ -566,7 +546,7 @@ index 23b843041..29395395e 100644
            <div className="flex flex-wrap items-center gap-6 gap-y-4">
 diff --git a/npm-packages/dashboard-common/src/features/health/components/EventsForInsight.tsx b/npm-packages/dashboard-common/src/features/health/components/EventsForInsight.tsx
 new file mode 100644
-index 000000000..71eb950fa
+index 000000000..4d828e7ab
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/health/components/EventsForInsight.tsx
 @@ -0,0 +1,689 @@
@@ -1214,9 +1194,9 @@ index 000000000..71eb950fa
 +            </div>
 +            <DisclosurePanel>
 +              <ul className="mt-2 flex animate-fadeInFromLoading flex-col gap-1">
-+                {event.events.map((e) => (
++                {event.events.map((e, idx) => (
 +                  <li
-+                    key={e.tableName}
++                    key={idx}
 +                    className="list-inside list-decimal text-xs text-content-secondary"
 +                  >
 +                    <span className="font-semibold">{format(e.count)}</span>{" "}
@@ -1559,11 +1539,14 @@ index 000000000..e12efdc0b
 +}
 diff --git a/npm-packages/dashboard-common/src/features/health/components/InsightsSummary.tsx b/npm-packages/dashboard-common/src/features/health/components/InsightsSummary.tsx
 new file mode 100644
-index 000000000..4330c9163
+index 000000000..806705b15
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/health/components/InsightsSummary.tsx
-@@ -0,0 +1,109 @@
-+import { Insight } from "@common/features/health/lib/insights";
+@@ -0,0 +1,111 @@
++import {
++  getInsightPageIdentifier,
++  Insight,
++} from "@common/features/health/lib/insights";
 +import { Loading } from "@ui/Loading";
 +import { EmptySection } from "@common/elements/EmptySection";
 +import {
@@ -1572,7 +1555,6 @@ index 000000000..4330c9163
 +  InfoCircledIcon,
 +} from "@radix-ui/react-icons";
 +import { InsightsSummaryListItem } from "./InsightsSummaryListItem";
-+import { getInsightPageIdentifier } from "../lib/insights";
 +
 +export type InsightsSummaryData = Insight;
 +
@@ -2189,13 +2171,12 @@ index 000000000..09c01fd4f
 +}
 diff --git a/npm-packages/dashboard-common/src/features/health/components/SparklineForInsight.tsx b/npm-packages/dashboard-common/src/features/health/components/SparklineForInsight.tsx
 new file mode 100644
-index 000000000..fef3752c9
+index 000000000..4005b536b
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/health/components/SparklineForInsight.tsx
-@@ -0,0 +1,60 @@
+@@ -0,0 +1,66 @@
 +import { Insight } from "@common/features/health/lib/insights";
 +
-+import { Sparklines, SparklinesCurve } from "react-sparklines";
 +import { LoadingTransition } from "@ui/Loading";
 +
 +export function SparklineForInsight({ insight }: { insight: Insight }) {
@@ -2216,21 +2197,10 @@ index 000000000..fef3752c9
 +  }
 +}
 +
-+function Sparkline({
-+  data,
-+  height = 36,
-+  width = 240,
-+  color = "var(--chart-line-1)",
-+  min = 0,
-+  max,
-+}: {
-+  data?: number[];
-+  height?: number;
-+  width?: number;
-+  color?: string;
-+  min?: number;
-+  max?: number;
-+}) {
++const HEIGHT = 36;
++const WIDTH = 240;
++
++function Sparkline({ data }: { data?: number[] }) {
 +  return (
 +    <LoadingTransition
 +      loadingProps={{
@@ -2238,27 +2208,45 @@ index 000000000..fef3752c9
 +        className: "h-[36px] w-60",
 +      }}
 +    >
-+      {data && (
-+        <Sparklines
-+          data={data}
-+          height={height}
-+          width={width}
-+          margin={0}
-+          min={min}
-+          max={max}
++      {data && data.length > 1 ? (
++        <svg
++          width={WIDTH}
++          height={HEIGHT}
++          viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
++          aria-hidden
 +        >
-+          <SparklinesCurve color={color} />
-+        </Sparklines>
-+      )}
++          <polygon
++            fill="var(--chart-line-1)"
++            fillOpacity={0.1}
++            points={`0,${HEIGHT} ${toPoints(data)} ${WIDTH},${HEIGHT}`}
++          />
++          <polyline
++            fill="none"
++            stroke="var(--chart-line-1)"
++            strokeWidth={1}
++            strokeLinejoin="round"
++            strokeLinecap="round"
++            points={toPoints(data)}
++          />
++        </svg>
++      ) : null}
 +    </LoadingTransition>
 +  );
 +}
++
++function toPoints(data: number[]) {
++  const max = Math.max(1, ...data);
++  const stepX = WIDTH / (data.length - 1);
++  return data
++    .map((value, i) => `${i * stepX},${0.5 + (1 - value / max) * (HEIGHT - 1)}`)
++    .join(" ");
++}
 diff --git a/npm-packages/dashboard-common/src/features/health/lib/insights.ts b/npm-packages/dashboard-common/src/features/health/lib/insights.ts
 new file mode 100644
-index 000000000..1b53347e2
+index 000000000..8391d5d8f
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/health/lib/insights.ts
-@@ -0,0 +1,218 @@
+@@ -0,0 +1,219 @@
 +import { ParsedUrlQuery } from "querystring";
 +import { UrlObject } from "url";
 +import {
@@ -2375,9 +2363,13 @@ index 000000000..1b53347e2
 +  return { period, ...result };
 +}
 +
-+function isInsightsNotConfiguredError(error: any): boolean {
++function isInsightsNotConfiguredError(error: unknown): boolean {
++  const status =
++    typeof error === "object" && error !== null && "status" in error
++      ? error.status
++      : undefined;
 +  return (
-+    error?.status === 404 ||
++    status === 404 ||
 +    (error instanceof Error &&
 +      error.message.startsWith("Server responded with 404"))
 +  );
@@ -2397,16 +2389,13 @@ index 000000000..1b53347e2
 +    if (!insightKinds.has(kind)) {
 +      return [];
 +    }
-+    let parsedDetails: any;
++    let parsedDetails: Record<string, unknown>;
 +    try {
 +      parsedDetails = JSON.parse(d[3]);
 +    } catch {
 +      return [];
 +    }
-+    if (
-+      parsedDetails.hourlyCounts &&
-+      Array.isArray(parsedDetails.hourlyCounts)
-+    ) {
++    if (Array.isArray(parsedDetails.hourlyCounts)) {
 +      parsedDetails.hourlyCounts = padAndSortHourlyData(
 +        parsedDetails.hourlyCounts,
 +        period.from,
@@ -2479,7 +2468,7 @@ index 000000000..1b53347e2
 +}
 diff --git a/npm-packages/dashboard-common/src/features/health/lib/usage.ts b/npm-packages/dashboard-common/src/features/health/lib/usage.ts
 new file mode 100644
-index 000000000..b43fc782b
+index 000000000..1925cbfe1
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/health/lib/usage.ts
 @@ -0,0 +1,45 @@
@@ -2499,8 +2488,8 @@ index 000000000..b43fc782b
 +    queryParams.set("from", period.from);
 +    queryParams.set("to", period.to);
 +  }
-+  const fetcher = deploymentFetch as BareFetcher<any[][]>;
-+  const result = useSWR<any[][]>(
++  const fetcher = deploymentFetch as BareFetcher<unknown[][]>;
++  const result = useSWR<unknown[][]>(
 +    `/api/insights/usage/query?${queryParams.toString()}`,
 +    fetcher,
 +    {
@@ -2511,9 +2500,9 @@ index 000000000..b43fc782b
 +  );
 +  return {
 +    ...result,
-+    data: result.data?.map((row: any[]) =>
-+      row.map((cell: any) => cell ?? ""),
-+    ) as string[][] | undefined,
++    data: result.data?.map((row) => row.map((cell) => cell ?? "")) as
++      | string[][]
++      | undefined,
 +  };
 +}
 +
@@ -2530,10 +2519,10 @@ index 000000000..b43fc782b
 +}
 diff --git a/npm-packages/dashboard-common/src/features/settings/components/backups/SnapshotExport.tsx b/npm-packages/dashboard-common/src/features/settings/components/backups/SnapshotExport.tsx
 new file mode 100644
-index 000000000..36d029aee
+index 000000000..67ff59ca6
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/settings/components/backups/SnapshotExport.tsx
-@@ -0,0 +1,130 @@
+@@ -0,0 +1,134 @@
 +import { DownloadIcon } from "@radix-ui/react-icons";
 +import { Button } from "@ui/Button";
 +import { Spinner } from "@ui/Spinner";
@@ -2576,7 +2565,7 @@ index 000000000..36d029aee
 +              Number(existingExport.start_ts / BigInt(1000000)),
 +            ).toLocaleString()}{" "}
 +          </div>
-+          <div className="truncate text-content-errorSecondary">
++          <div className="truncate text-content-error">
 +            Expires{" "}
 +            {new Date(
 +              Number(existingExport.expiration_ts / BigInt(1000000)),
@@ -2644,6 +2633,10 @@ index 000000000..36d029aee
 +            <Callout variant="error">
 +              Latest snapshot export failed. Review backend logs and try again.
 +            </Callout>
++          ) : existingExport.state === "canceled" ? (
++            <span className="text-content-secondary">
++              Latest snapshot export was canceled.
++            </span>
 +          ) : existingExport.state === "completed" &&
 +            Date.now() <
 +              Number(existingExport.expiration_ts / BigInt(1000000)) ? (
@@ -2666,10 +2659,10 @@ index 000000000..36d029aee
 +}
 diff --git a/npm-packages/dashboard-common/src/features/settings/components/backups/SnapshotImport.tsx b/npm-packages/dashboard-common/src/features/settings/components/backups/SnapshotImport.tsx
 new file mode 100644
-index 000000000..17142a28a
+index 000000000..f780b9250
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/settings/components/backups/SnapshotImport.tsx
-@@ -0,0 +1,431 @@
+@@ -0,0 +1,430 @@
 +import {
 +  CheckCircledIcon,
 +  CheckIcon,
@@ -2814,7 +2807,7 @@ index 000000000..17142a28a
 +        <div>
 +          <Tooltip tip={completedDate.toLocaleString()}>
 +            <div className="flex items-center gap-1 border p-1 text-sm text-content-primary">
-+              <CheckCircledIcon className="min-w-[1rem] text-util-success" />
++              <CheckCircledIcon className="min-w-4 text-util-success" />
 +              {`Completed ${formatDistanceStrict(completedDate, new Date(), {
 +                addSuffix: true,
 +              })}`}
@@ -2826,7 +2819,7 @@ index 000000000..17142a28a
 +    case "failed":
 +      return (
 +        <div className="flex w-fit items-center gap-1 rounded-sm border p-1 text-sm">
-+          <CrossCircledIcon className="min-w-[1rem] text-content-errorSecondary" />
++          <CrossCircledIcon className="min-w-4 text-content-errorSecondary" />
 +          {snapshotImport.state.error_message}
 +        </div>
 +      );
@@ -2846,13 +2839,13 @@ index 000000000..17142a28a
 +    case "uploaded":
 +    case "waiting_for_confirmation":
 +      return (
-+        <span className="h-fit w-fit rounded-sm bg-blue-100 p-1 text-center text-xs text-blue-900 dark:bg-blue-900 dark:text-blue-100">
++        <span className="size-fit rounded-sm bg-blue-100 p-1 text-center text-xs text-blue-900 dark:bg-blue-900 dark:text-blue-100">
 +          pending confirmation
 +        </span>
 +      );
 +    case "in_progress":
 +      return (
-+        <span className="h-fit w-fit rounded-sm bg-blue-100 p-1 text-center text-xs text-blue-900 dark:bg-blue-900 dark:text-blue-100">
++        <span className="size-fit rounded-sm bg-blue-100 p-1 text-center text-xs text-blue-900 dark:bg-blue-900 dark:text-blue-100">
 +          in progress
 +        </span>
 +      );
@@ -2888,7 +2881,6 @@ index 000000000..17142a28a
 +    case "zip":
 +      return "ZIP";
 +    default: {
-+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
 +      format satisfies never;
 +      return "";
 +    }
@@ -3438,27 +3430,3 @@ index bfabb0a3f..8545dfadc 100644
      "build": "tsc",
      "test-relational-data-modeling": "node ./dist/relational-data-modeling.js",
      "test-users-and-auth": "node ./dist/users-and-auth.js",
-diff --git a/npm-packages/pnpm-lock.yaml b/npm-packages/pnpm-lock.yaml
-index 65a2fa34e..96b4b0592 100644
---- a/npm-packages/pnpm-lock.yaml
-+++ b/npm-packages/pnpm-lock.yaml
-@@ -1212,6 +1212,9 @@ importers:
-       react-resizable-panels:
-         specifier: ~2.1.1
-         version: 2.1.9(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
-+      react-sparklines:
-+        specifier: ~1.7.0
-+        version: 1.7.0(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
-       react-use:
-         specifier: ~17.6.0
-         version: 17.6.0(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
-@@ -1306,6 +1309,9 @@ importers:
-       '@types/react-dom':
-         specifier: ^18.0.0
-         version: 18.3.7(@types/react@18.3.26)
-+      '@types/react-sparklines':
-+        specifier: ~1.7.5
-+        version: 1.7.5
-       '@types/react-window':
-         specifier: ^1.8.5
-         version: 1.8.8
