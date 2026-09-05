@@ -11,13 +11,37 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
 
+type hitLog struct {
+	mu    sync.Mutex
+	paths []string
+}
+
+func (h *hitLog) add(path string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.paths = append(h.paths, path)
+}
+
+func (h *hitLog) reset() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.paths = nil
+}
+
+func (h *hitLog) snapshot() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]string(nil), h.paths...)
+}
+
 func (t *tracker) setLeader(leaderURL string) bool {
-	return t.applyLeader(leaderURL, 0, 0)
+	return t.applyLeader(leaderURL, t.lastAppliedSeq+1, t.lastEpoch)
 }
 
 func TestIsBlockedControlPath(t *testing.T) {
@@ -60,9 +84,9 @@ func TestIsBlockedControlPath(t *testing.T) {
 
 func TestServeHTTP_RejectsActuationPaths(t *testing.T) {
 	t.Parallel()
-	var upstreamHits []string
+	var hits hitLog
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		upstreamHits = append(upstreamHits, r.URL.Path)
+		hits.add(r.URL.Path)
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, "upstream-reached")
 	}))
@@ -82,14 +106,14 @@ func TestServeHTTP_RejectsActuationPaths(t *testing.T) {
 		{http.MethodPost, "/api/mutation", http.StatusOK, true, "upstream-reached"},
 	}
 	for _, c := range cases {
-		upstreamHits = nil
+		hits.reset()
 		rr := httptest.NewRecorder()
 		req := httptest.NewRequest(c.method, c.path, nil)
 		tr.serveHTTP(rr, req, false)
 		if rr.Code != c.wantCode {
 			t.Errorf("%s %s: want status %d, got %d", c.method, c.path, c.wantCode, rr.Code)
 		}
-		hit := len(upstreamHits) > 0
+		hit := len(hits.snapshot()) > 0
 		if hit != c.wantUpstreamHit {
 			t.Errorf(
 				"%s %s: upstream hit = %v, want %v (hits=%v)",
@@ -97,7 +121,7 @@ func TestServeHTTP_RejectsActuationPaths(t *testing.T) {
 				c.path,
 				hit,
 				c.wantUpstreamHit,
-				upstreamHits,
+				hits.snapshot(),
 			)
 		}
 		if c.wantBodyContains != "" && !strings.Contains(rr.Body.String(), c.wantBodyContains) {
@@ -108,9 +132,9 @@ func TestServeHTTP_RejectsActuationPaths(t *testing.T) {
 
 func TestServeHTTP_SiteRoutePassesControlPaths(t *testing.T) {
 	t.Parallel()
-	var upstreamHits []string
+	var hits hitLog
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		upstreamHits = append(upstreamHits, r.URL.Path)
+		hits.add(r.URL.Path)
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, "site-reached")
 	}))
@@ -127,14 +151,14 @@ func TestServeHTTP_SiteRoutePassesControlPaths(t *testing.T) {
 	}
 	tr.siteProxy = newReverseProxy(u, func() {}, newProxyTransport())
 	for _, p := range []string{"/instance/leadership", "/instance/promote", "/instance_version", "/arbitrary/action"} {
-		upstreamHits = nil
+		hits.reset()
 		rr := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet, p, nil)
 		tr.serveHTTP(rr, req, true)
 		if rr.Code != http.StatusOK {
 			t.Errorf("site %s: want status %d, got %d", p, http.StatusOK, rr.Code)
 		}
-		if len(upstreamHits) == 0 {
+		if len(hits.snapshot()) == 0 {
 			t.Errorf("site %s: upstream not reached", p)
 		}
 		if !strings.Contains(rr.Body.String(), "site-reached") {
@@ -572,7 +596,7 @@ func TestResolveOnce_ClearsLeaderOnAuthoritativeNoLeader(t *testing.T) {
 	t.Run("status_200_empty_url_clears", func(t *testing.T) {
 		t.Parallel()
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			_, _ = w.Write([]byte(`{"leaderUrl":""}`))
+			_, _ = w.Write([]byte(`{"leaderUrl":"","seq":100,"epoch":1}`))
 		}))
 		defer srv.Close()
 		tr := &tracker{name: "test", bigbrainURL: srv.URL, client: &http.Client{}, proxyTransport: newProxyTransport()}
@@ -626,7 +650,7 @@ func TestResolveOnce_ClearsLeaderOnAuthoritativeNoLeader(t *testing.T) {
 	t.Run("status_200_sets_leader", func(t *testing.T) {
 		t.Parallel()
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			_, _ = w.Write([]byte(`{"leaderUrl":"http://10.0.0.9:3210"}`))
+			_, _ = w.Write([]byte(`{"leaderUrl":"http://10.0.0.9:3210","seq":101,"epoch":1}`))
 		}))
 		defer srv.Close()
 		tr := &tracker{name: "test", bigbrainURL: srv.URL, client: &http.Client{}, proxyTransport: newProxyTransport()}
@@ -691,20 +715,6 @@ func TestLeaderSeqOrdering_AcrossPollAndStream(t *testing.T) {
 	tr.consumeStream(context.Background(), fresh.URL)
 	if got := leaderSnapshot(tr); got != "http://10.0.0.3:3210" {
 		t.Fatalf("newer stream event (seq 11 > 10) must apply, got leader %q", got)
-	}
-}
-
-func TestApplyLeader_SeqZeroAlwaysApplies(t *testing.T) {
-	t.Parallel()
-	tr := &tracker{host: "api.example", proxyTransport: newProxyTransport()}
-	if !tr.applyLeader("http://10.0.0.1:3210", 10, 0) {
-		t.Fatal("seq 10 should install the leader")
-	}
-	if !tr.setLeader("http://10.0.0.2:3210") {
-		t.Fatal("a seq-less (legacy bigbrain) event must apply unconditionally")
-	}
-	if got := leaderSnapshot(tr); got != "http://10.0.0.2:3210" {
-		t.Fatalf("leader=%q want the seq-0 applied URL", got)
 	}
 }
 
@@ -812,9 +822,9 @@ func TestActivityConn_ClosesIdleAndSparesActive(t *testing.T) {
 
 func TestNewMux_HealthzOnlyOnUnknownHosts(t *testing.T) {
 	t.Parallel()
-	var paths []string
+	var hits hitLog
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		paths = append(paths, r.URL.Path)
+		hits.add(r.URL.Path)
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, "upstream-reached")
 	}))
@@ -849,7 +859,7 @@ func TestNewMux_HealthzOnlyOnUnknownHosts(t *testing.T) {
 	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "upstream-reached") {
 		t.Fatalf("configured-host healthz must proxy to the leader: status=%d body=%q", resp.StatusCode, body)
 	}
-	if len(paths) != 1 || paths[0] != "/usher/healthz" {
+	if paths := hits.snapshot(); len(paths) != 1 || paths[0] != "/usher/healthz" {
 		t.Fatalf("upstream paths=%v want exactly [/usher/healthz]", paths)
 	}
 }
@@ -1014,9 +1024,9 @@ func TestValidateConfig_Mono(t *testing.T) {
 
 func TestNewMux_MonoRoutesUnknownHostToTheDeployment(t *testing.T) {
 	t.Parallel()
-	var paths []string
+	var hits hitLog
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		paths = append(paths, r.URL.Path)
+		hits.add(r.URL.Path)
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, "upstream-reached")
 	}))
@@ -1058,7 +1068,7 @@ func TestNewMux_MonoRoutesUnknownHostToTheDeployment(t *testing.T) {
 			t.Fatalf("mono: probe %s must be served by usher, not proxied: status=%d body=%q", p, code, body)
 		}
 	}
-	for _, p := range paths {
+	for _, p := range hits.snapshot() {
 		if p == healthzPath || p == readyzPath {
 			t.Fatalf("mono: probe path %q must never be proxied to the backend", p)
 		}

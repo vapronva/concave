@@ -33,7 +33,6 @@ const (
 	upstreamKeepAlive       = 15 * time.Second
 	upstreamKeepAliveProbes = 3
 	streamBufferMax         = 1 << 16
-	httpClientTimeout       = 3 * time.Second
 	resolveTimeout          = 3 * time.Second
 	resolveInterval         = 60 * time.Second
 	forcedResolveInterval   = 1 * time.Second
@@ -204,12 +203,10 @@ func (t *tracker) applyLeader(leaderURL string, seq, epoch uint64) bool {
 		t.lastEpoch = epoch
 		t.lastAppliedSeq = 0
 	}
-	if seq != 0 {
-		if seq <= t.lastAppliedSeq {
-			return false
-		}
-		t.lastAppliedSeq = seq
+	if seq <= t.lastAppliedSeq {
+		return false
 	}
+	t.lastAppliedSeq = seq
 	if leaderURL == t.leaderURL {
 		return false
 	}
@@ -431,7 +428,6 @@ func startTracker(
 	client *http.Client,
 	bigbrainURL string,
 	maxBodyBytes int64,
-	streamIdle time.Duration,
 	d deploymentCfg,
 ) *tracker {
 	t := &tracker{
@@ -440,7 +436,7 @@ func startTracker(
 		name:           d.Name,
 		bigbrainURL:    bigbrainURL,
 		maxBodyBytes:   maxBodyBytes,
-		streamIdle:     streamIdle,
+		streamIdle:     streamIdleTimeout,
 		client:         client,
 		streamClient:   &http.Client{Transport: newStreamTransport()},
 		proxyTransport: newProxyTransport(),
@@ -448,6 +444,7 @@ func startTracker(
 	}
 	go t.resolveLoop(ctx)
 	go t.streamBigbrain(ctx)
+	//nolint:gosec // operator-configured values, not request data
 	log.Printf("usher: configured host=%s siteHost=%q name=%s bigbrain=%q", d.Host, d.SiteHost, d.Name, bigbrainURL)
 	return t
 }
@@ -551,7 +548,7 @@ func main() {
 	addr := flag.String("addr", ":8080", "listen address")
 	bigbrainURL := flag.String(
 		"bigbrain",
-		env("USHER_BIGBRAIN_URL", ""),
+		os.Getenv("USHER_BIGBRAIN_URL"),
 		"bigbrain base URL (e.g. http://bigbrain.convex-system.svc.cluster.local:8081)",
 	)
 	mono := flag.Bool(
@@ -590,25 +587,25 @@ func main() {
 	if err != nil {
 		log.Fatalf("usher: listen %s: %v", *addr, err)
 	}
-	os.Exit(run(cfg, *addr, *bigbrainURL, connIdle, streamIdleTimeout, maxBody, *mono, rawLn))
+	os.Exit(run(cfg, *addr, *bigbrainURL, connIdle, maxBody, *mono, rawLn))
 }
 
 func run(
 	cfg config,
 	addr, bigbrainURL string,
-	connIdle, streamIdle time.Duration,
+	connIdle time.Duration,
 	maxBody int64,
 	mono bool,
 	rawLn net.Listener,
 ) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	client := &http.Client{Timeout: httpClientTimeout, Transport: newStreamTransport()}
+	client := &http.Client{Transport: newStreamTransport()}
 	routes := make(map[string]route, len(cfg.Deployments)*routesPerDeployment)
 	trackers := make([]*tracker, 0, len(cfg.Deployments))
 	var monoHost string
 	for _, d := range cfg.Deployments {
-		t := startTracker(ctx, client, bigbrainURL, maxBody, streamIdle, d)
+		t := startTracker(ctx, client, bigbrainURL, maxBody, d)
 		trackers = append(trackers, t)
 		routes[strings.ToLower(d.Host)] = route{tracker: t}
 		if d.SiteHost != "" {
@@ -618,6 +615,7 @@ func run(
 			monoHost = strings.ToLower(d.Host)
 		}
 	}
+	//nolint:gosec // operator-configured values, not request data
 	log.Printf("usher listening on %s, %d deployment(s), bigbrain=%q", addr, len(cfg.Deployments), bigbrainURL)
 	srv := &http.Server{
 		Addr:              addr,
@@ -814,13 +812,6 @@ func parseMaxBodyBytes(v string) (int64, error) {
 		return 0, fmt.Errorf("must be >= 0, got %d", n)
 	}
 	return n, nil
-}
-
-func env(k, d string) string {
-	if v := os.Getenv(k); v != "" {
-		return v
-	}
-	return d
 }
 
 func stripPort(host string) string {
