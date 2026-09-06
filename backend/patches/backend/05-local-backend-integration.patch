@@ -44,7 +44,7 @@ index fc2a1bc8b..42f44694d 100644
      db: DbDriverTag,
      db_spec: &str,
 diff --git a/crates/local_backend/src/authentication.rs b/crates/local_backend/src/authentication.rs
-index dfe80d124..4a3d1d2f9 100644
+index dfe80d124..0b1f0aa5e 100644
 --- a/crates/local_backend/src/authentication.rs
 +++ b/crates/local_backend/src/authentication.rs
 @@ -12,10 +12,7 @@ use axum::{
@@ -87,7 +87,7 @@ index dfe80d124..4a3d1d2f9 100644
          Ok(Self(AuthenticationToken::None))
      }
  }
-@@ -212,3 +195,36 @@ fn strip_prefix_ignore_case<'a>(string: &'a str, prefix: &str) -> Option<&'a str
+@@ -212,3 +195,30 @@ fn strip_prefix_ignore_case<'a>(string: &'a str, prefix: &str) -> Option<&'a str
          None
      }
  }
@@ -117,15 +117,9 @@ index dfe80d124..4a3d1d2f9 100644
 +            .unwrap();
 +        assert!(matches!(token, AuthenticationToken::None));
 +    }
-+
-+    #[tokio::test]
-+    async fn no_credentials_is_none() {
-+        let ExtractAuthenticationToken(token) = extract("/api/query").await.unwrap();
-+        assert!(matches!(token, AuthenticationToken::None));
-+    }
 +}
 diff --git a/crates/local_backend/src/lib.rs b/crates/local_backend/src/lib.rs
-index 9ad08230d..182cc6bb3 100644
+index 9ad08230d..71ce303d6 100644
 --- a/crates/local_backend/src/lib.rs
 +++ b/crates/local_backend/src/lib.rs
 @@ -35,7 +35,6 @@ use common::{
@@ -178,7 +172,7 @@ index 9ad08230d..182cc6bb3 100644
      pub instance_name: String,
 +    pub role: Arc<crate::leadership::RoleState>,
 +    pub configured_role: common::types::BackendRole,
-+    pub promote_ctx: Arc<crate::leadership::PromoteContext>,
++    pub persistence_factory: crate::leadership::PersistenceFactory,
 +    pub control_plane_token: Option<Arc<String>>,
 +    pub insights_proxy: Option<crate::usage_forwarder::InsightsProxy>,
      pub application: Application<ProdRuntime>,
@@ -342,7 +336,7 @@ index 9ad08230d..182cc6bb3 100644
          let beacon_future = beacon::start_beacon(
              runtime.clone(),
              database.clone(),
-@@ -298,10 +345,18 @@ pub async fn make_app(
+@@ -298,10 +345,22 @@ pub async fn make_app(
          origin,
          site_origin: config.convex_site_url()?,
          instance_name,
@@ -351,7 +345,11 @@ index 9ad08230d..182cc6bb3 100644
 +            preempt_tx.clone(),
 +        )),
 +        configured_role: config.role,
-+        promote_ctx: crate::leadership::promote_context(&config, runtime.clone(), preempt_tx),
++        persistence_factory: crate::leadership::persistence_factory(
++            &config,
++            runtime.clone(),
++            preempt_tx,
++        ),
 +        control_plane_token: crate::leadership::control_plane_token_from_env(),
 +        insights_proxy: crate::usage_forwarder::InsightsProxy::from_env()?,
          application,
@@ -363,10 +361,17 @@ index 9ad08230d..182cc6bb3 100644
  }
  
 diff --git a/crates/local_backend/src/main.rs b/crates/local_backend/src/main.rs
-index fbc0e6290..badee0bf5 100644
+index fbc0e6290..f64bed112 100644
 --- a/crates/local_backend/src/main.rs
 +++ b/crates/local_backend/src/main.rs
-@@ -12,11 +12,16 @@ use common::{
+@@ -1,5 +1,6 @@
+ use std::time::Duration;
+ 
++use application::StorageTagUninitialized;
+ use clap::Parser;
+ use cmd_util::env::{
+     config_service,
+@@ -12,11 +13,16 @@ use common::{
      runtime::Runtime,
      sentry::set_sentry_tags,
      shutdown::ShutdownSignal,
@@ -384,7 +389,7 @@ index fbc0e6290..badee0bf5 100644
      ConnectPersistenceFlags,
  };
  use futures::{
-@@ -37,11 +42,13 @@ use local_backend::{
+@@ -37,11 +43,13 @@ use local_backend::{
          LocalConfig,
          Subcommand,
      },
@@ -400,7 +405,7 @@ index fbc0e6290..badee0bf5 100644
  };
  use runtime::prod::ProdRuntime;
  use tokio::{
-@@ -51,6 +58,21 @@ use tokio::{
+@@ -51,6 +59,21 @@ use tokio::{
      sync::oneshot,
  };
  
@@ -422,7 +427,7 @@ index fbc0e6290..badee0bf5 100644
  fn main() -> Result<(), MainError> {
      let config = LocalConfig::parse();
      if let Some(subcommand) = &config.subcommand {
-@@ -137,27 +159,75 @@ async fn run_server(runtime: ProdRuntime, config: LocalConfig) -> anyhow::Result
+@@ -137,42 +160,91 @@ async fn run_server(runtime: ProdRuntime, config: LocalConfig) -> anyhow::Result
  }
  
  async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::Result<()> {
@@ -478,25 +483,9 @@ index fbc0e6290..badee0bf5 100644
 -        preempt_signal.clone(),
 -    )
 -    .await?;
+-    let st = make_app(
 +    let persistence = if config.role.is_leader() && !boot_as_follower {
-+        RolePersistence::Leader(
-+            connect_persistence(
-+                config.db,
-+                &config.db_spec,
-+                ConnectPersistenceFlags {
-+                    require_ssl: !config.do_not_require_ssl,
-+                    allow_read_only: false,
-+                    skip_index_creation: false,
-+                },
-+                &config.name(),
-+                // No control plane hands a self-hosted backend a deployment ID; a
-+                // layout that keys on one rejects the connection.
-+                None,
-+                runtime.clone(),
-+                preempt_signal.clone(),
-+            )
-+            .await?,
-+        )
++        leader_persistence(&config, &runtime, &preempt_signal).await?
 +    } else {
 +        RolePersistence::Follower(
 +            connect_persistence_reader(
@@ -511,14 +500,34 @@ index fbc0e6290..badee0bf5 100644
 +            .await?,
 +        )
 +    };
-     let st = make_app(
++    let st = match make_app(
          runtime.clone(),
          config.clone(),
-@@ -166,13 +236,13 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
+         persistence,
+         shutdown_rx.clone(),
          preempt_signal.clone(),
      )
-     .await?;
+-    .await?;
 -    let router = router(st.clone());
++    .await
++    {
++        Ok(st) => st,
++        Err(e) if boot_as_follower && e.is::<StorageTagUninitialized>() => {
++            tracing::warn!(
++                "[concave] database has documents but no storage tag (an interrupted \
++                 initialization); booting as leader to finish it"
++            );
++            make_app(
++                runtime.clone(),
++                config.clone(),
++                leader_persistence(&config, &runtime, &preempt_signal).await?,
++                shutdown_rx.clone(),
++                preempt_signal.clone(),
++            )
++            .await?
++        },
++        Err(e) => return Err(e),
++    };
 +    let router = follower_router(st.clone());
      let mut shutdown_rx_ = shutdown_rx.clone();
      let http_service = ConvexHttpService::new(
@@ -530,7 +539,7 @@ index fbc0e6290..badee0bf5 100644
          *HTTP_SERVER_TIMEOUT_DURATION,
          HttpActionRouteMapper,
      );
-@@ -202,8 +272,8 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
+@@ -202,8 +274,8 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
              force_exit_duration = Some(Duration::from_secs(0));
              let _: Result<_, _> = shutdown_tx.broadcast(()).await;
          }
@@ -541,7 +550,7 @@ index fbc0e6290..badee0bf5 100644
              r?;
              let _: Result<_, _> = shutdown_tx.broadcast(()).await;
          },
-@@ -246,7 +316,7 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
+@@ -246,7 +318,7 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
                  break;
              }
              // Forcibly shutdown with second ctrl-c.
@@ -550,6 +559,35 @@ index fbc0e6290..badee0bf5 100644
                  r?;
                  tracing::warn!("Forcibly shutting down!");
                  break;
+@@ -256,3 +328,28 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
+ 
+     Ok(())
+ }
++
++async fn leader_persistence(
++    config: &LocalConfig,
++    runtime: &ProdRuntime,
++    preempt_signal: &ShutdownSignal,
++) -> anyhow::Result<RolePersistence> {
++    Ok(RolePersistence::Leader(
++        connect_persistence(
++            config.db,
++            &config.db_spec,
++            ConnectPersistenceFlags {
++                require_ssl: !config.do_not_require_ssl,
++                allow_read_only: false,
++                skip_index_creation: false,
++            },
++            &config.name(),
++            // No control plane hands a self-hosted backend a deployment ID; a
++            // layout that keys on one rejects the connection.
++            None,
++            runtime.clone(),
++            preempt_signal.clone(),
++        )
++        .await?,
++    ))
++}
 diff --git a/crates/local_backend/src/node_action_callbacks.rs b/crates/local_backend/src/node_action_callbacks.rs
 index 427497fc2..53940ca07 100644
 --- a/crates/local_backend/src/node_action_callbacks.rs

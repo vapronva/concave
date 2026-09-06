@@ -38,10 +38,10 @@ index e66741039..762516c78 100644
 +}
 diff --git a/crates/local_backend/src/usage_forwarder.rs b/crates/local_backend/src/usage_forwarder.rs
 new file mode 100644
-index 000000000..aa30f62de
+index 000000000..dfdd59d1c
 --- /dev/null
 +++ b/crates/local_backend/src/usage_forwarder.rs
-@@ -0,0 +1,344 @@
+@@ -0,0 +1,354 @@
 +use std::sync::Arc;
 +
 +use async_trait::async_trait;
@@ -52,7 +52,13 @@ index 000000000..aa30f62de
 +        Response,
 +    },
 +};
-+use common::http::extract::MtState;
++use common::{
++    http::extract::MtState,
++    knobs::{
++        TRANSACTION_MAX_READ_SIZE_BYTES,
++        TRANSACTION_MAX_READ_SIZE_ROWS,
++    },
++};
 +use events::usage::{
 +    NoOpUsageEventLogger,
 +    UsageEvent,
@@ -145,6 +151,10 @@ index 000000000..aa30f62de
 +        }
 +        let body = serde_json::json!({
 +            "deployment": self.deployment,
++            "read_limits": {
++                "documents": *TRANSACTION_MAX_READ_SIZE_ROWS,
++                "bytes": *TRANSACTION_MAX_READ_SIZE_BYTES,
++            },
 +            "events": events,
 +        });
 +        for attempt in 1..=3 {

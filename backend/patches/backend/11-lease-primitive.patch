@@ -1,5 +1,5 @@
 diff --git a/crates/common/src/persistence/mod.rs b/crates/common/src/persistence/mod.rs
-index 5ec3445b3..2c40bc431 100644
+index 5ec3445b3..bc1baef9e 100644
 --- a/crates/common/src/persistence/mod.rs
 +++ b/crates/common/src/persistence/mod.rs
 @@ -326,6 +326,26 @@ pub trait Persistence: Sync + Send + 'static {
@@ -37,25 +37,6 @@ index 5ec3445b3..2c40bc431 100644
  }
  
  /// Timestamp that is repeatable because the caller is holding the lease and
-@@ -619,7 +638,17 @@ pub async fn new_idle_repeatable_ts<RT: Runtime>(
- ) -> anyhow::Result<RepeatableTimestamp> {
-     let reader = persistence.reader();
-     let max_ts = reader.max_ts().await?.unwrap_or(Timestamp::MIN);
--    let now = cmp::max(max_ts, rt.generate_timestamp()?);
-+    let persisted_max_repeatable = match reader
-+        .get_persistence_global(PersistenceGlobalKey::MaxRepeatableTimestamp)
-+        .await?
-+    {
-+        Some(value) => Timestamp::try_from(value)?,
-+        None => Timestamp::MIN,
-+    };
-+    let now = cmp::max(
-+        cmp::max(max_ts, rt.generate_timestamp()?),
-+        persisted_max_repeatable,
-+    );
-     // Enforce that all subsequent commits are > now by writing to MaxRepeatableTs.
-     persistence
-         .write_persistence_global(PersistenceGlobalKey::MaxRepeatableTimestamp, now.into())
 diff --git a/crates/postgres/src/lib.rs b/crates/postgres/src/lib.rs
 index 0d0691d42..d733dbf16 100644
 --- a/crates/postgres/src/lib.rs
@@ -276,7 +257,7 @@ index 0d0691d42..d733dbf16 100644
      /// still held, otherwise return `LeaseLostError`.
      ///
 diff --git a/crates/postgres/src/sql.rs b/crates/postgres/src/sql.rs
-index a531a8b5a..d813e1d33 100644
+index a531a8b5a..de688877c 100644
 --- a/crates/postgres/src/sql.rs
 +++ b/crates/postgres/src/sql.rs
 @@ -716,6 +716,20 @@ pub const fn unset_read_only(multitenant: bool) -> &'static str {
@@ -325,32 +306,3 @@ index a531a8b5a..d813e1d33 100644
              column = if multitenant { "instance_name" } else { "id" },
              value = if multitenant { "$2" } else { "1" }
          )
-@@ -1083,3 +1107,28 @@ pub const fn import_indexes_batch(multitenant: bool) -> &'static str {
-         )
-     )
- }
-+
-+#[cfg(test)]
-+mod lease_sql_tests {
-+    use super::{
-+        advisory_lease_check,
-+        lease_acquire,
-+        lease_release,
-+    };
-+
-+    #[test]
-+    fn lease_statements_pin_the_fencing_contract() {
-+        assert_eq!(
-+            advisory_lease_check(false),
-+            "SELECT 1 FROM @db_name.leases WHERE id=1 AND ts=$1",
-+        );
-+        assert_eq!(
-+            lease_acquire(false),
-+            "UPDATE @db_name.leases SET ts=GREATEST($1, ts+1) WHERE id=1 RETURNING ts",
-+        );
-+        assert_eq!(
-+            lease_release(true),
-+            "UPDATE @db_name.leases SET ts=ts+1 WHERE instance_name=$2 AND ts=$1",
-+        );
-+    }
-+}

@@ -58,10 +58,10 @@ index 000000000..fee975de7
 +workspace = true
 diff --git a/crates/funrun_server/src/callbacks.rs b/crates/funrun_server/src/callbacks.rs
 new file mode 100644
-index 000000000..b6cff6bed
+index 000000000..38aa09d74
 --- /dev/null
 +++ b/crates/funrun_server/src/callbacks.rs
-@@ -0,0 +1,594 @@
+@@ -0,0 +1,602 @@
 +use anyhow::Context;
 +use async_trait::async_trait;
 +use common::{
@@ -204,12 +204,15 @@ index 000000000..b6cff6bed
 +}
 +
 +fn callback_status_error(path: &str, status: http::StatusCode, text: String) -> anyhow::Error {
++    let (code, message) = common::http::HttpError::error_message_from_bytes(text.as_bytes())
++        .unwrap_or_else(|_| {
++            (
++                "CallbackFailed".into(),
++                format!("funrun callback {path} returned {status}").into(),
++            )
++        });
 +    let err = anyhow::anyhow!("funrun callback {path} returned {status}: {text}");
-+    match errors::ErrorMetadata::from_http_status_code(
-+        status,
-+        "CallbackFailed",
-+        format!("funrun callback {path} returned {status}"),
-+    ) {
++    match errors::ErrorMetadata::from_http_status_code(status, code, message) {
 +        Some(metadata) => err.context(metadata),
 +        None => err,
 +    }
@@ -248,9 +251,15 @@ index 000000000..b6cff6bed
 +    #[serde(rename_all = "camelCase")]
 +    Error {
 +        error_message: String,
-+        #[serde(default)]
++        #[serde(default, deserialize_with = "deserialize_some")]
 +        error_data: Option<JsonValue>,
 +    },
++}
++
++fn deserialize_some<'de, D: serde::Deserializer<'de>>(
++    deserializer: D,
++) -> Result<Option<JsonValue>, D::Error> {
++    JsonValue::deserialize(deserializer).map(Some)
 +}
 +
 +#[derive(Serialize)]
@@ -603,7 +612,10 @@ index 000000000..b6cff6bed
 +#[cfg(test)]
 +mod tests {
 +    use common::components::ComponentPath;
-+    use serde_json::json;
++    use serde_json::{
++        json,
++        Value as JsonValue,
++    };
 +
 +    use super::{
 +        build_js_error,
@@ -624,36 +636,32 @@ index 000000000..b6cff6bed
 +    }
 +
 +    #[test]
-+    fn run_function_response_decodes_success_and_error() {
++    fn run_function_response_keeps_null_error_data_distinct_from_absent() {
 +        let success: RunFunctionResponse =
 +            serde_json::from_value(json!({"status": "success", "value": 42})).unwrap();
 +        assert!(matches!(
 +            success,
 +            RunFunctionResponse::Success { value } if value == json!(42)
 +        ));
-+        let error: RunFunctionResponse = serde_json::from_value(json!({
-+            "status": "error",
-+            "errorMessage": "nope",
-+            "errorData": {"code": "E_NOPE"}
-+        }))
-+        .unwrap();
-+        assert!(matches!(
-+            error,
-+            RunFunctionResponse::Error {
-+                error_message,
-+                error_data: Some(data),
-+            } if error_message == "nope" && data == json!({"code": "E_NOPE"})
-+        ));
-+    }
-+
-+    #[test]
-+    fn build_js_error_preserves_valid_custom_data_and_drops_invalid_data() {
-+        let custom = build_js_error("custom".to_string(), Some(json!({"code": "E_CUSTOM"})));
-+        assert_eq!(custom.message, "custom");
++        let decode = |body: serde_json::Value| -> Option<JsonValue> {
++            match serde_json::from_value(body).unwrap() {
++                RunFunctionResponse::Error { error_data, .. } => error_data,
++                RunFunctionResponse::Success { .. } => panic!("expected an error response"),
++            }
++        };
++        assert_eq!(
++            decode(json!({"status": "error", "errorMessage": "nope"})),
++            None
++        );
++        assert_eq!(
++            decode(json!({"status": "error", "errorMessage": "nope", "errorData": null})),
++            Some(JsonValue::Null)
++        );
++        let custom = build_js_error("custom".to_string(), Some(JsonValue::Null));
 +        assert!(custom.custom_data.is_some());
-+        let plain = build_js_error("plain".to_string(), Some(json!({"$invalid": 1})));
-+        assert_eq!(plain.message, "plain");
-+        assert!(plain.custom_data.is_none());
++        assert!(build_js_error("plain".to_string(), None)
++            .custom_data
++            .is_none());
 +    }
 +}
 diff --git a/crates/funrun_server/src/config.rs b/crates/funrun_server/src/config.rs
@@ -745,10 +753,10 @@ index 000000000..8f8f88182
 +}
 diff --git a/crates/funrun_server/src/main.rs b/crates/funrun_server/src/main.rs
 new file mode 100644
-index 000000000..caedd8f30
+index 000000000..442d7ee23
 --- /dev/null
 +++ b/crates/funrun_server/src/main.rs
-@@ -0,0 +1,271 @@
+@@ -0,0 +1,278 @@
 +#![recursion_limit = "256"]
 +
 +use std::sync::{
@@ -781,6 +789,7 @@ index 000000000..caedd8f30
 +
 +use config::FunrunConfig;
 +use function_runner::remote::MAX_GRPC_MESSAGE_BYTES;
++use metrics::log_isolate_pool;
 +use service::FunrunService;
 +use snapshot::InstanceRegistry;
 +
@@ -866,12 +875,18 @@ index 000000000..caedd8f30
 +async fn readiness(State(state): State<HealthState>) -> impl IntoResponse {
 +    let report = state.registry.health_report(state.max_snapshot_lag);
 +    let draining = state.shutting_down.load(Ordering::Acquire);
-+    let status = if draining || !report.healthy {
++    let status = if draining || !report.healthy || !state.registry.instance_loaded() {
 +        StatusCode::SERVICE_UNAVAILABLE
 +    } else {
 +        StatusCode::OK
 +    };
 +    (status, Json(report))
++}
++
++async fn metrics(State(state): State<HealthState>) -> impl IntoResponse {
++    let (busy, total) = state.registry.isolate_workers();
++    log_isolate_pool(busy, total);
++    common::http::metrics().await
 +}
 +
 +async fn serve_health(
@@ -884,7 +899,7 @@ index 000000000..caedd8f30
 +    let app = Router::new()
 +        .route("/healthz", get(liveness))
 +        .route("/readyz", get(readiness))
-+        .route("/metrics", get(common::http::metrics))
++        .route("/metrics", get(metrics))
 +        .with_state(HealthState {
 +            registry,
 +            max_snapshot_lag,
@@ -1750,10 +1765,10 @@ index 000000000..27f02b7fe
 +}
 diff --git a/crates/funrun_server/src/snapshot.rs b/crates/funrun_server/src/snapshot.rs
 new file mode 100644
-index 000000000..544041673
+index 000000000..166597cc9
 --- /dev/null
 +++ b/crates/funrun_server/src/snapshot.rs
-@@ -0,0 +1,600 @@
+@@ -0,0 +1,579 @@
 +use std::{
 +    collections::BTreeMap,
 +    sync::Arc,
@@ -1783,7 +1798,6 @@ index 000000000..544041673
 +    BootstrapMetadata,
 +    Database,
 +    DatabaseSnapshot,
-+    FollowerRetentionManager,
 +    TableCountSnapshot,
 +    TextIndexManagerSnapshot,
 +    TransactionTextSnapshot,
@@ -1822,7 +1836,6 @@ index 000000000..544041673
 +        FunrunInstanceConfig,
 +    },
 +    metrics::{
-+        log_isolate_pool,
 +        log_snapshot_cold,
 +        log_snapshot_cold_load,
 +        log_snapshot_request,
@@ -1837,12 +1850,12 @@ index 000000000..544041673
 +    rt: RT,
 +    db: clusters::DbDriverTag,
 +    require_ssl: bool,
-+    instance: Arc<FunrunInstanceConfig>,
++    instance: FunrunInstanceConfig,
 +    shared_isolate: SharedIsolateResources<RT>,
 +    searcher: Arc<dyn search::Searcher>,
 +    state: Arc<OnceCell<Arc<InstanceState<RT>>>>,
 +    lag_sample: Arc<Mutex<Option<InstanceLagSample>>>,
-+    load_error: Arc<Mutex<Option<InstanceLoadError>>>,
++    load_error: Mutex<Option<InstanceLoadError>>,
 +}
 +
 +#[derive(Clone)]
@@ -1874,22 +1887,17 @@ index 000000000..544041673
 +        let searcher: Arc<dyn search::Searcher> = Arc::new(InProcessSearcher::new(rt.clone())?);
 +        let state = Arc::new(OnceCell::new());
 +        let lag_sample = Arc::new(Mutex::new(None));
-+        Self::spawn_isolate_pool_sampler(
-+            rt.clone(),
-+            shared_isolate.clone(),
-+            state.clone(),
-+            lag_sample.clone(),
-+        );
++        Self::spawn_lag_sampler(rt.clone(), state.clone(), lag_sample.clone());
 +        Ok(Self {
 +            rt,
 +            db: config.db,
 +            require_ssl: config.require_ssl,
-+            instance: Arc::new(config.instance.clone()),
++            instance: config.instance.clone(),
 +            shared_isolate,
 +            searcher,
 +            state,
 +            lag_sample,
-+            load_error: Arc::new(Mutex::new(None)),
++            load_error: Mutex::new(None),
 +        })
 +    }
 +
@@ -1904,15 +1912,16 @@ index 000000000..544041673
 +        self.shared_isolate.pool_healthy()
 +    }
 +
-+    pub fn instance_config(
-+        &self,
-+        instance_name: &str,
-+    ) -> anyhow::Result<Arc<FunrunInstanceConfig>> {
++    pub fn instance_loaded(&self) -> bool {
++        self.state.get().is_some()
++    }
++
++    pub fn instance_config(&self, instance_name: &str) -> anyhow::Result<&FunrunInstanceConfig> {
 +        anyhow::ensure!(
 +            instance_name == self.instance.instance_name,
 +            "funrun pod is not configured for instance {instance_name:?} (FUNRUN_INSTANCE_NAME)"
 +        );
-+        Ok(self.instance.clone())
++        Ok(&self.instance)
 +    }
 +
 +    pub async fn get_or_create(
@@ -1924,7 +1933,7 @@ index 000000000..544041673
 +            .get_or_try_init(|| async {
 +                let state = InstanceState::load(
 +                    self.rt.clone(),
-+                    &config,
++                    config,
 +                    self.db,
 +                    self.require_ssl,
 +                    self.shared_isolate.clone(),
@@ -1975,19 +1984,14 @@ index 000000000..544041673
 +        }
 +    }
 +
-+    fn spawn_isolate_pool_sampler(
++    fn spawn_lag_sampler(
 +        rt: RT,
-+        shared_isolate: SharedIsolateResources<RT>,
 +        state: Arc<OnceCell<Arc<InstanceState<RT>>>>,
 +        lag_sample: Arc<Mutex<Option<InstanceLagSample>>>,
 +    ) {
 +        let worker_rt = rt.clone();
-+        rt.spawn_background("funrun_isolate_pool_sampler", async move {
++        rt.spawn_background("funrun_lag_sampler", async move {
 +            loop {
-+                log_isolate_pool(
-+                    shared_isolate.active_isolate_workers(),
-+                    shared_isolate.max_isolate_workers(),
-+                );
 +                if let Some(state) = state.get() {
 +                    let sample = sample_instance_lag(state).await;
 +                    *lag_sample.lock() = Some(sample);
@@ -2048,8 +2052,6 @@ index 000000000..544041673
 +            rt.clone(),
 +        )
 +        .await?;
-+        let retention_validator: Arc<dyn RetentionValidator> =
-+            Arc::new(FollowerRetentionManager::new(rt.clone(), reader.clone()).await?);
 +        let key_broker =
 +            keybroker::KeyBroker::new(&config.instance_name, config.instance_secret.clone())?
 +                .function_runner_keybroker();
@@ -2061,6 +2063,7 @@ index 000000000..544041673
 +            IndexCache::new(*common::knobs::FUNRUN_FOLLOWER_INDEX_CACHE_SIZE).new_handle(),
 +        )
 +        .await?;
++        let retention_validator = database.retention_validator();
 +        let storage_type = Self::read_storage_type(&database).await?;
 +        let files_storage =
 +            create_storage(rt.clone(), &storage_type, storage::StorageUseCase::Files).await?;
@@ -2134,23 +2137,14 @@ index 000000000..544041673
 +        match self.database.snapshot(ts) {
 +            Ok(snapshot) => {
 +                log_snapshot_warm_hit();
-+                let bootstrap_metadata = self.database.bootstrap_metadata.clone();
-+                let table_count_snapshot: Arc<dyn TableCountSnapshot> =
-+                    match snapshot.table_counts.clone() {
-+                        Some(counts) => Arc::new(Some(counts)),
-+                        None => Arc::new(Some(
-+                            self.rolled_table_counts(
-+                                ts,
-+                                snapshot.table_registry.table_mapping(),
-+                                &snapshot.virtual_system_mapping,
-+                            )
-+                            .await?,
-+                        )),
-+                    };
++                let counts = snapshot
++                    .table_counts
++                    .clone()
++                    .context("warm snapshot has no table counts")?;
 +                Ok(SnapshotInputs {
 +                    index_reader,
-+                    bootstrap_metadata,
-+                    table_count_snapshot,
++                    bootstrap_metadata: self.database.bootstrap_metadata.clone(),
++                    table_count_snapshot: Arc::new(Some(counts)),
 +                    text_index_snapshot: self
 +                        .text_snapshot(snapshot.index_registry, snapshot.text_indexes),
 +                })

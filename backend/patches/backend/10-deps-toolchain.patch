@@ -6,7 +6,7 @@ index db49bb14d..b7179aed0 100644
 -22.22.2
 +24.20.0
 diff --git a/Cargo.lock b/Cargo.lock
-index 3902d8071..d83f02119 100644
+index 8d1815209..e5c95d6dd 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
 @@ -357,7 +357,7 @@ dependencies = [
@@ -819,12 +819,12 @@ index 5bddd2dd5..4c0b86e7f 100644
  clusters = { workspace = true, features = ["testing"] }
  common = { workspace = true, features = ["testing"] }
 diff --git a/rust-toolchain b/rust-toolchain
-index 1ba2c04ca..746d33c35 100644
+index 1ba2c04ca..fb14cd6cb 100644
 --- a/rust-toolchain
 +++ b/rust-toolchain
 @@ -1,3 +1,4 @@
  [toolchain]
 -channel = "nightly-2026-06-28"
-+channel = "nightly-2026-09-05"
++channel = "nightly-2026-09-06"
  targets = ["wasm32-wasip1"]
 +components = ["rustfmt"]

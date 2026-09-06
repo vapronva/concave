@@ -11,7 +11,7 @@ index bceb6b977..f2f937c1f 100644
                          outcome.result.is_ok(),
                          usage_stats,
 diff --git a/crates/application/src/lib.rs b/crates/application/src/lib.rs
-index a843db0bd..88f4512b4 100644
+index a843db0bd..12eff76a9 100644
 --- a/crates/application/src/lib.rs
 +++ b/crates/application/src/lib.rs
 @@ -135,6 +135,7 @@ use common::{
@@ -54,7 +54,21 @@ index a843db0bd..88f4512b4 100644
      UsageMeter,
  };
  use usage_tracking::{
-@@ -614,15 +615,20 @@ pub struct Application<RT: Runtime> {
+@@ -594,6 +595,13 @@ pub(crate) fn validate_env_var_values(
+     Ok(())
+ }
+ 
++#[derive(Debug, thiserror::Error)]
++#[error(
++    "database storage tag is not initialized: the leader has not finished initializing this \
++     database"
++)]
++pub struct StorageTagUninitialized;
++
+ #[derive(Clone)]
+ pub struct ApplicationStorage {
+     pub files_storage: Arc<dyn Storage>,
+@@ -614,15 +622,20 @@ pub struct Application<RT: Runtime> {
      usage_counter: UsageCounter,
      usage_event_logger: Arc<dyn UsageEventLogger>,
      usage_meter: Arc<UsageMeter>,
@@ -76,7 +90,7 @@ index a843db0bd..88f4512b4 100644
  }
  
  /// Create storage based on the storage type configuration
-@@ -681,29 +687,32 @@ impl<RT: Runtime> Application<RT> {
+@@ -681,29 +694,32 @@ impl<RT: Runtime> Application<RT> {
              storage_type
          };
  
@@ -122,7 +136,7 @@ index a843db0bd..88f4512b4 100644
          Ok(ApplicationStorage {
              files_storage,
              modules_storage,
-@@ -713,7 +722,32 @@ impl<RT: Runtime> Application<RT> {
+@@ -713,7 +729,29 @@ impl<RT: Runtime> Application<RT> {
          })
      }
  
@@ -137,10 +151,7 @@ index a843db0bd..88f4512b4 100644
 +                .await?
 +                .into_value()
 +                .storage_type
-+                .context(
-+                    "follower cannot start: database storage tag is not initialized (the leader \
-+                     must initialize the database first)",
-+                )?
++                .context(StorageTagUninitialized)?
 +        };
 +        let storage = Self::open_application_storage(runtime, database, &storage_type).await?;
 +        tracing::info!(
@@ -155,7 +166,7 @@ index a843db0bd..88f4512b4 100644
          runtime: RT,
          database: Database<RT>,
          file_storage: FileStorage<RT>,
-@@ -727,7 +761,7 @@ impl<RT: Runtime> Application<RT> {
+@@ -727,7 +765,7 @@ impl<RT: Runtime> Application<RT> {
          convex_site: ConvexSite,
          searcher: Arc<dyn Searcher>,
          segment_term_metadata_fetcher: Arc<dyn SegmentTermMetadataFetcher>,
@@ -164,7 +175,7 @@ index a843db0bd..88f4512b4 100644
          node_actions: NodeActions<RT>,
          log_visibility: Arc<dyn LogVisibility<RT>>,
          app_auth: Arc<ApplicationAuth<RT>>,
-@@ -754,6 +788,143 @@ impl<RT: Runtime> Application<RT> {
+@@ -754,6 +792,143 @@ impl<RT: Runtime> Application<RT> {
              CONVEX_SITE.clone() => convex_site.parse()?
          };
  
@@ -308,7 +319,7 @@ index a843db0bd..88f4512b4 100644
          let mut index_worker = Arc::new(Mutex::new(None));
          if *ENABLE_INDEX_BACKFILL {
              let index_worker_fut = IndexWorker::new(
-@@ -778,12 +949,12 @@ impl<RT: Runtime> Application<RT> {
+@@ -778,12 +953,12 @@ impl<RT: Runtime> Application<RT> {
              database.clone(),
              persistence.reader(),
              application_storage.search_storage.clone(),
@@ -324,7 +335,7 @@ index a843db0bd..88f4512b4 100644
          let table_summary_worker = TableSummaryWorker::start(
              runtime.clone(),
              database.clone(),
-@@ -805,90 +976,9 @@ impl<RT: Runtime> Application<RT> {
+@@ -805,90 +980,7 @@ impl<RT: Runtime> Application<RT> {
              runtime.spawn("system_table_cleanup_worker", system_table_cleanup_worker),
          ));
  
@@ -412,13 +423,11 @@ index a843db0bd..88f4512b4 100644
 -            deployment.clone(),
 -        ));
 -        function_runner.set_action_callbacks(runner.clone());
-+        let usage_limit_worker = Arc::new(Mutex::new(Some(
-+            runtime.spawn("usage_limit_worker", std::future::pending::<()>()),
-+        )));
++        let usage_limit_worker = Arc::new(Mutex::new(None));
  
          let scheduled_job_runner = ScheduledJobRunner::start(
              runtime.clone(),
-@@ -914,7 +1004,7 @@ impl<RT: Runtime> Application<RT> {
+@@ -914,7 +1006,7 @@ impl<RT: Runtime> Application<RT> {
              database.clone(),
              application_storage.exports_storage.clone(),
              application_storage.files_storage.clone(),
@@ -427,7 +436,7 @@ index a843db0bd..88f4512b4 100644
              usage_counter.clone(),
              deployment_name.clone(),
          );
-@@ -951,7 +1041,7 @@ impl<RT: Runtime> Application<RT> {
+@@ -951,7 +1043,7 @@ impl<RT: Runtime> Application<RT> {
              deployment_name.clone(),
          )?;
  
@@ -436,7 +445,7 @@ index a843db0bd..88f4512b4 100644
              usage_gauges_tracking_worker,
              scheduled_job_runner,
              cron_job_executor,
-@@ -966,29 +1056,79 @@ impl<RT: Runtime> Application<RT> {
+@@ -966,29 +1058,77 @@ impl<RT: Runtime> Application<RT> {
              system_table_cleanup_worker,
              migration_worker,
              usage_limit_worker,
@@ -470,7 +479,6 @@ index a843db0bd..88f4512b4 100644
 +    pub async fn become_leader(
 +        &self,
 +        rw_persistence: Arc<dyn Persistence>,
-+        retention_rate_limiter: Arc<common::runtime::RateLimiter<RT>>,
 +        preempt_signal: ShutdownSignal,
 +    ) -> anyhow::Result<()> {
 +        tracing::info!("[promote] Application::become_leader: promoting Database");
@@ -478,7 +486,6 @@ index a843db0bd..88f4512b4 100644
 +            .database
 +            .become_leader(
 +                rw_persistence.clone(),
-+                retention_rate_limiter,
 +                preempt_signal.clone(),
 +                self.deployment.name.clone(),
 +            )
