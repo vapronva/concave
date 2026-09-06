@@ -666,10 +666,10 @@ index 000000000..38aa09d74
 +}
 diff --git a/crates/funrun_server/src/config.rs b/crates/funrun_server/src/config.rs
 new file mode 100644
-index 000000000..8f8f88182
+index 000000000..2c9946728
 --- /dev/null
 +++ b/crates/funrun_server/src/config.rs
-@@ -0,0 +1,81 @@
+@@ -0,0 +1,73 @@
 +use std::{
 +    net::SocketAddr,
 +    time::Duration,
@@ -709,15 +709,7 @@ index 000000000..8f8f88182
 +            .context("Invalid FUNRUN_HEALTH_LISTEN")?;
 +        let max_snapshot_lag = duration_secs_from_env("FUNRUN_MAX_SNAPSHOT_LAG_SECS", 30)?;
 +        let drain_delay = duration_secs_from_env("CONVEX_FUNRUN_DRAIN_DELAY_SECS", 8)?;
-+        let db = match std::env::var("FUNRUN_DB").ok() {
-+            Some(s) => s
-+                .parse::<DbDriverTag>()
-+                .with_context(|| format!("Invalid FUNRUN_DB {s}"))?,
-+            None => DbDriverTag::Postgres(PersistenceVersion::V5),
-+        };
-+        let require_ssl = std::env::var("FUNRUN_DO_NOT_REQUIRE_SSL")
-+            .map(|v| v != "true" && v != "1")
-+            .unwrap_or(true);
++        let require_ssl = std::env::var_os("DO_NOT_REQUIRE_SSL").is_none();
 +        let instance_name =
 +            std::env::var("FUNRUN_INSTANCE_NAME").context("FUNRUN_INSTANCE_NAME must be set")?;
 +        let instance_secret = std::env::var("FUNRUN_INSTANCE_SECRET")
@@ -734,7 +726,7 @@ index 000000000..8f8f88182
 +                instance_secret,
 +                db_spec,
 +            },
-+            db,
++            db: DbDriverTag::Postgres(PersistenceVersion::V5),
 +            require_ssl,
 +        })
 +    }

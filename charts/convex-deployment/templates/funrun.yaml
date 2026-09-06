@@ -80,12 +80,6 @@ spec:
                   name: {{ include "convex.instanceSecretName" . }}
                   key: {{ default "instance-secret" .Values.instance.secretRef.key }}
             {{- include "convex.pgEnv" . | nindent 12 }}
-            - name: FUNRUN_DB
-              value: postgres-v5
-            {{- if eq .Values.db.sslMode "disable" }}
-            - name: FUNRUN_DO_NOT_REQUIRE_SSL
-              value: "true"
-            {{- end }}
             {{- if .Values.funrun.podDeletionCost.enabled }}
             - name: CONVEX_FUNRUN_POD_DELETION_COST
               value: "true"
