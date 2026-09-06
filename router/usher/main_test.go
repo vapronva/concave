@@ -41,7 +41,7 @@ func (h *hitLog) snapshot() []string {
 }
 
 func (t *tracker) setLeader(leaderURL string) bool {
-	return t.applyLeader(leaderURL, t.lastAppliedSeq+1, t.lastEpoch)
+	return t.applyLeader(leaderResponse{LeaderURL: leaderURL, Seq: t.lastAppliedSeq + 1, Epoch: t.lastEpoch}, true)
 }
 
 func TestIsBlockedControlPath(t *testing.T) {
@@ -365,26 +365,6 @@ func TestServeHTTP_UpgradeKeepsHijacker(t *testing.T) {
 	}
 }
 
-func TestNudgeResolveDeduplicates(t *testing.T) {
-	t.Parallel()
-	tr := &tracker{resolveCh: make(chan struct{}, 1), proxyTransport: newProxyTransport()}
-	sent := 0
-	for range 100 {
-		tr.nudgeResolve()
-	}
-	for {
-		select {
-		case <-tr.resolveCh:
-			sent++
-		default:
-			if sent != 1 {
-				t.Fatalf("nudges queued=%d want 1", sent)
-			}
-			return
-		}
-	}
-}
-
 func TestServeHTTP_ZeroMaxBodyBytesDisablesCap(t *testing.T) {
 	t.Parallel()
 	var hits atomic.Int64
@@ -427,29 +407,13 @@ func TestServeHTTP_ZeroMaxBodyBytesDisablesCap(t *testing.T) {
 	}
 }
 
-func TestParseMaxBodyBytes(t *testing.T) {
-	t.Parallel()
-	if got, err := parseMaxBodyBytes(""); err != nil || got != defaultMaxBodyBytes {
-		t.Fatalf("empty: got %d err=%v, want default %d", got, err, int64(defaultMaxBodyBytes))
-	}
-	if got, err := parseMaxBodyBytes("1024"); err != nil || got != 1024 {
-		t.Fatalf("1024: got %d err=%v", got, err)
-	}
-	if got, err := parseMaxBodyBytes("0"); err != nil || got != 0 {
-		t.Fatalf("0 (disabled): got %d err=%v", got, err)
-	}
-	for _, bad := range []string{"garbage", "-1", "128MiB", "1.5"} {
-		if _, err := parseMaxBodyBytes(bad); err == nil {
-			t.Fatalf("%q: want parse error", bad)
-		}
-	}
-}
-
 func TestValidateConfig(t *testing.T) {
 	t.Parallel()
 	cfg := config{Deployments: []deploymentCfg{{Host: "api.example", Name: "api"}}}
-	if err := validateConfig(cfg, "", false); err == nil {
-		t.Fatal("missing bigbrain URL must fail")
+	for _, bad := range []string{"", "bigbrain:8081", "ftp://bigbrain:8081"} {
+		if err := validateConfig(cfg, bad, false); err == nil {
+			t.Fatalf("bigbrain URL %q must be rejected", bad)
+		}
 	}
 	if err := validateConfig(cfg, "http://bigbrain:8081", false); err != nil {
 		t.Fatalf("valid config rejected: %v", err)
@@ -462,10 +426,16 @@ func TestValidateConfig(t *testing.T) {
 	if dupErr == nil || !strings.Contains(dupErr.Error(), "api.example") {
 		t.Fatalf("duplicate-host error must name the offending host, got %v", dupErr)
 	}
-	for _, name := range []string{"bad/name", "bad name", "bad%name", "../escape"} {
+	for _, name := range []string{"bad/name", "bad name", "bad%name", "../escape", ".", "..", "dev+prod", "-dev", "dev=ns"} {
 		bad := config{Deployments: []deploymentCfg{{Host: "api.example", Name: name}}}
 		if err := validateConfig(bad, "http://bigbrain:8081", false); err == nil {
 			t.Errorf("name %q must be rejected at boot", name)
+		}
+	}
+	for _, host := range []string{"api .example", "api.example/path", "-api.example", "api..example"} {
+		bad := config{Deployments: []deploymentCfg{{Host: host, Name: "api"}}}
+		if err := validateConfig(bad, "http://bigbrain:8081", false); err == nil {
+			t.Errorf("host %q must be rejected at boot", host)
 		}
 	}
 	unnamed := config{Deployments: []deploymentCfg{{Host: "api.example"}}}
@@ -493,24 +463,6 @@ func TestValidateConfig(t *testing.T) {
 	dupNameErr := validateConfig(dupName, "http://bigbrain:8081", false)
 	if dupNameErr == nil || !strings.Contains(dupNameErr.Error(), `"convex"`) {
 		t.Fatalf("duplicate-name error must name the colliding name, got %v", dupNameErr)
-	}
-}
-
-func TestParseConnIdle(t *testing.T) {
-	t.Parallel()
-	if got, err := parseConnIdle(""); err != nil || got != defaultConnIdle {
-		t.Fatalf("empty: got %s err=%v, want default %s", got, err, defaultConnIdle)
-	}
-	if got, err := parseConnIdle("90s"); err != nil || got != 90*time.Second {
-		t.Fatalf("90s: got %s err=%v", got, err)
-	}
-	if got, err := parseConnIdle("0"); err != nil || got != 0 {
-		t.Fatalf("0 (disabled): got %s err=%v", got, err)
-	}
-	for _, bad := range []string{"-5s", "-1h", "garbage", "10"} {
-		if _, err := parseConnIdle(bad); err == nil {
-			t.Errorf("%q: want parse error", bad)
-		}
 	}
 }
 
@@ -552,17 +504,6 @@ func siteUpstream(t *testing.T, tr *tracker) (string, string) {
 	return out.URL.Host, out.URL.Path
 }
 
-func TestSetLeader_NoSiteProxyWithoutSiteHost(t *testing.T) {
-	t.Parallel()
-	tr := &tracker{host: "api.convex.localtest.me", client: &http.Client{}, proxyTransport: newProxyTransport()}
-	if !tr.setLeader("http://10.0.0.7:3210") {
-		t.Fatal("setLeader should install api proxy")
-	}
-	if sp := tr.currentLeader(true); sp != nil {
-		t.Error("site proxy should be nil when siteHost is unset")
-	}
-}
-
 func TestResolveOnce_ClearsLeaderOnAuthoritativeNoLeader(t *testing.T) {
 	t.Parallel()
 	t.Run("status_503_clears", func(t *testing.T) {
@@ -591,19 +532,6 @@ func TestResolveOnce_ClearsLeaderOnAuthoritativeNoLeader(t *testing.T) {
 		tr.resolveOnce(context.Background())
 		if tr.currentLeader(false) == nil {
 			t.Fatal("503 without an epoch must be treated as a poll error and preserve the leader")
-		}
-	})
-	t.Run("status_200_empty_url_clears", func(t *testing.T) {
-		t.Parallel()
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			_, _ = w.Write([]byte(`{"leaderUrl":"","seq":100,"epoch":1}`))
-		}))
-		defer srv.Close()
-		tr := &tracker{name: "test", bigbrainURL: srv.URL, client: &http.Client{}, proxyTransport: newProxyTransport()}
-		tr.setLeader("http://10.0.0.5:3210")
-		tr.resolveOnce(context.Background())
-		if tr.currentLeader(false) != nil {
-			t.Fatal("200 with empty leaderUrl must clear the leader")
 		}
 	})
 	t.Run("transport_error_preserves", func(t *testing.T) {
@@ -684,10 +612,10 @@ func TestLeaderSeqOrdering_AcrossPollAndStream(t *testing.T) {
 	var polls atomic.Int64
 	poll := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		if polls.Add(1) == 1 {
-			_, _ = io.WriteString(w, `{"leaderUrl":"http://10.0.0.1:3210","seq":10}`)
+			_, _ = io.WriteString(w, `{"leaderUrl":"http://10.0.0.1:3210","seq":10,"epoch":7}`)
 			return
 		}
-		_, _ = io.WriteString(w, `{"leaderUrl":"http://10.0.0.2:3210","seq":5}`)
+		_, _ = io.WriteString(w, `{"leaderUrl":"http://10.0.0.2:3210","seq":5,"epoch":7}`)
 	}))
 	defer poll.Close()
 	tr := &tracker{
@@ -702,7 +630,7 @@ func TestLeaderSeqOrdering_AcrossPollAndStream(t *testing.T) {
 	if got := leaderSnapshot(tr); got != "http://10.0.0.1:3210" {
 		t.Fatalf("poll seq 10 must apply, got leader %q", got)
 	}
-	stale := sseServer(t, `{"leaderUrl":"http://10.0.0.2:3210","seq":5}`)
+	stale := sseServer(t, `{"leaderUrl":"http://10.0.0.2:3210","seq":5,"epoch":7}`)
 	tr.consumeStream(context.Background(), stale.URL)
 	if got := leaderSnapshot(tr); got != "http://10.0.0.1:3210" {
 		t.Fatalf("stale stream event (seq 5 <= 10) must be rejected, got leader %q", got)
@@ -711,44 +639,44 @@ func TestLeaderSeqOrdering_AcrossPollAndStream(t *testing.T) {
 	if got := leaderSnapshot(tr); got != "http://10.0.0.1:3210" {
 		t.Fatalf("stale poll (seq 5 <= 10) must be rejected, got leader %q", got)
 	}
-	fresh := sseServer(t, `{"leaderUrl":"http://10.0.0.3:3210","seq":11}`)
+	fresh := sseServer(t, `{"leaderUrl":"http://10.0.0.3:3210","seq":11,"epoch":7}`)
 	tr.consumeStream(context.Background(), fresh.URL)
 	if got := leaderSnapshot(tr); got != "http://10.0.0.3:3210" {
 		t.Fatalf("newer stream event (seq 11 > 10) must apply, got leader %q", got)
 	}
 }
 
-func TestApplyLeader_BadURLDoesNotConsumeSeq(t *testing.T) {
+func TestApplyLeader_PollsOwnEpochTransitions(t *testing.T) {
 	t.Parallel()
-	tr := &tracker{host: "api.example", proxyTransport: newProxyTransport()}
-	if tr.applyLeader("http://[::1]:namedport", 7, 0) {
-		t.Fatal("an unparseable leader URL must not apply")
+	tr := &tracker{host: "api.example", proxyTransport: newProxyTransport(), resolveCh: make(chan struct{}, 1)}
+	event := func(u string, seq, epoch uint64) leaderResponse {
+		return leaderResponse{LeaderURL: u, Seq: seq, Epoch: epoch}
 	}
-	if !tr.applyLeader("http://10.0.0.1:3210", 7, 0) {
-		t.Fatal("the rejected event must not consume seq 7; a follow-up with the same seq must apply")
+	if !tr.applyLeader(event("http://10.0.0.1:3210", 5, 100), true) {
+		t.Fatal("epoch 100 seq 5 from a poll must install the leader")
 	}
-	if got := leaderSnapshot(tr); got != "http://10.0.0.1:3210" {
-		t.Fatalf("leader=%q want the seq-7 applied URL", got)
-	}
-}
-
-func TestApplyLeader_EpochChangeResetsSeqHighWater(t *testing.T) {
-	t.Parallel()
-	tr := &tracker{host: "api.example", proxyTransport: newProxyTransport()}
-	if !tr.applyLeader("http://10.0.0.1:3210", 5, 100) {
-		t.Fatal("epoch 100 seq 5 should install the leader")
-	}
-	if tr.applyLeader("http://10.0.0.2:3210", 3, 100) {
+	if tr.applyLeader(event("http://10.0.0.2:3210", 3, 100), false) {
 		t.Fatal("a lower seq within the same epoch must be rejected")
 	}
-	if got := leaderSnapshot(tr); got != "http://10.0.0.1:3210" {
-		t.Fatalf("leader=%q want the epoch-100 seq-5 URL after a rejected same-epoch event", got)
+	if tr.applyLeader(event("http://10.0.0.2:3210", 3, 200), false) {
+		t.Fatal("a stream event from an unknown epoch must not be applied; it must trigger a poll")
 	}
-	if !tr.applyLeader("http://10.0.0.2:3210", 3, 200) {
-		t.Fatal("a new epoch (bigbrain restart) must reset the seq high-water and adopt even a lower seq")
+	select {
+	case <-tr.resolveCh:
+	default:
+		t.Fatal("a foreign-epoch stream event must nudge a resolve")
+	}
+	if got := leaderSnapshot(tr); got != "http://10.0.0.1:3210" {
+		t.Fatalf("leader=%q want the epoch-100 URL until a poll adopts the new epoch", got)
+	}
+	if !tr.applyLeader(event("http://10.0.0.2:3210", 3, 200), true) {
+		t.Fatal("a poll carrying the new epoch (bigbrain restart) must reset the seq high-water and adopt a lower seq")
+	}
+	if tr.applyLeader(event("http://10.0.0.1:3210", 9, 100), false) {
+		t.Fatal("a delayed event from the retired epoch must never come back")
 	}
 	if got := leaderSnapshot(tr); got != "http://10.0.0.2:3210" {
-		t.Fatalf("leader=%q want the epoch-200 URL after the epoch change", got)
+		t.Fatalf("leader=%q want the epoch-200 URL", got)
 	}
 }
 

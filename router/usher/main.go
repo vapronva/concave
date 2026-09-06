@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/signal"
 	"path"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -53,6 +54,11 @@ const (
 	connWatchFloor          = 10 * time.Millisecond
 	connWatchCeil           = time.Minute
 	connWatchDivisor        = 4
+)
+
+var (
+	labelValueRe = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9._-]{0,61}[A-Za-z0-9])?$`)
+	hostnameRe   = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$`)
 )
 
 type deploymentCfg struct {
@@ -187,9 +193,10 @@ func newReverseProxy(u *url.URL, nudge func(), tr *http.Transport) *httputil.Rev
 	}
 }
 
-func (t *tracker) applyLeader(leaderURL string, seq, epoch uint64) bool {
+func (t *tracker) applyLeader(lr leaderResponse, fromPoll bool) bool {
 	var u *url.URL
 	var err error
+	leaderURL := lr.LeaderURL
 	if leaderURL != "" {
 		u, err = url.ParseRequestURI(leaderURL)
 		if err != nil || u.Scheme == "" || u.Host == "" {
@@ -199,14 +206,18 @@ func (t *tracker) applyLeader(leaderURL string, seq, epoch uint64) bool {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if epoch != 0 && epoch != t.lastEpoch {
-		t.lastEpoch = epoch
+	if lr.Epoch != t.lastEpoch {
+		if !fromPoll {
+			t.nudgeResolve()
+			return false
+		}
+		t.lastEpoch = lr.Epoch
 		t.lastAppliedSeq = 0
 	}
-	if seq <= t.lastAppliedSeq {
+	if lr.Seq <= t.lastAppliedSeq {
 		return false
 	}
-	t.lastAppliedSeq = seq
+	t.lastAppliedSeq = lr.Seq
 	if leaderURL == t.leaderURL {
 		return false
 	}
@@ -249,7 +260,7 @@ func (t *tracker) resolveOnce(ctx context.Context) {
 	if t.pollGate.ok() {
 		log.Printf("usher: %s leader poll recovered", t.host)
 	}
-	t.applyLeader(lr.LeaderURL, lr.Seq, lr.Epoch)
+	t.applyLeader(lr, true)
 }
 
 func (t *tracker) queryBigbrain(ctx context.Context) (leaderResponse, error) {
@@ -363,7 +374,7 @@ func (t *tracker) handleStreamLine(line string) {
 		return
 	}
 	t.eventGate.ok()
-	t.applyLeader(ev.LeaderURL, ev.Seq, ev.Epoch)
+	t.applyLeader(ev, false)
 }
 
 func (t *tracker) logStreamEnd(ctx, sctx context.Context, scanErr error, idle time.Duration) {
@@ -405,6 +416,7 @@ func (t *tracker) serveHTTP(w http.ResponseWriter, r *http.Request, site bool) {
 		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 		return
 	}
+	_ = http.NewResponseController(w).EnableFullDuplex()
 	p.ServeHTTP(w, r)
 }
 
@@ -738,8 +750,8 @@ func validateConfig(cfg config, bigbrainURL string, mono bool) error {
 		return errors.New("mono mode requires exactly one deployment")
 	}
 	u, err := url.ParseRequestURI(bigbrainURL)
-	if err != nil || u.Scheme == "" || u.Host == "" {
-		return errors.New("USHER_BIGBRAIN_URL must be an absolute URL")
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return errors.New("USHER_BIGBRAIN_URL must be an absolute http(s) URL")
 	}
 	return validateDeployments(cfg.Deployments)
 }
@@ -752,8 +764,8 @@ func validateDeployments(deployments []deploymentCfg) error {
 			return errors.New("deployment host must not be empty")
 		}
 		name := d.Name
-		if name == "" || url.PathEscape(name) != name {
-			return fmt.Errorf("deployment %s: name %q must be a non-empty URL path segment", d.Host, name)
+		if !labelValueRe.MatchString(name) {
+			return fmt.Errorf("deployment %s: name %q must be a Kubernetes label value", d.Host, name)
 		}
 		if prev, dup := names[name]; dup {
 			return fmt.Errorf("deployments %q and %q resolve to the same name %q", prev, d.Host, name)
@@ -777,11 +789,8 @@ func validateDeployments(deployments []deploymentCfg) error {
 }
 
 func validateHost(host string) error {
-	if host != strings.TrimSpace(host) {
-		return fmt.Errorf("deployment host %q must not have surrounding whitespace", host)
-	}
-	if _, _, err := net.SplitHostPort(host); err == nil {
-		return fmt.Errorf("deployment host %q must not include a port", host)
+	if !hostnameRe.MatchString(strings.ToLower(host)) {
+		return fmt.Errorf("deployment host %q must be a bare hostname", host)
 	}
 	return nil
 }
