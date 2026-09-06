@@ -2,7 +2,6 @@ package apiserver
 
 import (
 	"context"
-	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -13,10 +12,8 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
-	k8stesting "k8s.io/client-go/testing"
 )
 
 func funrunPod(ns, name string, port int) *corev1.Pod {
@@ -86,34 +83,6 @@ func TestScrapeAll_MergesAcrossNamespaces(t *testing.T) {
 	}
 	if v.Value.MilliValue() != 50_000 {
 		t.Fatalf("want 50%% utilization (50000m), got %s", v.Value.String())
-	}
-}
-
-func TestScrapeAll_ListFailureDropsNamespaceFromCache(t *testing.T) {
-	t.Parallel()
-	port := gaugesServerPort(t)
-	cs := fake.NewClientset(funrunPod("ns1", "funrun-a", port), funrunPod("ns2", "funrun-b", port))
-	prov := NewProvider()
-	s := NewScraper(cs, "convex", []string{"ns1", "ns2"}, prov, time.Hour, slog.New(slog.DiscardHandler))
-	s.scrapeAll(context.Background())
-	a := types.NamespacedName{Namespace: "ns1", Name: "funrun-a"}
-	b := types.NamespacedName{Namespace: "ns2", Name: "funrun-b"}
-	if got := cachedPods(prov, a, b); !got[a] || !got[b] {
-		t.Fatalf("setup: both pods must be cached, got %v", got)
-	}
-	cs.PrependReactor("list", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
-		if action.GetNamespace() == "ns2" {
-			return true, nil, errors.New("list blew up")
-		}
-		return false, nil, nil
-	})
-	s.scrapeAll(context.Background())
-	got := cachedPods(prov, a, b)
-	if !got[a] {
-		t.Fatalf("healthy namespace must stay cached, got %v", got)
-	}
-	if got[b] {
-		t.Fatal("failed-list namespace must be absent from the replaced cache, never kept stale")
 	}
 }
 

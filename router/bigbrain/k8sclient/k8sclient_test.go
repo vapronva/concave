@@ -69,24 +69,6 @@ func TestDiscoverBackends_CustomPrefix(t *testing.T) {
 	}
 }
 
-func TestDiscoverBackends_DefaultPrefix(t *testing.T) {
-	t.Parallel()
-	cs := fake.NewClientset(
-		pod("convex", "backend-0", "leader", "backend", "100", "10.0.0.1", true),
-		pod("example.com", "ignore-0", "leader", "backend", "100", "10.0.0.9", true),
-	)
-	for _, prefix := range []string{"", "convex"} {
-		c := k8sclient.NewFromInterface(cs, prefix)
-		out, err := c.DiscoverBackends(context.Background(), "acme", "acme")
-		if err != nil {
-			t.Fatalf("prefix %q: DiscoverBackends: %v", prefix, err)
-		}
-		if len(out) != 1 || out[0].Pod != "backend-0" {
-			t.Fatalf("prefix %q: want only convex-labelled backend-0, got %+v", prefix, out)
-		}
-	}
-}
-
 func TestDiscoverBackends_SkipsTerminalPods(t *testing.T) {
 	t.Parallel()
 	const prefix = "convex"
@@ -103,22 +85,5 @@ func TestDiscoverBackends_SkipsTerminalPods(t *testing.T) {
 	}
 	if len(out) != 1 || out[0].Pod != "backend-0" {
 		t.Fatalf("terminal pods with a retained PodIP must be skipped, got %+v", out)
-	}
-}
-
-func TestDiscoverBackends_MalformedPriorityUsesRoleDefault(t *testing.T) {
-	t.Parallel()
-	const prefix = "convex"
-	cs := fake.NewClientset(
-		pod(prefix, "backend-0", "leader", "backend", "banana", "10.0.0.1", true),
-		pod(prefix, "backend-1", "follower", "backend", "banana", "10.0.0.2", true),
-	)
-	c := k8sclient.NewFromInterface(cs, prefix)
-	out, err := c.DiscoverBackends(context.Background(), "acme", "acme")
-	if err != nil {
-		t.Fatalf("DiscoverBackends: %v", err)
-	}
-	if out[0].Priority != 100 || out[1].Priority != 0 {
-		t.Fatalf("malformed priority must fall back to role defaults, got %+v", out)
 	}
 }

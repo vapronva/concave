@@ -6,8 +6,9 @@ import (
 )
 
 type demoteTarget struct {
-	pod string
-	url string
+	pod     string
+	url     string
+	leaseTS *uint64
 }
 
 type decision struct {
@@ -70,23 +71,14 @@ func incumbentDiscoveredUnreachable(obs []observation, incumbent string) bool {
 	return false
 }
 
-func pickLeader(claims []observation, incumbent string) observation {
+func pickLeader(claims []observation) observation {
 	best := claims[0]
 	for _, o := range claims[1:] {
 		if betterLeader(o, best) {
 			best = o
 		}
 	}
-	i := slices.IndexFunc(claims, func(o observation) bool { return o.be.Pod == incumbent })
-	if i < 0 {
-		return best
-	}
-	bestLease, bestHasLease := leaseOf(best)
-	incumbentLease, incumbentHasLease := leaseOf(claims[i])
-	if bestHasLease && (!incumbentHasLease || incumbentLease < bestLease) {
-		return best
-	}
-	return claims[i]
+	return best
 }
 
 func betterLeader(a, b observation) bool {
@@ -161,11 +153,11 @@ func decide(obs []observation, p decideParams) decision {
 		}
 		return d
 	}
-	leader := pickLeader(claims, p.incumbent)
+	leader := pickLeader(claims)
 	d.leaderPod, d.leaderURL = leader.be.Pod, leader.be.URL
 	for _, o := range claims {
 		if o.be.Pod != leader.be.Pod {
-			d.demotes = append(d.demotes, demoteTarget{pod: o.be.Pod, url: o.be.URL})
+			d.demotes = append(d.demotes, demoteTarget{pod: o.be.Pod, url: o.be.URL, leaseTS: o.status.LeaseTS})
 		}
 	}
 	if len(claims) == 1 {

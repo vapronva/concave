@@ -25,16 +25,16 @@ type Config struct {
 }
 
 const (
-	DefaultInterval                      = 2 * time.Second
-	DefaultPromoteDebounce               = 3
-	DefaultFailbackStability             = 15 * time.Second
-	DefaultFailbackWarmthLagNs    uint64 = 5_000_000_000
-	DefaultUnreachableLeaderGrace        = 60 * time.Second
-	DefaultLeaseUnverifiedGrace          = 60 * time.Second
-	DefaultEmptyDiscoveryDebounce        = 5
-	DefaultActuationTimeout              = 30 * time.Second
-	discoverTimeout                      = 5 * time.Second
-	pollTimeout                          = 2 * time.Second
+	DefaultInterval                   = 2 * time.Second
+	DefaultPromoteDebounce            = 3
+	DefaultFailbackStability          = 15 * time.Second
+	DefaultFailbackWarmthLagNs uint64 = 5_000_000_000
+	DefaultActuationTimeout           = 30 * time.Second
+	unreachableLeaderGrace            = 60 * time.Second
+	leaseUnverifiedGrace              = 60 * time.Second
+	emptyDiscoveryDebounce            = 5
+	discoverTimeout                   = 5 * time.Second
+	pollTimeout                       = 2 * time.Second
 )
 
 func DefaultConfig() Config {
@@ -44,9 +44,9 @@ func DefaultConfig() Config {
 		FailbackEnabled:        true,
 		FailbackStability:      DefaultFailbackStability,
 		FailbackWarmthLagNs:    DefaultFailbackWarmthLagNs,
-		UnreachableLeaderGrace: DefaultUnreachableLeaderGrace,
-		LeaseUnverifiedGrace:   DefaultLeaseUnverifiedGrace,
-		EmptyDiscoveryDebounce: DefaultEmptyDiscoveryDebounce,
+		UnreachableLeaderGrace: unreachableLeaderGrace,
+		LeaseUnverifiedGrace:   leaseUnverifiedGrace,
+		EmptyDiscoveryDebounce: emptyDiscoveryDebounce,
 		ActuationTimeout:       DefaultActuationTimeout,
 	}
 }
@@ -60,15 +60,6 @@ func (c Config) Validate() error {
 	}
 	if c.FailbackStability < 0 {
 		return fmt.Errorf("failback-stability must be >= 0, got %s", c.FailbackStability)
-	}
-	if c.UnreachableLeaderGrace < 0 {
-		return fmt.Errorf("unreachable-leader-grace must be >= 0, got %s", c.UnreachableLeaderGrace)
-	}
-	if c.LeaseUnverifiedGrace != 0 && c.LeaseUnverifiedGrace < time.Second {
-		return fmt.Errorf("lease-unverified-grace must be 0 (disabled) or >= 1s, got %s", c.LeaseUnverifiedGrace)
-	}
-	if c.EmptyDiscoveryDebounce < 0 {
-		return fmt.Errorf("empty-discovery-debounce must be >= 0, got %d", c.EmptyDiscoveryDebounce)
 	}
 	if c.ActuationTimeout <= 0 {
 		return fmt.Errorf("actuation-timeout must be > 0, got %s", c.ActuationTimeout)
@@ -110,10 +101,6 @@ func New(cfg Config, k8s *k8sclient.Client, b *backend.Client, reg *registry.Reg
 		log:     log,
 		state:   make(map[string]*deploymentState),
 	}
-}
-
-func (c *Controller) ActuationTimeout() time.Duration {
-	return c.cfg.ActuationTimeout
 }
 
 func (c *Controller) Run(ctx context.Context) {
@@ -177,20 +164,6 @@ type observation struct {
 	reach  bool
 }
 
-type stateSnapshot struct {
-	incumbentPod string
-	failback     failbackState
-}
-
-func (c *Controller) snapshotState(st *deploymentState) stateSnapshot {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return stateSnapshot{
-		incumbentPod: st.incumbentPod,
-		failback:     st.failback,
-	}
-}
-
 func (c *Controller) reconcile(ctx context.Context, name string) {
 	st := c.deploymentState(name)
 	ns, ok := c.reg.Namespace(name)
@@ -209,18 +182,17 @@ func (c *Controller) reconcile(ctx context.Context, name string) {
 	if c.setDiscoveryDown(st, false) {
 		c.log.InfoContext(ctx, "election: discovery recovered", "deployment", name)
 	}
-	snap := c.snapshotState(st)
 	obs := c.pollAll(ctx, name, pods)
 	now := time.Now()
 	dec := decide(obs, decideParams{
-		incumbent:            snap.incumbentPod,
+		incumbent:            st.incumbentPod,
 		leaseUnverifiedGrace: c.cfg.LeaseUnverifiedGrace,
 		failback: failbackParams{
 			enabled:         c.cfg.FailbackEnabled,
 			stabilityWindow: c.cfg.FailbackStability,
 			warmthLagNs:     c.cfg.FailbackWarmthLagNs,
 			now:             now,
-			prior:           snap.failback,
+			prior:           st.failback,
 		},
 	})
 	streak, emptyStreak, retain := c.commitState(st, dec, len(pods) == 0, now)
@@ -234,6 +206,9 @@ func (c *Controller) reconcile(ctx context.Context, name string) {
 func (c *Controller) setDiscoveryDown(st *deploymentState, down bool) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if down {
+		st.failback = failbackState{}
+	}
 	if st.discoveryDown == down {
 		return false
 	}

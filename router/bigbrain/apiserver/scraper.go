@@ -54,9 +54,6 @@ func NewScraper(
 	interval time.Duration,
 	log *slog.Logger,
 ) *Scraper {
-	if labelPrefix == "" {
-		labelPrefix = k8sclient.DefaultLabelPrefix
-	}
 	return &Scraper{
 		cs:             cs,
 		componentLabel: labelPrefix + "/component",

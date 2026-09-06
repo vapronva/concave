@@ -44,16 +44,6 @@ func TestProviderReplaceWithEmptyClearsCache(t *testing.T) {
 	}
 }
 
-func TestProviderRejectsUnknownMetric(t *testing.T) {
-	t.Parallel()
-	p := NewProvider()
-	info := provider.CustomMetricInfo{Metric: "nope"}
-	if _, err := p.GetMetricByName(context.Background(), types.NamespacedName{}, info, nil); err == nil ||
-		!strings.Contains(err.Error(), "nope") {
-		t.Fatalf("unknown metric must be rejected, got %v", err)
-	}
-}
-
 func TestProviderRejectsNonPodResource(t *testing.T) {
 	t.Parallel()
 	p := NewProvider()

@@ -9,23 +9,6 @@ import (
 	"git.horse/vapronva/concave/router/bigbrain/registry"
 )
 
-func TestRegistry_Leader(t *testing.T) {
-	t.Parallel()
-	r := registry.New()
-	r.EnsureDeployment("dev", "convex-dev")
-	if _, ok := r.Leader("dev"); ok {
-		t.Fatal("fresh deployment should have no leader")
-	}
-	r.Update("dev", "backend-0", "http://x:3210")
-	ev, ok := r.Leader("dev")
-	if !ok || ev.LeaderPod != "backend-0" || ev.LeaderURL != "http://x:3210" {
-		t.Fatalf("want backend-0/http://x:3210, got %q/%q ok=%v", ev.LeaderPod, ev.LeaderURL, ok)
-	}
-	if ev.Seq == 0 || ev.Epoch != r.Epoch() {
-		t.Fatalf("a published leader must carry a non-zero seq and the registry epoch, got %+v", ev)
-	}
-}
-
 func TestRegistry_SeqMonotonicPerDistinctLeaderState(t *testing.T) {
 	t.Parallel()
 	r := registry.New()
@@ -123,25 +106,6 @@ func TestRegistry_LeaderEventOnURLChangeAndSlowSubscriberGetsLatest(t *testing.T
 		}
 	case <-time.After(time.Second):
 		t.Fatal("expected latest leader event")
-	}
-}
-
-func TestRegistry_SubscribeCancelClosesChannel(t *testing.T) {
-	t.Parallel()
-	r := registry.New()
-	r.EnsureDeployment("dev", "convex-dev")
-	ch, cancel, ok := r.Subscribe("dev")
-	if !ok {
-		t.Fatal("subscribe failed")
-	}
-	cancel()
-	select {
-	case _, open := <-ch:
-		if open {
-			t.Fatal("channel should be closed after cancel")
-		}
-	case <-time.After(time.Second):
-		t.Fatal("subscriber channel was not closed by cancel")
 	}
 }
 

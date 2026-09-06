@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 )
 
 type Leadership struct {
@@ -55,8 +56,12 @@ func (c *Client) Promote(ctx context.Context, deployment, base string) (int, err
 	return c.post(ctx, deployment, base+"/instance/promote")
 }
 
-func (c *Client) Demote(ctx context.Context, deployment, base string) (int, error) {
-	return c.post(ctx, deployment, base+"/instance/demote")
+func (c *Client) Demote(ctx context.Context, deployment, base string, leaseTS *uint64) (int, error) {
+	url := base + "/instance/demote"
+	if leaseTS != nil {
+		url += "?lease_ts=" + strconv.FormatUint(*leaseTS, 10)
+	}
+	return c.post(ctx, deployment, url)
 }
 
 func (c *Client) post(ctx context.Context, deployment, url string) (int, error) {

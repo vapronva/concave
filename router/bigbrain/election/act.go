@@ -146,7 +146,7 @@ func (c *Controller) demoteAll(ctx context.Context, name string, st *deploymentS
 	c.actGo(name, func() {
 		defer c.release(&st.demoting)
 		for _, a := range targets {
-			code, err := c.demoteOne(base, name, a.url)
+			code, err := c.demoteOne(base, name, a)
 			if err != nil {
 				c.log.ErrorContext(base, "election: demote failed", "deployment", name, "pod", a.pod, "err", err)
 				continue
@@ -155,11 +155,8 @@ func (c *Controller) demoteAll(ctx context.Context, name string, st *deploymentS
 			case http.StatusOK, http.StatusAccepted:
 				c.log.InfoContext(base, "election: demote accepted", "deployment", name, "pod", a.pod, "status", code)
 			case http.StatusConflict:
-				c.log.InfoContext(base, "election: demote deferred; backend is mid-transition, will retry",
+				c.log.InfoContext(base, "election: demote declined; backend is mid-transition or its lease changed",
 					"deployment", name, "pod", a.pod, "status", code)
-			case http.StatusInternalServerError:
-				c.log.WarnContext(base, "election: demote failed on the backend; will retry next tick",
-					"deployment", name, "pod", a.pod)
 			case http.StatusForbidden:
 				c.log.ErrorContext(base, "election: demote forbidden; control-plane token mismatch",
 					"deployment", name, "pod", a.pod)
@@ -171,10 +168,10 @@ func (c *Controller) demoteAll(ctx context.Context, name string, st *deploymentS
 	})
 }
 
-func (c *Controller) demoteOne(base context.Context, name, url string) (int, error) {
+func (c *Controller) demoteOne(base context.Context, name string, target demoteTarget) (int, error) {
 	actx, cancel := context.WithTimeout(base, c.cfg.ActuationTimeout)
 	defer cancel()
-	return c.backend.Demote(actx, name, url)
+	return c.backend.Demote(actx, name, target.url, target.leaseTS)
 }
 
 func (c *Controller) setLeader(name string, st *deploymentState, pod, url string) {

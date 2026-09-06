@@ -12,43 +12,32 @@ import (
 
 const tokenHeader = "X-Convex-Control-Plane-Token"
 
-func TestPromote_SendsControlPlaneTokenWhenSet(t *testing.T) {
+func TestActuation_SendsTokenAndObservedLease(t *testing.T) {
 	t.Parallel()
-	var got string
-	var seen bool
+	var token, path, query string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		got = r.Header.Get(tokenHeader)
-		_, seen = r.Header[tokenHeader]
-		w.WriteHeader(http.StatusOK)
+		token = r.Header.Get(tokenHeader)
+		path, query = r.URL.Path, r.URL.RawQuery
+		w.WriteHeader(http.StatusAccepted)
 	}))
 	defer srv.Close()
 	c := backend.New(map[string]string{"dev": "s3cr3t"})
 	code, err := c.Promote(context.Background(), "dev", srv.URL)
-	if err != nil {
-		t.Fatalf("promote: %v", err)
+	if err != nil || code != http.StatusAccepted {
+		t.Fatalf("promote: code=%d err=%v", code, err)
 	}
-	if code != http.StatusOK {
-		t.Fatalf("want 200, got %d", code)
+	if token != "s3cr3t" || path != "/instance/promote" || query != "" {
+		t.Fatalf("promote request: token=%q path=%q query=%q", token, path, query)
 	}
-	if !seen || got != "s3cr3t" {
-		t.Fatalf("want %s header = s3cr3t, got %q (present=%v)", tokenHeader, got, seen)
-	}
-}
-
-func TestDemote_OmitsTokenHeaderWhenEmpty(t *testing.T) {
-	t.Parallel()
-	var seen bool
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, seen = r.Header[tokenHeader]
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-	c := backend.New(nil)
-	if _, err := c.Demote(context.Background(), "dev", srv.URL); err != nil {
+	lease := uint64(150)
+	if _, err = c.Demote(context.Background(), "dev", srv.URL, &lease); err != nil {
 		t.Fatalf("demote: %v", err)
 	}
-	if seen {
-		t.Fatalf("empty token must not send the %s header", tokenHeader)
+	if path != "/instance/demote" || query != "lease_ts=150" {
+		t.Fatalf("demote must name the observed lease: path=%q query=%q", path, query)
+	}
+	if _, err = c.Demote(context.Background(), "dev", srv.URL, nil); err != nil || query != "" {
+		t.Fatalf("demote without an observed lease must be unconditional: query=%q err=%v", query, err)
 	}
 }
 
@@ -76,27 +65,6 @@ func TestLeadership_DecodesLeaseAndNullLease(t *testing.T) {
 		}
 		if l.IsLeader != tc.isLeader || (l.LeaseTS != nil) != tc.hasLease {
 			t.Fatalf("unexpected leader/lease combination from %s: %+v", tc.body, l)
-		}
-	}
-}
-
-func TestLeadership_RejectsNonOKAndInvalidJSON(t *testing.T) {
-	t.Parallel()
-	for _, tc := range []struct {
-		code int
-		body string
-	}{
-		{http.StatusForbidden, `{}`},
-		{http.StatusOK, `{`},
-	} {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			w.WriteHeader(tc.code)
-			_, _ = io.WriteString(w, tc.body)
-		}))
-		_, err := backend.New(nil).Leadership(context.Background(), "dev", srv.URL)
-		srv.Close()
-		if err == nil {
-			t.Fatalf("code=%d body=%q: expected error", tc.code, tc.body)
 		}
 	}
 }

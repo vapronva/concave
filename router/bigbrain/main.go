@@ -35,7 +35,7 @@ const (
 
 	defaultMetricsAPIServerPort    = 6443
 	defaultMetricsAPIServerCertDir = "/var/run/bigbrain-apiserver"
-	defaultMetricsScrapeInterval   = 5 * time.Second
+	metricsScrapeInterval          = 5 * time.Second
 )
 
 func main() {
@@ -62,7 +62,6 @@ func run() int {
 		return 1
 	}
 	ctrl := election.New(cfg, k8s, backend.New(controlPlaneTokens), reg, log)
-	actuation := ctrl.ActuationTimeout()
 	ins := insights.New(insightsRingCap)
 	srv := server.New(reg, ins, usageTokens, log)
 	if len(usageTokens) == 0 {
@@ -95,7 +94,7 @@ func run() int {
 		serveErr <- nil
 	}()
 	<-ctx.Done()
-	shutdown(httpSrv, srv, ctrlDone, metricsDone, actuation+actuationDrainSlack, log)
+	shutdown(httpSrv, srv, ctrlDone, metricsDone, cfg.ActuationTimeout+actuationDrainSlack, log)
 	if <-serveErr != nil {
 		return 1
 	}
@@ -108,20 +107,14 @@ func run() int {
 }
 
 func electionConfigFromEnv() election.Config {
-	return election.Config{
-		Interval:               envDuration("BIGBRAIN_INTERVAL", election.DefaultInterval),
-		PromoteDebounce:        envInt("BIGBRAIN_PROMOTE_DEBOUNCE", election.DefaultPromoteDebounce),
-		EmptyDiscoveryDebounce: envInt("BIGBRAIN_EMPTY_DISCOVERY_DEBOUNCE", election.DefaultEmptyDiscoveryDebounce),
-		FailbackEnabled:        envBool("BIGBRAIN_FAILBACK_ENABLED", true),
-		FailbackStability:      envDuration("BIGBRAIN_FAILBACK_STABILITY", election.DefaultFailbackStability),
-		FailbackWarmthLagNs:    envUint64("BIGBRAIN_FAILBACK_WARMTH_LAG", election.DefaultFailbackWarmthLagNs),
-		UnreachableLeaderGrace: envDuration(
-			"BIGBRAIN_UNREACHABLE_LEADER_GRACE",
-			election.DefaultUnreachableLeaderGrace,
-		),
-		LeaseUnverifiedGrace: envDuration("BIGBRAIN_LEASE_UNVERIFIED_GRACE", election.DefaultLeaseUnverifiedGrace),
-		ActuationTimeout:     envDuration("BIGBRAIN_ACTUATION_TIMEOUT", election.DefaultActuationTimeout),
-	}
+	cfg := election.DefaultConfig()
+	cfg.Interval = envDuration("BIGBRAIN_INTERVAL", cfg.Interval)
+	cfg.PromoteDebounce = envInt("BIGBRAIN_PROMOTE_DEBOUNCE", cfg.PromoteDebounce)
+	cfg.FailbackEnabled = envBool("BIGBRAIN_FAILBACK_ENABLED", cfg.FailbackEnabled)
+	cfg.FailbackStability = envDuration("BIGBRAIN_FAILBACK_STABILITY", cfg.FailbackStability)
+	cfg.FailbackWarmthLagNs = envUint64("BIGBRAIN_FAILBACK_WARMTH_LAG", cfg.FailbackWarmthLagNs)
+	cfg.ActuationTimeout = envDuration("BIGBRAIN_ACTUATION_TIMEOUT", cfg.ActuationTimeout)
+	return cfg
 }
 
 func buildRegistry(
@@ -223,10 +216,6 @@ func startMetricsAPIServer(
 		seen[ns] = struct{}{}
 		namespaces = append(namespaces, ns)
 	}
-	scrapeInterval := envDuration("BIGBRAIN_METRICS_SCRAPE_INTERVAL", defaultMetricsScrapeInterval)
-	if scrapeInterval <= 0 {
-		badEnv("BIGBRAIN_METRICS_SCRAPE_INTERVAL", scrapeInterval.String(), errors.New("must be > 0"))
-	}
 	securePort := envInt("BIGBRAIN_METRICS_APISERVER_PORT", defaultMetricsAPIServerPort)
 	if securePort < 1 || securePort > 65535 {
 		badEnv("BIGBRAIN_METRICS_APISERVER_PORT", strconv.Itoa(securePort), errors.New("must be in 1..65535"))
@@ -237,7 +226,7 @@ func startMetricsAPIServer(
 	}
 	var wg sync.WaitGroup
 	wg.Go(func() {
-		apiserver.NewScraper(k8s.Clientset(), labelPrefix, namespaces, prov, scrapeInterval, log).Run(ctx)
+		apiserver.NewScraper(k8s.Clientset(), labelPrefix, namespaces, prov, metricsScrapeInterval, log).Run(ctx)
 	})
 	apiserverErr := make(chan error, 1)
 	wg.Go(func() {
@@ -252,8 +241,7 @@ func startMetricsAPIServer(
 		wg.Wait()
 		close(done)
 	}()
-	log.InfoContext(ctx, "bigbrain: custom-metrics apiserver enabled",
-		"port", cfg.SecurePort, "scrapeInterval", scrapeInterval.String())
+	log.InfoContext(ctx, "bigbrain: custom-metrics apiserver enabled", "port", cfg.SecurePort)
 	return done, apiserverErr
 }
 

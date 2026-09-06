@@ -12,8 +12,8 @@ import (
 )
 
 const (
-	documentsReadLimit         = 32000
-	bytesReadLimit             = 16 * 1024 * 1024
+	defaultDocumentsReadLimit  = 32000
+	defaultBytesReadLimit      = 16 * 1024 * 1024
 	rootComponent              = "-root-component-"
 	groupSep                   = "\x1f"
 	maxRecentPerGroup          = 50
@@ -62,6 +62,15 @@ type Call struct {
 	DocumentsRead int    `json:"documents_read"`
 }
 
+type ReadLimits struct {
+	Documents int `json:"documents"`
+	Bytes     int `json:"bytes"`
+}
+
+func DefaultReadLimits() ReadLimits {
+	return ReadLimits{Documents: defaultDocumentsReadLimit, Bytes: defaultBytesReadLimit}
+}
+
 type Insights struct {
 	memMu sync.Mutex
 	mem   map[string]*deploymentRows
@@ -69,8 +78,9 @@ type Insights struct {
 }
 
 type deploymentRows struct {
-	rows  []Row
-	start int
+	rows   []Row
+	start  int
+	limits ReadLimits
 }
 
 func New(ringCap int) *Insights {
@@ -79,7 +89,11 @@ func New(ringCap int) *Insights {
 
 type AnyEvent map[string]map[string]any
 
-func (i *Insights) Ingest(deployment string, events []AnyEvent) int {
+func (i *Insights) Ingest(deployment string, limits ReadLimits, events []AnyEvent) int {
+	if limits.Documents <= 0 || limits.Bytes <= 0 {
+		limits = DefaultReadLimits()
+	}
+	dep := i.deployment(deployment, limits)
 	kept := 0
 	for _, ev := range events {
 		for k, payload := range ev {
@@ -87,21 +101,28 @@ func (i *Insights) Ingest(deployment string, events []AnyEvent) int {
 			if !ok {
 				continue
 			}
-			i.store(row)
+			i.store(dep, row)
 			kept++
 		}
 	}
 	return kept
 }
 
-func (i *Insights) store(r Row) {
+func (i *Insights) deployment(name string, limits ReadLimits) *deploymentRows {
 	i.memMu.Lock()
 	defer i.memMu.Unlock()
-	dep := i.mem[r.Deployment]
+	dep := i.mem[name]
 	if dep == nil {
 		dep = &deploymentRows{}
-		i.mem[r.Deployment] = dep
+		i.mem[name] = dep
 	}
+	dep.limits = limits
+	return dep
+}
+
+func (i *Insights) store(dep *deploymentRows, r Row) {
+	i.memMu.Lock()
+	defer i.memMu.Unlock()
 	if len(dep.rows) < i.cap {
 		dep.rows = append(dep.rows, r)
 		return
@@ -110,13 +131,13 @@ func (i *Insights) store(r Row) {
 	dep.start = (dep.start + 1) % len(dep.rows)
 }
 
-func (i *Insights) rows(deployment string, fromMs, toMs int64) []Row {
+func (i *Insights) rows(deployment string, fromMs, toMs int64) ([]Row, ReadLimits) {
 	i.memMu.Lock()
 	defer i.memMu.Unlock()
 	var out []Row
 	dep := i.mem[deployment]
 	if dep == nil {
-		return nil
+		return nil, DefaultReadLimits()
 	}
 	for n := range len(dep.rows) {
 		r := dep.rows[(dep.start+n)%len(dep.rows)]
@@ -125,7 +146,7 @@ func (i *Insights) rows(deployment string, fromMs, toMs int64) []Row {
 			out = append(out, r)
 		}
 	}
-	return out
+	return out, dep.limits
 }
 
 func (i *Insights) Query(deployment, fromDate, toDate string) ([][]any, error) {
@@ -142,13 +163,9 @@ func (i *Insights) Query(deployment, fromDate, toDate string) ([][]any, error) {
 	if fromMs >= toMs {
 		return nil, ErrBadDateRange
 	}
-	return aggregate(i.rows(deployment, fromMs, toMs)), nil
-}
-
-func aggregate(rows []Row) [][]any {
+	rows, limits := i.rows(deployment, fromMs, toMs)
 	out := aggregateOCC(rows)
-	out = append(out, aggregateRead(rows)...)
-	return out
+	return append(out, aggregateRead(rows, limits)...), nil
 }
 
 func aggregateOCC(rows []Row) [][]any {
@@ -215,7 +232,7 @@ func groupByOCC(rows []Row) map[string][]Row {
 	return g
 }
 
-func aggregateRead(rows []Row) [][]any {
+func aggregateRead(rows []Row, limits ReadLimits) [][]any {
 	groups := groupByRead(rows)
 	out := make([][]any, 0)
 	for key, grp := range groups {
@@ -238,15 +255,15 @@ func aggregateRead(rows []Row) [][]any {
 			out = append(out, []any{kind, udfID, comp, string(mustJSON(body))})
 		}
 		switch {
-		case maxBytes >= bytesReadLimit:
+		case maxBytes >= limits.Bytes:
 			emit(kindBytesReadLimit)
-		case maxBytes > 0:
+		case maxBytes >= limits.Bytes*4/5:
 			emit(kindBytesReadThreshold)
 		}
 		switch {
-		case maxDocs >= documentsReadLimit:
+		case maxDocs >= limits.Documents:
 			emit(kindDocumentsReadLimit)
-		case maxDocs > 0:
+		case maxDocs >= limits.Documents*4/5:
 			emit(kindDocumentsReadThreshold)
 		}
 	}
@@ -335,8 +352,8 @@ func makeRow(deployment, kind string, p map[string]any) (Row, bool) {
 			Deployment:           deployment,
 			TS:                   now,
 			Kind:                 kindOCC,
-			UDFID:                getGroupableString(p, "udf_id"),
-			ComponentPath:        getGroupableStringPtr(p, "component_path"),
+			UDFID:                getString(p, "udf_id"),
+			ComponentPath:        getStringPtr(p, "component_path"),
 			RequestID:            getString(p, fieldRequestID),
 			ExecutionID:          getString(p, "id"),
 			OCCTableName:         getStringPtr(p, "occ_table_name"),
@@ -350,8 +367,8 @@ func makeRow(deployment, kind string, p map[string]any) (Row, bool) {
 			Deployment:    deployment,
 			TS:            now,
 			Kind:          kindRead,
-			UDFID:         getGroupableString(p, "udf_id"),
-			ComponentPath: getGroupableStringPtr(p, "component_path"),
+			UDFID:         getString(p, "udf_id"),
+			ComponentPath: getStringPtr(p, "component_path"),
 			RequestID:     getString(p, fieldRequestID),
 			ExecutionID:   getString(p, "id"),
 			Success:       getBoolPtr(p, fieldSuccess),
@@ -375,18 +392,6 @@ func getString(m map[string]any, k string) string {
 		return v
 	}
 	return ""
-}
-
-func getGroupableString(m map[string]any, k string) string {
-	return strings.ReplaceAll(getString(m, k), groupSep, "")
-}
-
-func getGroupableStringPtr(m map[string]any, k string) *string {
-	v := strings.ReplaceAll(getString(m, k), groupSep, "")
-	if v == "" {
-		return nil
-	}
-	return &v
 }
 
 func getStringPtr(m map[string]any, k string) *string {

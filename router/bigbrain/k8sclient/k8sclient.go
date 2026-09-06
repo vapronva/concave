@@ -36,9 +36,6 @@ type labelKeys struct {
 }
 
 func newLabelKeys(prefix string) labelKeys {
-	if prefix == "" {
-		prefix = DefaultLabelPrefix
-	}
 	return labelKeys{
 		deployment:     prefix + "/instance",
 		role:           prefix + "/role",

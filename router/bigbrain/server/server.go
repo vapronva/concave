@@ -79,6 +79,7 @@ func (s *Server) handleUsageIngest(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, usageBodyLimit)
 	var body struct {
 		Deployment string              `json:"deployment"`
+		ReadLimits insights.ReadLimits `json:"read_limits"`
 		Events     []insights.AnyEvent `json:"events"`
 	}
 	dec := json.NewDecoder(r.Body)
@@ -99,7 +100,7 @@ func (s *Server) handleUsageIngest(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnauthorized, "invalid usage token")
 		return
 	}
-	kept := s.ins.Ingest(body.Deployment, body.Events)
+	kept := s.ins.Ingest(body.Deployment, body.ReadLimits, body.Events)
 	writeJSON(w, http.StatusOK, map[string]int{"ingested": kept})
 }
 
@@ -182,6 +183,9 @@ func (s *Server) handleLeaderStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(http.StatusOK)
+	if rc.Flush() != nil {
+		return
+	}
 	if s.reg.Published(name) {
 		ev, _ := s.reg.Leader(name)
 		if !emitFrame(w, rc, leaderFrame(ev)) {

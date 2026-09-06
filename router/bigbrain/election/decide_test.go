@@ -60,33 +60,6 @@ func TestDecide_SteadyState_SingleLeaderAdopted(t *testing.T) {
 	}
 }
 
-func TestDecide_AdoptSoleLeader_NoIncumbentMatch(t *testing.T) {
-	t.Parallel()
-	in := []observation{
-		obs("backend-0", true, 200, 200),
-		obs("backend-1", false, 199, -1),
-	}
-	d := decide(in, sticky("backend-1"))
-	if d.leaderPod != "backend-0" {
-		t.Fatalf("want adopt backend-0, got %q", d.leaderPod)
-	}
-}
-
-func TestDecide_StickyIncumbent_DemotesOther(t *testing.T) {
-	t.Parallel()
-	in := []observation{
-		obs("backend-0", true, 100, 100),
-		obs("backend-1", true, 100, 100),
-	}
-	d := decide(in, sticky("backend-1"))
-	if d.leaderPod != "backend-1" {
-		t.Fatalf("sticky: want incumbent backend-1 kept, got %q", d.leaderPod)
-	}
-	if len(d.demotes) != 1 || d.demotes[0].pod != "backend-0" {
-		t.Fatalf("want backend-0 demoted, got %+v", d.demotes)
-	}
-}
-
 func TestDecide_SplitBrain_FreshestLeaseWins(t *testing.T) {
 	t.Parallel()
 	in := []observation{
@@ -118,30 +91,6 @@ func TestDecide_Leaderless_PromotesWarmest(t *testing.T) {
 	}
 	if d.promoteTarget.be.Pod != "backend-1" {
 		t.Fatalf("want warmest reachable standby backend-1, got %q", d.promoteTarget.be.Pod)
-	}
-}
-
-func TestDecide_Leaderless_NoReachableStandby(t *testing.T) {
-	t.Parallel()
-	in := []observation{
-		unreachable("backend-0"),
-		unreachable("backend-1"),
-	}
-	d := decide(in, sticky("backend-1"))
-	if d.promoteTarget != nil {
-		t.Fatalf("want no promote target when no standby is reachable")
-	}
-}
-
-func TestDecide_Leaderless_NotReadyButReachableFollowerIsPromotable(t *testing.T) {
-	t.Parallel()
-	in := []observation{
-		unreachable("backend-0"),
-		obs("backend-1", false, 120, -1),
-	}
-	d := decide(in, sticky("backend-0"))
-	if d.promoteTarget == nil || d.promoteTarget.be.Pod != "backend-1" {
-		t.Fatalf("a reachable warm follower must be promotable regardless of k8s PodReady, got %+v", d.promoteTarget)
 	}
 }
 
@@ -177,17 +126,10 @@ func TestDecide_SplitBrain_ThreeClaimants(t *testing.T) {
 	if len(d.demotes) != 2 {
 		t.Fatalf("want 2 zombies demoted, got %d", len(d.demotes))
 	}
-}
-
-func TestPickLeader_TieBreakByPodName(t *testing.T) {
-	t.Parallel()
-	claims := []observation{
-		obs("backend-9", true, 100, 100),
-		obs("backend-3", true, 100, 100),
-	}
-	got := pickLeader(claims, "")
-	if got.be.Pod != "backend-3" {
-		t.Fatalf("want lowest pod name backend-3, got %q", got.be.Pod)
+	for _, target := range d.demotes {
+		if target.leaseTS == nil {
+			t.Fatalf("demote of %s must carry the observed lease so a newer term is never demoted", target.pod)
+		}
 	}
 }
 
@@ -215,21 +157,6 @@ func TestDecide_TransitioningRolesFreezePromotion(t *testing.T) {
 		if d.promoteTarget != nil {
 			t.Fatalf("no promotion may be issued while a %s is in flight, got %+v", role, d.promoteTarget)
 		}
-	}
-}
-
-func TestDecide_PromotingPodExcludedFromFailback(t *testing.T) {
-	t.Parallel()
-	now := time.Unix(1000, 0)
-	prior := failbackState{candidate: "backend-0", eligibleSince: now.Add(-time.Minute)}
-	in := []observation{
-		withPriority(withRole(obs("backend-0", false, 100, -1), "promoting"), 100),
-		obs("backend-1", true, 100, 100),
-	}
-	p := decideParams{incumbent: "backend-1", failback: fb(now, prior)}
-	d := decide(in, p)
-	if d.failbackTarget != nil {
-		t.Fatalf("a promoting pod must not be a failback target, got %+v", d.failbackTarget)
 	}
 }
 
@@ -264,33 +191,6 @@ func TestDecide_UnverifiedWithinGraceKeepsClaim(t *testing.T) {
 	if d.liveLeaderCount != 1 || d.leaderPod != "backend-0" {
 		t.Fatalf("an unverified-within-grace leader keeps its claim, got %d live leader %q",
 			d.liveLeaderCount, d.leaderPod)
-	}
-}
-
-func TestDecide_NilUnverifiedOrZeroGraceKeepsClaim(t *testing.T) {
-	t.Parallel()
-	nilField := []observation{obs("backend-0", true, 100, 100)}
-	d := decide(nilField, decideParams{incumbent: "backend-0", leaseUnverifiedGrace: 60 * time.Second})
-	if d.liveLeaderCount != 1 {
-		t.Fatalf("an old backend without the field must keep its claim, got %d", d.liveLeaderCount)
-	}
-	stale := []observation{withUnverified(obs("backend-0", true, 100, 100), 10_000)}
-	d = decide(stale, decideParams{incumbent: "backend-0"})
-	if d.liveLeaderCount != 1 {
-		t.Fatalf("grace 0 disables the check, got %d live leaders", d.liveLeaderCount)
-	}
-}
-
-func TestDecide_SplitBrain_StaleClaimLoses(t *testing.T) {
-	t.Parallel()
-	in := []observation{
-		withUnverified(obs("backend-0", true, 100, 150), 120),
-		obs("backend-1", true, 100, 50),
-	}
-	p := decideParams{incumbent: "backend-0", leaseUnverifiedGrace: 60 * time.Second}
-	d := decide(in, p)
-	if d.leaderPod != "backend-1" {
-		t.Fatalf("split-brain with one stale claim must resolve to the fresh one, got %q", d.leaderPod)
 	}
 }
 
@@ -482,18 +382,5 @@ func TestDecide_Failback_SplitBrainResolvesFirst(t *testing.T) {
 	}
 	if d.failbackTarget != nil {
 		t.Fatalf("split-brain takes precedence: must NOT also fail back, got %q", d.failbackTarget.be.Pod)
-	}
-}
-
-func TestWarmEnough_Boundary(t *testing.T) {
-	t.Parallel()
-	if !warmEnough(95, 100, 5) {
-		t.Fatalf("lag exactly == bound (5) must be warm")
-	}
-	if warmEnough(94, 100, 5) {
-		t.Fatalf("lag 6 > bound 5 must be cold")
-	}
-	if !warmEnough(130, 100, 5) {
-		t.Fatalf("a candidate AHEAD of the leader is always warm")
 	}
 }

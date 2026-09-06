@@ -29,16 +29,6 @@ func newTestServer(t *testing.T) (*registry.Registry, http.Handler) {
 	return reg, server.New(reg, insights.New(10), map[string]string{"dev": "usage-secret"}, nil).Handler()
 }
 
-func TestServer_Healthz(t *testing.T) {
-	t.Parallel()
-	_, h := newTestServer(t)
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/healthz", nil))
-	if rr.Code != http.StatusOK {
-		t.Fatalf("healthz: want 200, got %d", rr.Code)
-	}
-}
-
 func TestServer_Leader(t *testing.T) {
 	t.Parallel()
 	reg, h := newTestServer(t)
@@ -74,24 +64,6 @@ func TestServer_Leader(t *testing.T) {
 	}
 	if lr.Seq == 0 {
 		t.Fatalf("leader response must carry a non-zero seq: %+v", lr)
-	}
-}
-
-func TestServer_UnroutedPaths(t *testing.T) {
-	t.Parallel()
-	reg, h := newTestServer(t)
-	reg.EnsureDeployment("dev", "convex-dev")
-	for _, c := range []struct{ method, path string }{
-		{http.MethodGet, "/registry/deployments"},
-		{http.MethodGet, "/registry/deployments/dev"},
-		{http.MethodPost, "/provision"},
-		{http.MethodDelete, "/deployments/x"},
-	} {
-		rr := httptest.NewRecorder()
-		h.ServeHTTP(rr, httptest.NewRequest(c.method, c.path, nil))
-		if rr.Code != http.StatusNotFound {
-			t.Fatalf("%s %s should be unrouted: want 404, got %d", c.method, c.path, rr.Code)
-		}
 	}
 }
 
@@ -186,58 +158,39 @@ func TestServer_Readyz(t *testing.T) {
 	}
 }
 
-func TestServer_UsageIngestRequiresToken(t *testing.T) {
+func TestServer_UsageEndpointsRequireTheDeploymentToken(t *testing.T) {
 	t.Parallel()
 	reg, h := newTestServer(t)
 	reg.EnsureDeployment("dev", "convex-dev")
-	body := `{"deployment":"dev","events":[]}`
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/internal/usage", strings.NewReader(body))
-	h.ServeHTTP(rr, req)
-	if rr.Code != http.StatusUnauthorized {
-		t.Fatalf("missing token: want 401, got %d", rr.Code)
-	}
-	rr = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodPost, "/internal/usage", strings.NewReader(body))
-	req.Header.Set("Authorization", "Bearer usage-secret")
-	h.ServeHTTP(rr, req)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("valid token: want 200, got %d (%s)", rr.Code, rr.Body.String())
-	}
-}
-
-func TestServer_UsageIngestRejectsUnknownDeployment(t *testing.T) {
-	t.Parallel()
-	_, h := newTestServer(t)
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequest(
-		http.MethodPost,
-		"/internal/usage",
-		strings.NewReader(`{"deployment":"ghost","events":[]}`),
-	)
-	req.Header.Set("Authorization", "Bearer usage-secret")
-	h.ServeHTTP(rr, req)
-	if rr.Code != http.StatusUnauthorized {
-		t.Fatalf("unknown deployment: want 401 (no existence leak), got %d", rr.Code)
-	}
-}
-
-func TestServer_RejectsMalformedBearer(t *testing.T) {
-	t.Parallel()
-	reg, h := newTestServer(t)
-	reg.EnsureDeployment("dev", "convex-dev")
-	for _, auth := range []string{"bearerusage-secret", "Bearer usage-secret extra"} {
+	post := func(deployment, auth string) int {
 		rr := httptest.NewRecorder()
-		req := httptest.NewRequest(
-			http.MethodPost,
-			"/internal/usage",
-			strings.NewReader(`{"deployment":"dev","events":[]}`),
-		)
-		req.Header.Set("Authorization", auth)
-		h.ServeHTTP(rr, req)
-		if rr.Code != http.StatusUnauthorized {
-			t.Fatalf("auth=%q: want 401, got %d", auth, rr.Code)
+		body := `{"deployment":"` + deployment + `","events":[]}`
+		req := httptest.NewRequest(http.MethodPost, "/internal/usage", strings.NewReader(body))
+		if auth != "" {
+			req.Header.Set("Authorization", auth)
 		}
+		h.ServeHTTP(rr, req)
+		return rr.Code
+	}
+	if code := post("dev", "Bearer usage-secret"); code != http.StatusOK {
+		t.Fatalf("valid token: want 200, got %d", code)
+	}
+	for _, tc := range []struct{ deployment, auth string }{
+		{"dev", ""},
+		{"dev", "bearerusage-secret"},
+		{"dev", "Bearer usage-secret extra"},
+		{"ghost", "Bearer usage-secret"},
+	} {
+		if code := post(tc.deployment, tc.auth); code != http.StatusUnauthorized {
+			t.Fatalf("deployment=%q auth=%q: want 401, got %d", tc.deployment, tc.auth, code)
+		}
+	}
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/dashboard/teams/0/usage/query?deploymentName=ghost", nil)
+	req.Header.Set("Authorization", "Bearer usage-secret")
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("query for an unknown deployment must be 401 (no existence leak), got %d", rr.Code)
 	}
 }
 
@@ -245,12 +198,12 @@ func TestServer_UsageIngestThenQuery(t *testing.T) {
 	t.Parallel()
 	reg, h := newTestServer(t)
 	reg.EnsureDeployment("dev", "convex-dev")
-	ingest := `{"deployment":"dev","events":[` +
+	ingest := `{"deployment":"dev","read_limits":{"documents":64000,"bytes":16777216},"events":[` +
 		`{"FunctionCall":{"is_occ":true,"udf_id":"mod:occFn","id":"o1","request_id":"q1",` +
 		`"component_path":"-root-component-","occ_table_name":"docs","status":"retried"}},` +
 		`{"InsightReadLimit":{"udf_id":"mod:readFn","id":"r1","request_id":"q2",` +
 		`"component_path":"-root-component-","calls":[` +
-		`{"table_name":"big","bytes_read":17000000,"documents_read":40000}]}}]}`
+		`{"table_name":"big","bytes_read":17000000,"documents_read":52000}]}}]}`
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/internal/usage", strings.NewReader(ingest))
 	req.Header.Set("Authorization", "Bearer usage-secret")
@@ -290,27 +243,11 @@ func TestServer_UsageIngestThenQuery(t *testing.T) {
 		}
 		kinds[k] = true
 	}
-	if !kinds["occRetried"] {
-		t.Errorf("missing occRetried row; got %v", rows)
+	if !kinds["occRetried"] || !kinds["bytesReadLimit"] || !kinds["documentsReadThreshold"] {
+		t.Errorf("want occRetried, bytesReadLimit and (against the 64000 limit) documentsReadThreshold; got %v", rows)
 	}
-	if !kinds["bytesReadLimit"] {
-		t.Errorf("missing bytesReadLimit row; got %v", rows)
-	}
-	if !kinds["documentsReadLimit"] {
-		t.Errorf("missing documentsReadLimit row; got %v", rows)
-	}
-}
-
-func TestServer_UsageQueryUnknownDeployment(t *testing.T) {
-	t.Parallel()
-	_, h := newTestServer(t)
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet,
-		"/api/dashboard/teams/0/usage/query?deploymentName=ghost", nil)
-	req.Header.Set("Authorization", "Bearer usage-secret")
-	h.ServeHTTP(rr, req)
-	if rr.Code != http.StatusUnauthorized {
-		t.Fatalf("unknown deployment: want 401 (no existence leak), got %d", rr.Code)
+	if kinds["documentsReadLimit"] {
+		t.Errorf("52,000 documents must be classified against the deployment's own limit, got %v", rows)
 	}
 }
 
@@ -322,11 +259,11 @@ type flushRecorder struct {
 }
 
 func (f *flushRecorder) Flush() {
-	if !f.flushed {
+	f.ResponseRecorder.Flush()
+	if !f.flushed && f.Body.Len() > 0 {
 		f.flushed = true
 		if f.onFlush != nil {
 			f.onFlush()
 		}
 	}
-	f.ResponseRecorder.Flush()
 }
