@@ -143,20 +143,18 @@ func withRole(o observation, role string) observation {
 	return o
 }
 
-func TestDecide_TransitioningRolesFreezePromotion(t *testing.T) {
+func TestDecide_PromotingRoleFreezesPromotion(t *testing.T) {
 	t.Parallel()
-	for _, role := range []string{"promoting", "demoting"} {
-		in := []observation{
-			withRole(obs("backend-0", false, 100, -1), role),
-			obs("backend-1", false, 100, -1),
-		}
-		d := decide(in, sticky(""))
-		if !d.hasTransitioning {
-			t.Fatalf("a role=%s pod must count as transitioning even with a nil lease_ts", role)
-		}
-		if d.promoteTarget != nil {
-			t.Fatalf("no promotion may be issued while a %s is in flight, got %+v", role, d.promoteTarget)
-		}
+	in := []observation{
+		withRole(obs("backend-0", false, 100, -1), "promoting"),
+		obs("backend-1", false, 100, -1),
+	}
+	d := decide(in, sticky(""))
+	if !d.hasTransitioning {
+		t.Fatal("a role=promoting pod must count as transitioning even with a nil lease_ts")
+	}
+	if d.promoteTarget != nil {
+		t.Fatalf("no promotion may be issued while a promotion is in flight, got %+v", d.promoteTarget)
 	}
 }
 

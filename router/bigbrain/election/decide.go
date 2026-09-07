@@ -52,7 +52,7 @@ func isTransitioning(o observation) bool {
 	if !o.reach || o.status.IsLeader {
 		return false
 	}
-	return o.status.LeaseTS != nil || o.status.Role == "promoting" || o.status.Role == "demoting"
+	return o.status.LeaseTS != nil || o.status.Role == "promoting"
 }
 
 func anyTransitioning(obs []observation) bool {
