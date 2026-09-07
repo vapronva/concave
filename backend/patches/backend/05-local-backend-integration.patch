@@ -119,7 +119,7 @@ index dfe80d124..0b1f0aa5e 100644
 +    }
 +}
 diff --git a/crates/local_backend/src/lib.rs b/crates/local_backend/src/lib.rs
-index 9ad08230d..71ce303d6 100644
+index 9ad08230d..92d3663fd 100644
 --- a/crates/local_backend/src/lib.rs
 +++ b/crates/local_backend/src/lib.rs
 @@ -35,7 +35,6 @@ use common::{
@@ -228,7 +228,7 @@ index 9ad08230d..71ce303d6 100644
 +                runtime.clone(),
 +                searcher.clone(),
 +                virtual_system_mapping().clone(),
-+                IndexCache::new(*INDEX_CACHE_SIZE).new_handle(),
++                IndexCache::new(*INDEX_CACHE_SIZE),
 +            )
 +            .await?
 +        },
@@ -361,7 +361,7 @@ index 9ad08230d..71ce303d6 100644
  }
  
 diff --git a/crates/local_backend/src/main.rs b/crates/local_backend/src/main.rs
-index fbc0e6290..f64bed112 100644
+index fbc0e6290..c1e250f9f 100644
 --- a/crates/local_backend/src/main.rs
 +++ b/crates/local_backend/src/main.rs
 @@ -1,5 +1,6 @@
@@ -539,7 +539,20 @@ index fbc0e6290..f64bed112 100644
          *HTTP_SERVER_TIMEOUT_DURATION,
          HttpActionRouteMapper,
      );
-@@ -202,8 +274,8 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
+@@ -191,19 +263,20 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
+     // Start shutdown when we get a manual shutdown signal or with the first
+     // ctrl-c.
+     let mut force_exit_duration = None;
++    let mut preempt_rx = preempt_rx.fuse();
+     futures::select! {
+         r = serve_future => {
+             r?;
+             panic!("Serve future stopped unexpectedly!")
+         },
+-        _err = preempt_rx.fuse() => {
++        _err = preempt_rx => {
+             // If we fail with a fatal error, we want to exit immediately.
+             tracing::info!("Received a fatal error. Shutting down immediately");
              force_exit_duration = Some(Duration::from_secs(0));
              let _: Result<_, _> = shutdown_tx.broadcast(()).await;
          }
@@ -550,16 +563,21 @@ index fbc0e6290..f64bed112 100644
              r?;
              let _: Result<_, _> = shutdown_tx.broadcast(()).await;
          },
-@@ -246,7 +318,7 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
+@@ -245,8 +318,12 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
+                 tracing::info!("Cool down expired. Shutting down");
                  break;
              }
++            _err = preempt_rx => {
++                tracing::info!("Received a fatal error while draining. Shutting down immediately");
++                break;
++            }
              // Forcibly shutdown with second ctrl-c.
 -            r = signal::ctrl_c().fuse() => {
 +            r = shutdown_signal().fuse() => {
                  r?;
                  tracing::warn!("Forcibly shutting down!");
                  break;
-@@ -256,3 +328,28 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
+@@ -256,3 +333,28 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
  
      Ok(())
  }

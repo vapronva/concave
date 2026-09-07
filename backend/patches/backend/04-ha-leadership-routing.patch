@@ -88,10 +88,10 @@ index 000000000..34cbd9254
 +}
 diff --git a/crates/local_backend/src/leadership.rs b/crates/local_backend/src/leadership.rs
 new file mode 100644
-index 000000000..499f05cba
+index 000000000..e93df2cc4
 --- /dev/null
 +++ b/crates/local_backend/src/leadership.rs
-@@ -0,0 +1,722 @@
+@@ -0,0 +1,616 @@
 +use std::sync::Arc;
 +
 +use axum::{
@@ -116,7 +116,7 @@ index 000000000..499f05cba
 +        FromMtState,
 +        MtState,
 +    },
-+    knobs::DEMOTION_DRAIN_TIMEOUT,
++    knobs::PROMOTION_TIMEOUT,
 +    persistence::{
 +        Persistence,
 +        PersistenceReader,
@@ -183,7 +183,6 @@ index 000000000..499f05cba
 +    Follower,
 +    Promoting(Option<Arc<dyn Persistence>>),
 +    Leader(Arc<dyn Persistence>),
-+    Demoting(Arc<dyn Persistence>),
 +}
 +
 +pub struct RoleState {
@@ -195,14 +194,12 @@ index 000000000..499f05cba
 +    Started,
 +    AlreadyInProgress,
 +    AlreadyLeader,
-+    DemotionInProgress,
 +}
 +
-+pub(crate) enum DemotionAttempt {
-+    Started(Arc<dyn Persistence>),
-+    AlreadyInProgress,
-+    AlreadyFollower,
-+    PromotionInProgress,
++pub(crate) enum DemotionCheck {
++    Leader,
++    Follower,
++    Promoting,
 +    LeaseChanged,
 +}
 +
@@ -234,7 +231,6 @@ index 000000000..499f05cba
 +            Role::Promoting(None) => ("promoting", None),
 +            Role::Promoting(Some(persistence)) => ("promoting", persistence.lease_ts()),
 +            Role::Leader(persistence) => ("leader", persistence.lease_ts()),
-+            Role::Demoting(persistence) => ("demoting", persistence.lease_ts()),
 +        };
 +        RoleSnapshot {
 +            label,
@@ -260,7 +256,6 @@ index 000000000..499f05cba
 +            Role::Follower => {},
 +            Role::Promoting(_) => return PromotionAttempt::AlreadyInProgress,
 +            Role::Leader(_) => return PromotionAttempt::AlreadyLeader,
-+            Role::Demoting(_) => return PromotionAttempt::DemotionInProgress,
 +        }
 +        *role = Role::Promoting(None);
 +        PromotionAttempt::Started
@@ -278,23 +273,16 @@ index 000000000..499f05cba
 +        *self.role.lock() = Role::Follower;
 +    }
 +
-+    pub(crate) fn begin_demotion(&self, expected_lease_ts: Option<u64>) -> DemotionAttempt {
-+        let mut role = self.role.lock();
-+        let persistence = match &*role {
++    pub(crate) fn check_demotion(&self, expected_lease_ts: Option<u64>) -> DemotionCheck {
++        let persistence = match &*self.role.lock() {
 +            Role::Leader(persistence) => persistence.clone(),
-+            Role::Demoting(_) => return DemotionAttempt::AlreadyInProgress,
-+            Role::Promoting(_) => return DemotionAttempt::PromotionInProgress,
-+            Role::Follower => return DemotionAttempt::AlreadyFollower,
++            Role::Promoting(_) => return DemotionCheck::Promoting,
++            Role::Follower => return DemotionCheck::Follower,
 +        };
 +        if expected_lease_ts.is_some_and(|expected| persistence.lease_ts() != Some(expected)) {
-+            return DemotionAttempt::LeaseChanged;
++            return DemotionCheck::LeaseChanged;
 +        }
-+        *role = Role::Demoting(persistence.clone());
-+        DemotionAttempt::Started(persistence)
-+    }
-+
-+    pub(crate) fn finish_demotion(&self) {
-+        *self.role.lock() = Role::Follower;
++        DemotionCheck::Leader
 +    }
 +}
 +
@@ -369,7 +357,6 @@ index 000000000..499f05cba
 +        tracing::info!("[concave] no lease primitive; skipping lease-watch (commit-time fencing)");
 +        return;
 +    }
-+    install_lease_lost_handler(st);
 +    st.application
 +        .database()
 +        .spawn_lease_watch(rw_persistence, st.role.preempt_signal.clone());
@@ -457,19 +444,21 @@ index 000000000..499f05cba
 +        PromotionAttempt::AlreadyInProgress => {
 +            return (StatusCode::ACCEPTED, "promotion already in progress").into_response();
 +        },
-+        PromotionAttempt::DemotionInProgress => {
-+            return (
-+                StatusCode::CONFLICT,
-+                "a demotion is in progress; retry after it completes",
-+            )
-+                .into_response();
-+        },
 +        PromotionAttempt::Started => {},
 +    }
 +    st.application
 +        .runtime()
 +        .spawn_background("in_process_promotion", async move {
-+            perform_promotion(st).await;
++            let budget = *PROMOTION_TIMEOUT;
++            let promotion = perform_promotion(st.clone()).fuse();
++            let deadline = st.application.runtime().wait(budget).fuse();
++            futures::pin_mut!(promotion, deadline);
++            futures::select_biased! {
++                _ = promotion => {},
++                _ = deadline => st.role.preempt_signal.signal(anyhow::anyhow!(
++                    "in-process promotion did not finish within {budget:?}"
++                )),
++            }
 +        });
 +    (StatusCode::ACCEPTED, "promotion started").into_response()
 +}
@@ -486,7 +475,6 @@ index 000000000..499f05cba
 +    };
 +    tracing::info!("[concave] promotion lease acquired; promoting in-process");
 +    st.role.lease_acquired(rw_persistence.clone());
-+    install_lease_lost_handler(&st);
 +    match st
 +        .application
 +        .become_leader(rw_persistence.clone(), st.role.preempt_signal.clone())
@@ -514,26 +502,23 @@ index 000000000..499f05cba
 +    MtState(st): MtState<LocalAppState>,
 +    Query(params): Query<DemoteParams>,
 +) -> Response {
-+    let rw_persistence = match st.role.begin_demotion(params.lease_ts) {
-+        DemotionAttempt::Started(rw_persistence) => rw_persistence,
-+        DemotionAttempt::LeaseChanged => {
++    match st.role.check_demotion(params.lease_ts) {
++        DemotionCheck::Leader => {},
++        DemotionCheck::LeaseChanged => {
 +            return (
 +                StatusCode::CONFLICT,
 +                "the lease changed since this demotion was decided; not demoting",
 +            )
 +                .into_response();
 +        },
-+        DemotionAttempt::AlreadyFollower => {
++        DemotionCheck::Follower => {
 +            return (
 +                StatusCode::CONFLICT,
 +                "already a follower; nothing to demote",
 +            )
 +                .into_response();
 +        },
-+        DemotionAttempt::AlreadyInProgress => {
-+            return (StatusCode::CONFLICT, "demotion already in progress").into_response();
-+        },
-+        DemotionAttempt::PromotionInProgress => {
++        DemotionCheck::Promoting => {
 +            return (
 +                StatusCode::CONFLICT,
 +                "a promotion is in progress; retry after it completes",
@@ -541,67 +526,10 @@ index 000000000..499f05cba
 +                .into_response();
 +        },
 +    };
-+    st.application.database().stop_lease_watch();
-+    st.application
-+        .runtime()
-+        .spawn_background("in_process_demotion", async move {
-+            tracing::info!("[concave] demotion started; stepping down in-process");
-+            match step_down(&st, rw_persistence).await {
-+                Ok(()) => tracing::info!("[concave] demotion succeeded; now a warm follower"),
-+                Err(e) => {
-+                    tracing::error!(
-+                        "[concave] demotion FAILED (firing preempt, restart-as-follower): {e:#}"
-+                    );
-+                    st.role
-+                        .preempt_signal
-+                        .signal(anyhow::anyhow!("in-process demotion failed: {e:#}"));
-+                },
-+            }
-+        });
++    st.role
++        .preempt_signal
++        .signal(anyhow::anyhow!("backend demoted; restarting"));
 +    (StatusCode::ACCEPTED, "demotion started").into_response()
-+}
-+
-+async fn step_down(st: &LocalAppState, rw_persistence: Arc<dyn Persistence>) -> anyhow::Result<()> {
-+    let budget = 3 * *DEMOTION_DRAIN_TIMEOUT;
-+    let demotion = st.application.become_follower(rw_persistence).fuse();
-+    futures::pin_mut!(demotion);
-+    let deadline = st.application.runtime().wait(budget).fuse();
-+    futures::pin_mut!(deadline);
-+    futures::select_biased! {
-+        result = demotion => result?,
-+        _ = deadline => anyhow::bail!("demotion did not finish within {budget:?}"),
-+    }
-+    st.role.finish_demotion();
-+    Ok(())
-+}
-+
-+pub(crate) fn install_lease_lost_handler(st: &LocalAppState) {
-+    let state = st.clone();
-+    let handler: database::LeaseLostHandler = Arc::new(move || {
-+        let st = state.clone();
-+        Box::pin(async move {
-+            let rw_persistence = match st.role.begin_demotion(None) {
-+                DemotionAttempt::Started(rw_persistence) => rw_persistence,
-+                DemotionAttempt::AlreadyFollower | DemotionAttempt::AlreadyInProgress => {
-+                    return true;
-+                },
-+                DemotionAttempt::PromotionInProgress | DemotionAttempt::LeaseChanged => {
-+                    return false;
-+                },
-+            };
-+            match step_down(&st, rw_persistence).await {
-+                Ok(()) => {
-+                    tracing::info!("[concave] in-process self-demote SUCCESS; now a warm follower");
-+                    true
-+                },
-+                Err(e) => {
-+                    tracing::error!("[concave] in-process self-demote failed: {e:#}");
-+                    false
-+                },
-+            }
-+        })
-+    });
-+    st.application.database().set_lease_lost_handler(handler);
 +}
 +
 +async fn control_plane_gate(
@@ -684,7 +612,7 @@ index 000000000..499f05cba
 +
 +    use super::{
 +        role_gate,
-+        DemotionAttempt,
++        DemotionCheck,
 +        PromotionAttempt,
 +        RoleState,
 +        FOLLOWER_GATE_HEADER,
@@ -762,7 +690,7 @@ index 000000000..499f05cba
 +    }
 +
 +    #[tokio::test]
-+    async fn demoted_leader_is_gated_then_repromotable() {
++    async fn demotion_is_compared_against_the_current_lease() {
 +        let dir = tempfile::TempDir::new().unwrap();
 +        let role = leader(&dir);
 +        assert_eq!(
@@ -770,48 +698,14 @@ index 000000000..499f05cba
 +            StatusCode::OK,
 +        );
 +        assert!(matches!(
-+            role.begin_demotion(Some(7)),
-+            DemotionAttempt::LeaseChanged
++            role.check_demotion(Some(7)),
++            DemotionCheck::LeaseChanged
 +        ));
-+        let DemotionAttempt::Started(persistence) = role.begin_demotion(None) else {
-+            panic!("leader must be demotable");
-+        };
-+        assert_eq!(role.snapshot().label, "demoting");
-+        assert!(matches!(
-+            role.begin_demotion(None),
-+            DemotionAttempt::AlreadyInProgress
-+        ));
-+        role.finish_demotion();
-+        assert!(!role.is_leader());
-+        assert!(matches!(
-+            role.begin_demotion(None),
-+            DemotionAttempt::AlreadyFollower
-+        ));
-+        assert_eq!(
-+            status_of(gated_router(role.clone()), "POST", "/api/query").await,
-+            StatusCode::MISDIRECTED_REQUEST,
-+        );
-+        assert!(matches!(role.begin_promotion(), PromotionAttempt::Started));
-+        assert_eq!(role.snapshot().label, "promoting");
-+        assert!(matches!(
-+            role.begin_promotion(),
-+            PromotionAttempt::AlreadyInProgress
-+        ));
-+        assert!(matches!(
-+            role.begin_demotion(None),
-+            DemotionAttempt::PromotionInProgress
-+        ));
-+        role.lease_acquired(persistence.clone());
-+        role.finish_promotion(persistence);
-+        assert!(role.is_leader());
++        assert!(matches!(role.check_demotion(None), DemotionCheck::Leader));
 +        assert!(matches!(
 +            role.begin_promotion(),
 +            PromotionAttempt::AlreadyLeader
 +        ));
-+        assert_eq!(
-+            status_of(gated_router(role), "POST", "/api/query").await,
-+            StatusCode::OK,
-+        );
 +    }
 +}
 diff --git a/crates/local_backend/src/router.rs b/crates/local_backend/src/router.rs

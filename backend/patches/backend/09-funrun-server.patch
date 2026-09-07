@@ -1,9 +1,9 @@
 diff --git a/crates/funrun_server/Cargo.toml b/crates/funrun_server/Cargo.toml
 new file mode 100644
-index 000000000..fee975de7
+index 000000000..c0f0f8f7a
 --- /dev/null
 +++ b/crates/funrun_server/Cargo.toml
-@@ -0,0 +1,52 @@
+@@ -0,0 +1,51 @@
 +[package]
 +name = "funrun_server"
 +version = "0.1.0"
@@ -34,7 +34,6 @@ index 000000000..fee975de7
 +keybroker = { workspace = true }
 +model = { workspace = true }
 +metrics = { workspace = true }
-+moka = { workspace = true }
 +parking_lot = { workspace = true }
 +pb = { workspace = true }
 +prost = { workspace = true }
@@ -745,7 +744,7 @@ index 000000000..2c9946728
 +}
 diff --git a/crates/funrun_server/src/main.rs b/crates/funrun_server/src/main.rs
 new file mode 100644
-index 000000000..442d7ee23
+index 000000000..131bf8c9b
 --- /dev/null
 +++ b/crates/funrun_server/src/main.rs
 @@ -0,0 +1,278 @@
@@ -855,10 +854,10 @@ index 000000000..442d7ee23
 +}
 +
 +async fn liveness(State(state): State<HealthState>) -> impl IntoResponse {
-+    if !state.registry.pool_healthy() {
++    if !state.registry.healthy() {
 +        return (
 +            StatusCode::SERVICE_UNAVAILABLE,
-+            "isolate scheduler has exited; pod must restart",
++            "funrun worker has exited; pod must restart",
 +        );
 +    }
 +    (StatusCode::OK, "ok")
@@ -867,7 +866,7 @@ index 000000000..442d7ee23
 +async fn readiness(State(state): State<HealthState>) -> impl IntoResponse {
 +    let report = state.registry.health_report(state.max_snapshot_lag);
 +    let draining = state.shutting_down.load(Ordering::Acquire);
-+    let status = if draining || !report.healthy || !state.registry.instance_loaded() {
++    let status = if draining || !report.healthy || !state.registry.instance_ready() {
 +        StatusCode::SERVICE_UNAVAILABLE
 +    } else {
 +        StatusCode::OK
@@ -1029,10 +1028,10 @@ index 000000000..442d7ee23
 +}
 diff --git a/crates/funrun_server/src/metrics.rs b/crates/funrun_server/src/metrics.rs
 new file mode 100644
-index 000000000..4a5754360
+index 000000000..34a66d550
 --- /dev/null
 +++ b/crates/funrun_server/src/metrics.rs
-@@ -0,0 +1,66 @@
+@@ -0,0 +1,63 @@
 +use metrics::{
 +    log_counter,
 +    log_counter_with_labels,
@@ -1044,7 +1043,7 @@ index 000000000..4a5754360
 +
 +register_convex_counter!(
 +    SNAPSHOT_WARM_HIT_TOTAL,
-+    "Funrun requests served from the warm follower snapshot"
++    "Funrun requests served without waiting for follower replay"
 +);
 +pub(crate) fn log_snapshot_warm_hit() {
 +    log_counter(&SNAPSHOT_WARM_HIT_TOTAL, 1);
@@ -1052,7 +1051,7 @@ index 000000000..4a5754360
 +
 +register_convex_counter!(
 +    SNAPSHOT_COLD_TOTAL,
-+    "Funrun requests that missed the warm snapshot and entered the cold-load path"
++    "Funrun requests requiring follower replay or a historical snapshot load"
 +);
 +pub(crate) fn log_snapshot_cold() {
 +    log_counter(&SNAPSHOT_COLD_TOTAL, 1);
@@ -1060,16 +1059,13 @@ index 000000000..4a5754360
 +
 +register_convex_counter!(
 +    SNAPSHOT_COLD_LOAD_TOTAL,
-+    "Funrun cold snapshot loads executed against Postgres (snapshot cache misses)"
++    "Funrun historical snapshots bootstrapped outside the follower memory window"
 +);
 +pub(crate) fn log_snapshot_cold_load() {
 +    log_counter(&SNAPSHOT_COLD_LOAD_TOTAL, 1);
 +}
 +
-+register_convex_counter!(
-+    SNAPSHOT_REQUESTS_TOTAL,
-+    "Funrun snapshot_inputs calls; cache hit rate = 1 - cold_load / requests"
-+);
++register_convex_counter!(SNAPSHOT_REQUESTS_TOTAL, "Funrun snapshot_inputs calls");
 +pub(crate) fn log_snapshot_request() {
 +    log_counter(&SNAPSHOT_REQUESTS_TOTAL, 1);
 +}
@@ -1101,10 +1097,10 @@ index 000000000..4a5754360
 +}
 diff --git a/crates/funrun_server/src/service.rs b/crates/funrun_server/src/service.rs
 new file mode 100644
-index 000000000..27f02b7fe
+index 000000000..29b7e24d9
 --- /dev/null
 +++ b/crates/funrun_server/src/service.rs
-@@ -0,0 +1,650 @@
+@@ -0,0 +1,648 @@
 +use std::{
 +    collections::BTreeMap,
 +    pin::Pin,
@@ -1350,9 +1346,7 @@ index 000000000..27f02b7fe
 +                    },
 +                )
 +                .collect::<anyhow::Result<_>>()?;
-+        let snapshot = instance
-+            .snapshot_inputs(ts, &in_memory_index_last_modified)
-+            .await?;
++        let snapshot = instance.snapshot_inputs(ts).await?;
 +        let backend_url =
 +            ConvexOrigin::from(backend_callback_url.context("missing backend_callback_url")?);
 +        let transport_url = callback_transport_url
@@ -1757,12 +1751,11 @@ index 000000000..27f02b7fe
 +}
 diff --git a/crates/funrun_server/src/snapshot.rs b/crates/funrun_server/src/snapshot.rs
 new file mode 100644
-index 000000000..166597cc9
+index 000000000..119e381fd
 --- /dev/null
 +++ b/crates/funrun_server/src/snapshot.rs
-@@ -0,0 +1,579 @@
+@@ -0,0 +1,466 @@
 +use std::{
-+    collections::BTreeMap,
 +    sync::Arc,
 +    time::Duration,
 +};
@@ -1778,21 +1771,20 @@ index 000000000..166597cc9
 +        RetentionValidator,
 +    },
 +    runtime::Runtime,
-+    types::{
-+        IndexId,
-+        RepeatableReason,
-+        RepeatableTimestamp,
-+    },
-+    value::TableMapping,
-+    virtual_system_mapping::VirtualSystemMapping,
++    types::RepeatableTimestamp,
 +};
 +use database::{
 +    BootstrapMetadata,
 +    Database,
 +    DatabaseSnapshot,
++    FollowerTailerClient,
 +    TableCountSnapshot,
 +    TextIndexManagerSnapshot,
 +    TransactionTextSnapshot,
++};
++use errors::{
++    ErrorMetadata,
++    ErrorMetadataAnyhowExt,
 +};
 +use function_runner::server::{
 +    funrun_isolate_worker,
@@ -1800,6 +1792,7 @@ index 000000000..166597cc9
 +    FunctionRunnerCore,
 +    SharedIsolateResources,
 +};
++use futures::FutureExt;
 +use indexing::{
 +    index_cache::IndexCache,
 +    index_reader::IndexReader,
@@ -1813,7 +1806,6 @@ index 000000000..166597cc9
 +    },
 +    virtual_system_mapping,
 +};
-+use moka::future::Cache;
 +use parking_lot::Mutex;
 +use search::{
 +    searcher::InProcessSearcher,
@@ -1836,7 +1828,6 @@ index 000000000..166597cc9
 +};
 +
 +const MAX_PERCENT_PER_CLIENT: usize = 100;
-+const SNAPSHOT_CACHE_TTL: Duration = Duration::from_secs(60);
 +
 +pub struct InstanceRegistry<RT: Runtime> {
 +    rt: RT,
@@ -1900,12 +1891,18 @@ index 000000000..166597cc9
 +        )
 +    }
 +
-+    pub fn pool_healthy(&self) -> bool {
++    pub fn healthy(&self) -> bool {
 +        self.shared_isolate.pool_healthy()
++            && self
++                .state
++                .get()
++                .is_none_or(|state| state.tailer.is_running())
 +    }
 +
-+    pub fn instance_loaded(&self) -> bool {
-+        self.state.get().is_some()
++    pub fn instance_ready(&self) -> bool {
++        self.state
++            .get()
++            .is_some_and(|state| state.tailer.is_ready())
 +    }
 +
 +    pub fn instance_config(&self, instance_name: &str) -> anyhow::Result<&FunrunInstanceConfig> {
@@ -1952,15 +1949,16 @@ index 000000000..166597cc9
 +    pub fn health_report(&self, max_lag: Duration) -> HealthReport {
 +        let sample = self.lag_sample.lock().clone();
 +        let load_error = self.load_error.lock().clone();
-+        let instance_healthy = match &sample {
-+            Some(sample) => match sample.lag_seconds {
-+                Some(lag) => lag <= max_lag.as_secs_f64(),
-+                None => sample.error.is_none(),
-+            },
-+            None => load_error.is_none(),
-+        };
++        let instance_healthy = self.instance_ready()
++            && match &sample {
++                Some(sample) => match sample.lag_seconds {
++                    Some(lag) => lag <= max_lag.as_secs_f64(),
++                    None => sample.error.is_none(),
++                },
++                None => load_error.is_none(),
++            };
 +        HealthReport {
-+            healthy: self.pool_healthy(),
++            healthy: self.healthy(),
 +            instance: InstanceHealth {
 +                name: self.instance.instance_name.clone(),
 +                healthy: instance_healthy,
@@ -2021,8 +2019,7 @@ index 000000000..166597cc9
 +    searcher: Arc<dyn search::Searcher>,
 +    pub core: FunctionRunnerCore<RT, DeploymentStorage>,
 +    database: Database<RT>,
-+    snapshot_cache: Cache<Timestamp, SnapshotInputs>,
-+    summary_cache: tokio::sync::Mutex<Option<database::table_summary::TableSummarySnapshot>>,
++    tailer: FollowerTailerClient,
 +}
 +
 +impl<RT: Runtime> InstanceState<RT> {
@@ -2044,15 +2041,14 @@ index 000000000..166597cc9
 +            rt.clone(),
 +        )
 +        .await?;
-+        let key_broker =
-+            keybroker::KeyBroker::new(&config.instance_name, config.instance_secret.clone())?
-+                .function_runner_keybroker();
++        let key_broker = keybroker::KeyBroker::new(&config.instance_name, config.instance_secret)?
++            .function_runner_keybroker();
 +        let database = Database::load_follower(
 +            reader.clone(),
 +            rt.clone(),
 +            searcher.clone(),
 +            virtual_system_mapping().clone(),
-+            IndexCache::new(*common::knobs::FUNRUN_FOLLOWER_INDEX_CACHE_SIZE).new_handle(),
++            IndexCache::new(*common::knobs::FUNRUN_FOLLOWER_INDEX_CACHE_SIZE),
 +        )
 +        .await?;
 +        let retention_validator = database.retention_validator();
@@ -2075,17 +2071,14 @@ index 000000000..166597cc9
 +            },
 +            shared_isolate,
 +        );
-+        database.set_search_storage(search_storage.clone());
++        database.set_search_storage(search_storage);
 +        tracing::info!(
 +            "[convex-funrun] loaded instance {} ({:?} storage); warm follower snapshot at {}",
 +            config.instance_name,
 +            storage_type,
 +            database.now_ts_for_reads(),
 +        );
-+        let snapshot_cache = Cache::builder()
-+            .max_capacity(*common::knobs::FUNRUN_SNAPSHOT_CACHE_SIZE)
-+            .time_to_live(SNAPSHOT_CACHE_TTL)
-+            .build();
++        let tailer = database.follower_tailer_client().await?;
 +        Ok(Self {
 +            rt,
 +            instance_name: config.instance_name.clone(),
@@ -2095,8 +2088,7 @@ index 000000000..166597cc9
 +            searcher,
 +            core,
 +            database,
-+            snapshot_cache,
-+            summary_cache: tokio::sync::Mutex::new(None),
++            tailer,
 +        })
 +    }
 +
@@ -2113,26 +2105,22 @@ index 000000000..166597cc9
 +            )
 +    }
 +
-+    pub async fn snapshot_inputs(
-+        &self,
-+        ts: RepeatableTimestamp,
-+        backend_last_modified: &BTreeMap<IndexId, Timestamp>,
-+    ) -> anyhow::Result<SnapshotInputs> {
++    pub async fn snapshot_inputs(&self, ts: RepeatableTimestamp) -> anyhow::Result<SnapshotInputs> {
 +        log_snapshot_request();
-+        let tables_last_modified = backend_last_modified
-+            .get(&self.database.bootstrap_metadata.tables_by_id)
-+            .copied();
-+        let repeatable_persistence =
++        if self.tailer.has_reached(ts) {
++            log_snapshot_warm_hit();
++        } else {
++            log_snapshot_cold();
++            self.await_tailer(ts).await?;
++        }
++        let persistence =
 +            RepeatablePersistence::new(self.reader.clone(), ts, self.retention_validator.clone());
-+        let index_reader: Arc<dyn IndexReader> =
-+            Arc::new(repeatable_persistence.read_snapshot(ts)?);
++        let index_reader: Arc<dyn IndexReader> = Arc::new(persistence.read_snapshot(ts)?);
 +        match self.database.snapshot(ts) {
 +            Ok(snapshot) => {
-+                log_snapshot_warm_hit();
 +                let counts = snapshot
 +                    .table_counts
-+                    .clone()
-+                    .context("warm snapshot has no table counts")?;
++                    .context("follower snapshot has no table counts")?;
 +                Ok(SnapshotInputs {
 +                    index_reader,
 +                    bootstrap_metadata: self.database.bootstrap_metadata.clone(),
@@ -2141,139 +2129,30 @@ index 000000000..166597cc9
 +                        .text_snapshot(snapshot.index_registry, snapshot.text_indexes),
 +                })
 +            },
-+            Err(warm_err) => {
-+                log_snapshot_cold();
-+                tracing::debug!(
-+                    "[convex-funrun] warm snapshot miss at ts {} ({warm_err:#}); cold-loading",
-+                    *ts
-+                );
-+                self.snapshot_cache
-+                    .try_get_with(
-+                        *ts,
-+                        self.cold_snapshot_inputs(ts, index_reader, tables_last_modified),
-+                    )
-+                    .await
-+                    .map_err(|e| match e.downcast_ref::<errors::ErrorMetadata>() {
-+                        Some(metadata) => anyhow::anyhow!("funrun snapshot inputs failed: {e:#}")
-+                            .context(metadata.clone()),
-+                        None => anyhow::anyhow!("funrun snapshot inputs failed: {e:#}"),
-+                    })
-+            },
-+        }
-+    }
-+
-+    async fn rolled_table_counts(
-+        &self,
-+        ts: RepeatableTimestamp,
-+        table_mapping: &TableMapping,
-+        virtual_system_mapping: &VirtualSystemMapping,
-+    ) -> anyhow::Result<database::TableCounts> {
-+        let mut cached = self.summary_cache.lock().await;
-+        let rolled = match cached.take() {
-+            Some(base) => {
-+                let base_ts = RepeatableTimestamp::new_validated(
-+                    base.ts,
-+                    RepeatableReason::TableSummarySnapshot,
-+                );
-+                database::table_summary::roll_from_base(
-+                    self.reader.clone(),
-+                    self.retention_validator.clone(),
-+                    ts,
-+                    base,
-+                    base_ts,
-+                    table_mapping.clone(),
-+                )
-+                .await
-+                .inspect_err(|e| {
-+                    tracing::warn!(
-+                        "[convex-funrun] summary roll from cached base failed ({e:#}); \
-+                         re-bootstrapping from checkpoint"
-+                    )
-+                })
-+                .ok()
-+            },
-+            None => None,
-+        };
-+        let (snapshot, _rows) = match rolled {
-+            Some(rolled) => rolled,
-+            None => {
-+                database::table_summary::bootstrap(
-+                    self.rt.clone(),
-+                    self.reader.clone(),
-+                    self.retention_validator.clone(),
-+                    ts,
-+                    database::table_summary::BootstrapKind::FromCheckpoint,
-+                )
-+                .await?
-+            },
-+        };
-+        *cached = Some(snapshot.clone());
-+        drop(cached);
-+        database::TableCounts::new(snapshot, table_mapping, virtual_system_mapping)
-+    }
-+
-+    async fn cold_snapshot_inputs(
-+        &self,
-+        ts: RepeatableTimestamp,
-+        index_reader: Arc<dyn IndexReader>,
-+        tables_last_modified: Option<Timestamp>,
-+    ) -> anyhow::Result<SnapshotInputs> {
-+        log_snapshot_cold_load();
-+        match self
-+            .warm_assembled_inputs(ts, index_reader.clone(), tables_last_modified)
-+            .await
-+        {
-+            Ok(inputs) => Ok(inputs),
-+            Err(e) => {
-+                tracing::warn!(
-+                    "[convex-funrun] warm-assembled cold load failed at ts {} ({e:#}); falling \
-+                     back to full snapshot load",
-+                    *ts
-+                );
++            Err(error) if error.is_out_of_retention() => {
 +                self.full_cold_snapshot_inputs(ts, index_reader).await
 +            },
++            Err(error) => Err(error),
 +        }
 +    }
 +
-+    async fn warm_assembled_inputs(
-+        &self,
-+        ts: RepeatableTimestamp,
-+        index_reader: Arc<dyn IndexReader>,
-+        tables_last_modified: Option<Timestamp>,
-+    ) -> anyhow::Result<SnapshotInputs> {
-+        let warm_ts = self.database.now_ts_for_reads();
-+        let tables_last_modified =
-+            tables_last_modified.context("funrun request carried no _tables last-modified")?;
-+        anyhow::ensure!(
-+            tables_last_modified <= *warm_ts,
-+            "table mapping changed at {tables_last_modified}, after the warm snapshot at {}",
-+            *warm_ts
-+        );
-+        let warm = self.database.snapshot(warm_ts)?;
-+        let warm_tables_last_modified = warm
-+            .in_memory_indexes
-+            .in_memory_indexes_last_modified()
-+            .get(&self.database.bootstrap_metadata.tables_by_id)
-+            .copied()
-+            .context("warm snapshot has no _tables in-memory index")?;
-+        anyhow::ensure!(
-+            warm_tables_last_modified <= *ts,
-+            "table mapping changed at {warm_tables_last_modified}, after the execution ts {}",
-+            *ts
-+        );
-+        let counts = self
-+            .rolled_table_counts(
-+                ts,
-+                warm.table_registry.table_mapping(),
-+                &warm.virtual_system_mapping,
-+            )
-+            .await?;
-+        Ok(SnapshotInputs {
-+            index_reader,
-+            bootstrap_metadata: self.database.bootstrap_metadata.clone(),
-+            table_count_snapshot: Arc::new(Some(counts)),
-+            text_index_snapshot: self.text_snapshot(warm.index_registry, warm.text_indexes),
-+        })
++    async fn await_tailer(&self, ts: RepeatableTimestamp) -> anyhow::Result<()> {
++        let wait = self.tailer.wait_for(ts).fuse();
++        let deadline = self
++            .rt
++            .wait(*common::knobs::FUNRUN_SNAPSHOT_WAIT_TIMEOUT)
++            .fuse();
++        futures::pin_mut!(wait, deadline);
++        futures::select_biased! {
++            result = wait => result.map_err(|error| error.context(
++                ErrorMetadata::rejected_before_execution(
++                    "FunrunTailerExited", "funrun follower tailer exited",
++                )
++            )),
++            _ = deadline => anyhow::bail!(ErrorMetadata::rejected_before_execution(
++                "FunrunSnapshotTimeout", "funrun follower did not reach the requested snapshot",
++            )),
++        }
 +    }
 +
 +    async fn full_cold_snapshot_inputs(
@@ -2281,6 +2160,7 @@ index 000000000..166597cc9
 +        ts: RepeatableTimestamp,
 +        index_reader: Arc<dyn IndexReader>,
 +    ) -> anyhow::Result<SnapshotInputs> {
++        log_snapshot_cold_load();
 +        let mut snapshot = DatabaseSnapshot::load(
 +            self.rt.clone(),
 +            self.reader.clone(),
@@ -2290,9 +2170,10 @@ index 000000000..166597cc9
 +        )
 +        .await?;
 +        snapshot.load_table_summaries().await?;
++        snapshot.load_search_indexes().await?;
 +        Ok(SnapshotInputs {
 +            index_reader,
-+            bootstrap_metadata: snapshot.bootstrap_metadata.clone(),
++            bootstrap_metadata: snapshot.bootstrap_metadata,
 +            table_count_snapshot: Arc::new(snapshot.snapshot.table_counts),
 +            text_index_snapshot: self.text_snapshot(
 +                snapshot.snapshot.index_registry,

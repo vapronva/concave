@@ -1,8 +1,8 @@
 diff --git a/crates/common/src/persistence/mod.rs b/crates/common/src/persistence/mod.rs
-index 5ec3445b3..bc1baef9e 100644
+index 5ec3445b3..3f519452a 100644
 --- a/crates/common/src/persistence/mod.rs
 +++ b/crates/common/src/persistence/mod.rs
-@@ -326,6 +326,26 @@ pub trait Persistence: Sync + Send + 'static {
+@@ -326,6 +326,22 @@ pub trait Persistence: Sync + Send + 'static {
      async fn finish_loading(&self) -> anyhow::Result<()> {
          Ok(())
      }
@@ -22,14 +22,10 @@ index 5ec3445b3..bc1baef9e 100644
 +        );
 +        Ok(true)
 +    }
-+
-+    async fn release_lease(&self) -> anyhow::Result<bool> {
-+        Ok(false)
-+    }
  }
  
  #[derive(Debug, Clone, Copy)]
-@@ -605,7 +625,6 @@ pub trait PersistenceReader: Send + Sync + 'static {
+@@ -605,7 +621,6 @@ pub trait PersistenceReader: Send + Sync + 'static {
      async fn table_size_stats(&self) -> anyhow::Result<Vec<PersistenceTableSize>> {
          Ok(vec![])
      }
@@ -38,7 +34,7 @@ index 5ec3445b3..bc1baef9e 100644
  
  /// Timestamp that is repeatable because the caller is holding the lease and
 diff --git a/crates/postgres/src/lib.rs b/crates/postgres/src/lib.rs
-index 0d0691d42..d733dbf16 100644
+index 0d0691d42..b27da2ea9 100644
 --- a/crates/postgres/src/lib.rs
 +++ b/crates/postgres/src/lib.rs
 @@ -468,6 +468,41 @@ impl PostgresPersistence {
@@ -83,7 +79,7 @@ index 0d0691d42..d733dbf16 100644
  }
  
  #[async_trait]
-@@ -524,6 +559,22 @@ impl Persistence for PostgresPersistence {
+@@ -524,6 +559,18 @@ impl Persistence for PostgresPersistence {
          })
      }
  
@@ -99,60 +95,10 @@ index 0d0691d42..d733dbf16 100644
 +        self.lease.lease_held().await
 +    }
 +
-+    async fn release_lease(&self) -> anyhow::Result<bool> {
-+        self.lease.release().await
-+    }
-+
      #[fastrace::trace]
      async fn write<'a>(
          &self,
-@@ -751,6 +802,10 @@ impl Persistence for PostgresPersistence {
-         &self,
-         mut documents: BoxStream<'_, Vec<DocumentLogEntry>>,
-     ) -> anyhow::Result<()> {
-+        anyhow::ensure!(
-+            self.lease.lease_held().await?,
-+            "import_documents_batch requires the lease (COPY bypasses the commit fence)"
-+        );
-         let conn = self
-             .lease
-             .pool
-@@ -812,7 +867,10 @@ impl Persistence for PostgresPersistence {
-             writer.finish().await?;
-             break;
-         }
--
-+        anyhow::ensure!(
-+            self.lease.lease_held().await?,
-+            "lease lost during import_documents_batch; imported rows are not fenced"
-+        );
-         Ok(())
-     }
- 
-@@ -820,6 +878,10 @@ impl Persistence for PostgresPersistence {
-         &self,
-         mut indexes: BoxStream<'_, Vec<PersistenceIndexEntry>>,
-     ) -> anyhow::Result<()> {
-+        anyhow::ensure!(
-+            self.lease.lease_held().await?,
-+            "import_indexes_batch requires the lease (COPY bypasses the commit fence)"
-+        );
-         let conn = self
-             .lease
-             .pool
-@@ -878,7 +940,10 @@ impl Persistence for PostgresPersistence {
-             writer.finish().await?;
-             break;
-         }
--
-+        anyhow::ensure!(
-+            self.lease.lease_held().await?,
-+            "lease lost during import_indexes_batch; imported rows are not fenced"
-+        );
-         Ok(())
-     }
- 
-@@ -1782,27 +1847,27 @@ impl Lease {
+@@ -1782,27 +1829,27 @@ impl Lease {
              .as_nanos() as i64;
  
          tracing::info!("attempting to acquire lease");
@@ -194,7 +140,7 @@ index 0d0691d42..d733dbf16 100644
              schema: schema.clone(),
              instance_name,
              multitenant,
-@@ -1810,6 +1875,61 @@ impl Lease {
+@@ -1810,6 +1857,32 @@ impl Lease {
          })
      }
  
@@ -224,40 +170,11 @@ index 0d0691d42..d733dbf16 100644
 +        Ok(row.is_some())
 +    }
 +
-+    async fn release(&self) -> anyhow::Result<bool> {
-+        let held_ts = self.lease_ts;
-+        let mut client = self
-+            .pool
-+            .get_connection("lease_release", &self.schema, &self.instance_name)
-+            .await?;
-+        let multitenant = self.multitenant;
-+        let instance_name = self.instance_name.clone();
-+        let rows_modified = client
-+            .with_retry(async move |client| {
-+                let stmt = client
-+                    .prepare_cached(sql::lease_release(multitenant))
-+                    .await?;
-+                let mut params = vec![&held_ts as &(dyn ToSql + Sync)];
-+                if multitenant {
-+                    params.push(&instance_name.raw as &(dyn ToSql + Sync));
-+                }
-+                client.execute(&stmt, params.as_slice()).await
-+            })
-+            .await?;
-+        if rows_modified == 1 {
-+            tracing::info!("lease released (ts {held_ts} invalidated); peer may take over");
-+            Ok(true)
-+        } else {
-+            tracing::info!("lease release no-op: already lost (held ts {held_ts})");
-+            Ok(false)
-+        }
-+    }
-+
      /// Execute the transaction function f atomically ensuring that the lease is
      /// still held, otherwise return `LeaseLostError`.
      ///
 diff --git a/crates/postgres/src/sql.rs b/crates/postgres/src/sql.rs
-index a531a8b5a..de688877c 100644
+index a531a8b5a..4e5940bc9 100644
 --- a/crates/postgres/src/sql.rs
 +++ b/crates/postgres/src/sql.rs
 @@ -716,6 +716,20 @@ pub const fn unset_read_only(multitenant: bool) -> &'static str {
@@ -281,7 +198,7 @@ index a531a8b5a..de688877c 100644
  // If this query returns a result, the lease is still valid and will remain so
  // until the end of the transaction.
  pub const fn lease_precond(multitenant: bool) -> &'static str {
-@@ -742,12 +756,22 @@ pub const fn advisory_lease_check(multitenant: bool) -> &'static str {
+@@ -742,12 +756,11 @@ pub const fn advisory_lease_check(multitenant: bool) -> &'static str {
      )
  }
  
@@ -292,17 +209,6 @@ index a531a8b5a..de688877c 100644
          formatcp!(
 -            "UPDATE @db_name.leases SET ts=$1 WHERE {column}={value} AND ts<$1",
 +            "UPDATE @db_name.leases SET ts=GREATEST($1, ts+1) WHERE {column}={value} RETURNING ts",
-+            column = if multitenant { "instance_name" } else { "id" },
-+            value = if multitenant { "$2" } else { "1" }
-+        )
-+    )
-+}
-+
-+pub const fn lease_release(multitenant: bool) -> &'static str {
-+    tableify!(
-+        multitenant,
-+        formatcp!(
-+            "UPDATE @db_name.leases SET ts=ts+1 WHERE {column}={value} AND ts=$1",
              column = if multitenant { "instance_name" } else { "id" },
              value = if multitenant { "$2" } else { "1" }
          )

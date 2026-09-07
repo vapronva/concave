@@ -68,23 +68,21 @@ index 5456c4bbd..f7ba31aca 100644
  /// convenience) from allowing browsers to make these requests.
  pub fn platform_api_cors() -> CorsLayer {
 diff --git a/crates/common/src/knobs.rs b/crates/common/src/knobs.rs
-index cf42648c2..64c7e50fb 100644
+index cf42648c2..9d681eec4 100644
 --- a/crates/common/src/knobs.rs
 +++ b/crates/common/src/knobs.rs
-@@ -618,6 +618,12 @@ pub static MAX_REPEATABLE_TIMESTAMP_IDLE_FREQUENCY: LazyLock<Duration> = LazyLoc
+@@ -618,6 +618,10 @@ pub static MAX_REPEATABLE_TIMESTAMP_IDLE_FREQUENCY: LazyLock<Duration> = LazyLoc
  pub static MAX_REPEATABLE_TIMESTAMP_COMMIT_DELAY: LazyLock<Duration> =
      LazyLock::new(|| Duration::from_secs(env_config("MAX_REPEATABLE_TIMESTAMP_COMMIT_DELAY", 5)));
  
-+/// Bounds how long a stepping-down leader waits to drain in-flight writes
-+/// before giving up and preempting (restart-as-follower drops the lease via
-+/// process exit).
-+pub static DEMOTION_DRAIN_TIMEOUT: LazyLock<Duration> =
-+    LazyLock::new(|| Duration::from_secs(env_config("DEMOTION_DRAIN_TIMEOUT_SECS", 30)));
++/// Bounds promotion before preempting a pod that cannot finish the transition.
++pub static PROMOTION_TIMEOUT: LazyLock<Duration> =
++    LazyLock::new(|| Duration::from_secs(env_config("PROMOTION_TIMEOUT_SECS", 300)));
 +
  /// The maximum delay between runs of retention, this is now only used for error
  /// backoff and the initial delay when backend is started.
  pub static MAX_RETENTION_DELAY_SECONDS: LazyLock<Duration> =
-@@ -944,6 +950,11 @@ pub static ISOLATE_QUEUE_CONGESTED_TIMEOUT: LazyLock<Duration> =
+@@ -944,6 +948,11 @@ pub static ISOLATE_QUEUE_CONGESTED_TIMEOUT: LazyLock<Duration> =
  pub static MAX_ISOLATE_WORKERS: LazyLock<usize> =
      LazyLock::new(|| env_config("MAX_ISOLATE_WORKERS", 300));
  
@@ -96,7 +94,7 @@ index cf42648c2..64c7e50fb 100644
  /// The size of the pending commits in the committer queue. This is a FIFO
  /// queue, so if the queue is too large, we run into a risk of all requests
  /// waiting too long and no requests going through during overload. The size of
-@@ -1270,6 +1281,12 @@ pub static SOURCE_MAP_CACHE_QUEUE_SIZE: LazyLock<usize> =
+@@ -1270,6 +1279,12 @@ pub static SOURCE_MAP_CACHE_QUEUE_SIZE: LazyLock<usize> =
  pub static FUNRUN_INDEX_CACHE_SIZE: LazyLock<u64> =
      LazyLock::new(|| env_config("FUNRUN_INDEX_CACHE_SIZE", 50_000_000)); // 50 MB
  
@@ -109,19 +107,18 @@ index cf42648c2..64c7e50fb 100644
  /// The maximum number of concurrent index cache requests in Funrun.
  pub static FUNRUN_INDEX_CACHE_CONCURRENCY: LazyLock<usize> =
      LazyLock::new(|| env_config("FUNRUN_INDEX_CACHE_CONCURRENCY", 200));
-@@ -1294,6 +1311,11 @@ pub static FUNRUN_MODULE_QUEUE_SIZE: LazyLock<usize> =
+@@ -1294,6 +1309,10 @@ pub static FUNRUN_MODULE_QUEUE_SIZE: LazyLock<usize> =
  pub static FUNRUN_CODE_CACHE_SIZE: LazyLock<u64> =
      LazyLock::new(|| env_config("FUNRUN_CODE_CACHE_SIZE", 500_000_000));
  
-+/// Max cold-loaded funrun snapshots to cache, keyed by read timestamp;
-+/// concurrent same-timestamp loads are coalesced (single-flight).
-+pub static FUNRUN_SNAPSHOT_CACHE_SIZE: LazyLock<u64> =
-+    LazyLock::new(|| env_config("FUNRUN_SNAPSHOT_CACHE_SIZE", 16));
++/// Maximum wait for funrun follower replay before rejecting execution.
++pub static FUNRUN_SNAPSHOT_WAIT_TIMEOUT: LazyLock<Duration> =
++    LazyLock::new(|| Duration::from_secs(env_config("FUNRUN_SNAPSHOT_WAIT_TIMEOUT_SECS", 30)));
 +
  /// The maximum number of fetch clients Funrun would create.
  pub static FUNRUN_FETCH_CLIENT_CACHE_SIZE: LazyLock<usize> =
      LazyLock::new(|| env_config("FUNRUN_FETCH_CLIENT_CACHE_SIZE", 100));
-@@ -1312,10 +1334,28 @@ pub static FUNRUN_FETCH_CLIENT_CACHE_SIZE: LazyLock<usize> =
+@@ -1312,10 +1331,29 @@ pub static FUNRUN_FETCH_CLIENT_CACHE_SIZE: LazyLock<usize> =
  pub static FUNRUN_CLIENT_MAX_REQUESTS_PER_UPSTREAM: LazyLock<usize> =
      LazyLock::new(|| env_config("FUNRUN_CLIENT_MAX_REQUESTS_PER_UPSTREAM", 15));
  
@@ -130,7 +127,7 @@ index cf42648c2..64c7e50fb 100644
 +/// Max retries per funrun call; total attempts = retries + 1. Queries and
 +/// mutations retry on transport errors, attempt timeout, and
 +/// rejected-before-execution; actions only on rejected-before-execution; HTTP
-+/// actions never. Never retries after a log line has been forwarded.
++/// actions never. Never retries after a response part has been received.
  pub static FUNRUN_CLIENT_MAX_RETRIES: LazyLock<usize> =
 -    LazyLock::new(|| env_config("FUNRUN_CLIENT_MAX_RETRIES", 4));
 +    LazyLock::new(|| env_config("FUNRUN_CLIENT_MAX_RETRIES", 2));
@@ -141,13 +138,14 @@ index cf42648c2..64c7e50fb 100644
 +    LazyLock::new(|| Duration::from_secs(env_config("FUNRUN_LB_REFRESH_INTERVAL_SECONDS", 10)));
 +
 +/// Per-attempt response deadline for funrun queries and mutations (the call
-+/// plus response-stream consumption). Actions are deliberately unbounded.
++/// plus response-stream consumption) and the response-header deadline of every
++/// RPC; an action's stream is bounded only by its execution timeout on funrun.
 +pub static FUNRUN_RESPONSE_TIMEOUT: LazyLock<Duration> =
 +    LazyLock::new(|| Duration::from_secs(env_config("FUNRUN_RESPONSE_TIMEOUT_SECS", 600)));
 +
-+/// How long the endpoint set may stay empty before requests fail fast with a
-+/// retryable error. Arms only until the first successful DNS resolution; after
-+/// that, the last-known-good endpoints are kept through DNS outages.
++/// How long initial endpoint discovery may take. Requests wait for discovery
++/// within this shared budget, then fail before dispatch. Last-known-good
++/// endpoints are kept through subsequent DNS outages.
 +pub static FUNRUN_EMPTY_ENDPOINTS_FAIL_FAST: LazyLock<Duration> =
 +    LazyLock::new(|| Duration::from_secs(env_config("FUNRUN_EMPTY_ENDPOINTS_FAIL_FAST_SECS", 30)));
  
@@ -464,10 +462,10 @@ index 000000000..0b7216a3c
 +}
 diff --git a/crates/function_runner/src/remote.rs b/crates/function_runner/src/remote.rs
 new file mode 100644
-index 000000000..751b5469e
+index 000000000..0b8fcbc2f
 --- /dev/null
 +++ b/crates/function_runner/src/remote.rs
-@@ -0,0 +1,885 @@
+@@ -0,0 +1,891 @@
 +use std::{
 +    collections::{
 +        BTreeMap,
@@ -539,7 +537,6 @@ index 000000000..751b5469e
 +    },
 +    udf_config::types::UdfConfig,
 +};
-+use parking_lot::Mutex;
 +use pb::error_metadata::ErrorMetadataStatusExt;
 +use sync_types::{
 +    CanonicalizedModulePath,
@@ -547,7 +544,10 @@ index 000000000..751b5469e
 +};
 +use tokio::{
 +    net::lookup_host,
-+    sync::mpsc,
++    sync::{
++        mpsc,
++        watch,
++    },
 +    time::timeout,
 +};
 +use tonic::transport::{
@@ -637,7 +637,7 @@ index 000000000..751b5469e
 +    host: String,
 +    port: u16,
 +    tx: tokio::sync::mpsc::Sender<Change<SocketAddr, Endpoint>>,
-+    empty_since: Arc<Mutex<Option<Instant>>>,
++    empty_since: watch::Sender<Option<Instant>>,
 +) {
 +    let refresh_rt = rt.clone();
 +    rt.spawn_background("funrun_lb_refresh", async move {
@@ -677,13 +677,8 @@ index 000000000..751b5469e
 +                    tracing::warn!("[funrun-lb] DNS resolution for {host}:{port} failed: {e}")
 +                },
 +            }
-+            {
-+                let mut empty_since = empty_since.lock();
-+                if current.is_empty() {
-+                    empty_since.get_or_insert_with(Instant::now);
-+                } else {
-+                    *empty_since = None;
-+                }
++            if !current.is_empty() {
++                empty_since.send_if_modified(|since| since.take().is_some());
 +            }
 +            refresh_rt
 +                .wait(*common::knobs::FUNRUN_LB_REFRESH_INTERVAL)
@@ -701,7 +696,7 @@ index 000000000..751b5469e
 +    callback_transport_url: Option<String>,
 +    rt: RT,
 +    instance_secret: DeploymentSecret,
-+    endpoints_empty_since: Arc<Mutex<Option<Instant>>>,
++    endpoints_empty_since: watch::Receiver<Option<Instant>>,
 +}
 +
 +enum RunFunctionAttemptError {
@@ -722,9 +717,9 @@ index 000000000..751b5469e
 +        storage: DeploymentStorage,
 +    ) -> anyhow::Result<Self> {
 +        let (host, port) = parse_funrun_target(&funrun_addr)?;
-+        let endpoints_empty_since = Arc::new(Mutex::new(Some(Instant::now())));
++        let (endpoints_tx, endpoints_empty_since) = watch::channel(Some(Instant::now()));
 +        let (channel, tx) = Channel::balance_channel::<SocketAddr>(64);
-+        spawn_endpoint_refresher(&rt, host, port, tx, endpoints_empty_since.clone());
++        spawn_endpoint_refresher(&rt, host, port, tx, endpoints_tx);
 +        let local = FunctionRunnerCore::new(
 +            rt.clone(),
 +            storage,
@@ -737,10 +732,7 @@ index 000000000..751b5469e
 +        if let Some(url) = &callback_transport_url {
 +            tracing::info!("[funrun] action callbacks will use transport URL {url}");
 +        } else {
-+            tracing::warn!(
-+                "[funrun] CONVEX_FUNRUN_CALLBACK_URL unset; action callbacks fall back to the \
-+                 public origin and are not leader-affine — unsafe under HA failover"
-+            );
++            tracing::info!("[funrun] action callbacks use the public origin");
 +        }
 +        Ok(Self {
 +            channel,
@@ -787,32 +779,39 @@ index 000000000..751b5469e
 +        }
 +    }
 +
-+    fn ensure_endpoints_available(&self) -> anyhow::Result<()> {
-+        if let Some(empty_since) = *self.endpoints_empty_since.lock()
-+            && empty_since.elapsed() >= *common::knobs::FUNRUN_EMPTY_ENDPOINTS_FAIL_FAST
-+        {
-+            anyhow::bail!(ErrorMetadata::rejected_before_execution(
++    async fn wait_for_endpoints(&self) -> anyhow::Result<()> {
++        let mut endpoints = self.endpoints_empty_since.clone();
++        let Some(empty_since) = *endpoints.borrow_and_update() else {
++            return Ok(());
++        };
++        let budget = *common::knobs::FUNRUN_EMPTY_ENDPOINTS_FAIL_FAST;
++        let remaining = budget.saturating_sub(empty_since.elapsed());
++        match timeout(remaining, endpoints.wait_for(Option::is_none)).await {
++            Ok(Ok(_)) => Ok(()),
++            _ => anyhow::bail!(ErrorMetadata::rejected_before_execution(
 +                "FunrunUnavailable",
-+                "funrun DNS has resolved no endpoints for over 30s; check the funrun Service",
-+            ))
++                format!("funrun DNS has no endpoints after {budget:?}; check the funrun Service"),
++            )),
 +        }
-+        Ok(())
 +    }
 +
 +    async fn run_function_attempt(
 +        &self,
 +        req: tonic::Request<pb::funrun::RunFunctionRequest>,
 +        log_line_sender: &Option<mpsc::UnboundedSender<LogLine>>,
-+        parts_forwarded: &mut bool,
++        parts_received: &mut bool,
 +    ) -> Result<pb::funrun::RunFunctionResult, RunFunctionAttemptError> {
 +        let mut client = pb::funrun::funrun_client::FunrunClient::new(self.channel.clone())
 +            .max_decoding_message_size(*MAX_GRPC_MESSAGE_BYTES)
 +            .max_encoding_message_size(*MAX_GRPC_MESSAGE_BYTES);
-+        let mut stream = client
-+            .run_function(req)
-+            .await
-+            .map_err(RunFunctionAttemptError::Rpc)?
-+            .into_inner();
++        let mut stream = timeout(
++            *common::knobs::FUNRUN_RESPONSE_TIMEOUT,
++            client.run_function(req),
++        )
++        .await
++        .map_err(|_| RunFunctionAttemptError::TimedOut)?
++        .map_err(RunFunctionAttemptError::Rpc)?
++        .into_inner();
 +        let mut result = None;
 +        loop {
 +            let part = stream
@@ -822,12 +821,12 @@ index 000000000..751b5469e
 +            let Some(part) = part else {
 +                break;
 +            };
++            *parts_received = true;
 +            match part.part {
 +                Some(pb::funrun::run_function_response_part::Part::LogLine(log_line)) => {
 +                    let log_line =
 +                        LogLine::try_from(log_line).map_err(RunFunctionAttemptError::Internal)?;
 +                    if let Some(sender) = log_line_sender {
-+                        *parts_forwarded = true;
 +                        let _ = sender.send(log_line);
 +                    }
 +                },
@@ -948,15 +947,15 @@ index 000000000..751b5469e
 +        let mut attempt: u32 = 0;
 +        let result = 'attempts: loop {
 +            let last_attempt = attempt + 1 >= max_attempts;
-+            let mut parts_forwarded = false;
++            let mut parts_received = false;
 +            let failure = 'attempt: {
-+                if let Err(e) = self.ensure_endpoints_available() {
++                if let Err(e) = self.wait_for_endpoints().await {
 +                    break 'attempt RunFunctionAttemptError::NoEndpoints(e);
 +                }
 +                let req = self.authenticated_request(request.clone())?;
 +                let timer = funrun_client_rpc_timer(udf_type);
 +                let attempt_fut =
-+                    self.run_function_attempt(req, &log_line_sender, &mut parts_forwarded);
++                    self.run_function_attempt(req, &log_line_sender, &mut parts_received);
 +                let outcome = if has_deadline {
 +                    timeout(*common::knobs::FUNRUN_RESPONSE_TIMEOUT, attempt_fut).await
 +                } else {
@@ -973,7 +972,7 @@ index 000000000..751b5469e
 +            };
 +            let retry_reason = match &failure {
 +                RunFunctionAttemptError::NoEndpoints(_) => Some("no_endpoints"),
-+                RunFunctionAttemptError::TimedOut => Some("timeout"),
++                RunFunctionAttemptError::TimedOut if has_deadline => Some("timeout"),
 +                RunFunctionAttemptError::Rpc(status)
 +                    if Self::is_retryable_rpc(udf_type, status) =>
 +                {
@@ -984,11 +983,13 @@ index 000000000..751b5469e
 +                        _ => "rejected_before_execution",
 +                    })
 +                },
-+                RunFunctionAttemptError::Rpc(_) | RunFunctionAttemptError::Internal(_) => None,
++                RunFunctionAttemptError::Rpc(_)
++                | RunFunctionAttemptError::Internal(_)
++                | RunFunctionAttemptError::TimedOut => None,
 +            };
 +            if let Some(reason) = retry_reason
 +                && !last_attempt
-+                && !parts_forwarded
++                && !parts_received
 +            {
 +                log_funrun_client_retry(reason);
 +                attempt += 1;
@@ -1113,16 +1114,19 @@ index 000000000..751b5469e
 +            http_request_head: Some(request_head.clone().into()),
 +            http_request_body,
 +        };
-+        self.ensure_endpoints_available()?;
++        self.wait_for_endpoints().await?;
 +        let mut client = pb::funrun::funrun_client::FunrunClient::new(self.channel.clone())
 +            .max_decoding_message_size(*MAX_GRPC_MESSAGE_BYTES)
 +            .max_encoding_message_size(*MAX_GRPC_MESSAGE_BYTES);
-+        let mut stream = client
-+            .run_http_action(self.authenticated_request(request)?)
-+            .await
-+            .map_err(|status| status.into_anyhow())
-+            .context("funrun RunHttpAction failed")?
-+            .into_inner();
++        let mut stream = timeout(
++            *common::knobs::FUNRUN_RESPONSE_TIMEOUT,
++            client.run_http_action(self.authenticated_request(request)?),
++        )
++        .await
++        .context("funrun RunHttpAction response headers timed out")?
++        .map_err(|status| status.into_anyhow())
++        .context("funrun RunHttpAction failed")?
++        .into_inner();
 +        let mut result: Option<pb::funrun::RunFunctionResult> = None;
 +        loop {
 +            let message = stream.message().fuse();

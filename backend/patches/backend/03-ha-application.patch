@@ -1,3 +1,37 @@
+diff --git a/crates/application/src/cron_jobs/mod.rs b/crates/application/src/cron_jobs/mod.rs
+index 4a490a155..0cbd8f974 100644
+--- a/crates/application/src/cron_jobs/mod.rs
++++ b/crates/application/src/cron_jobs/mod.rs
+@@ -680,7 +680,28 @@ impl<RT: Runtime> CronJobContext<RT> {
+                         context.clone(),
+                         true,
+                     )
+-                    .await?;
++                    .await;
++                let completion = match completion {
++                    Ok(completion) => completion,
++                    Err(error) => {
++                        if error.is_rejected_before_execution()
++                            && let Some(mut tx) = self
++                                .new_transaction_for_job_state(
++                                    &updated_job,
++                                    FunctionUsageTracker::new(),
++                                )
++                                .await?
++                        {
++                            CronModel::new(&mut tx, component)
++                                .update_job_state(job.cron_next_run())
++                                .await?;
++                            self.database
++                                .commit_with_write_source(tx, "cron_action_rejected")
++                                .await?;
++                        }
++                        return Err(error);
++                    },
++                };
+                 let execution_time_f64 = completion.execution_time.as_secs_f64();
+                 let truncated_log_lines = self.truncate_log_lines(completion.log_lines.clone());
+ 
 diff --git a/crates/application/src/function_log.rs b/crates/application/src/function_log.rs
 index bceb6b977..f2f937c1f 100644
 --- a/crates/application/src/function_log.rs
@@ -11,7 +45,7 @@ index bceb6b977..f2f937c1f 100644
                          outcome.result.is_ok(),
                          usage_stats,
 diff --git a/crates/application/src/lib.rs b/crates/application/src/lib.rs
-index a843db0bd..12eff76a9 100644
+index a843db0bd..f88ef7606 100644
 --- a/crates/application/src/lib.rs
 +++ b/crates/application/src/lib.rs
 @@ -135,6 +135,7 @@ use common::{
@@ -445,7 +479,7 @@ index a843db0bd..12eff76a9 100644
              usage_gauges_tracking_worker,
              scheduled_job_runner,
              cron_job_executor,
-@@ -966,29 +1058,77 @@ impl<RT: Runtime> Application<RT> {
+@@ -966,29 +1058,57 @@ impl<RT: Runtime> Application<RT> {
              system_table_cleanup_worker,
              migration_worker,
              usage_limit_worker,
@@ -521,30 +555,10 @@ index a843db0bd..12eff76a9 100644
 +        .await?;
 +        tracing::info!("[promote] Application::become_leader complete");
 +        Ok(())
-+    }
-+
-+    pub async fn become_follower(
-+        &self,
-+        rw_persistence: Arc<dyn Persistence>,
-+    ) -> anyhow::Result<()> {
-+        tracing::info!("[demote] Application::become_follower: stopping leader workers");
-+        let workers = self.workers.lock().take();
-+        if let Some(workers) = workers {
-+            workers.shutdown().await?;
-+        }
-+        if let Err(e) = self.log_manager_client.shutdown().await {
-+            tracing::warn!("log manager shutdown failed during demotion: {e:#}");
-+        }
-+        self.log_manager_client
-+            .replace_with(&LogManagerClient::noop());
-+        tracing::info!("[demote] Application::become_follower: demoting Database");
-+        self.database.become_follower(rw_persistence).await?;
-+        tracing::info!("[demote] Application::become_follower complete");
-+        Ok(())
      }
  
      pub fn usage_meter(&self) -> &Arc<UsageMeter> {
-@@ -999,6 +1139,10 @@ impl<RT: Runtime> Application<RT> {
+@@ -999,6 +1119,10 @@ impl<RT: Runtime> Application<RT> {
          self.runtime.clone()
      }
  
@@ -555,7 +569,7 @@ index a843db0bd..12eff76a9 100644
      pub fn modules_storage(&self) -> &Arc<dyn Storage> {
          &self.application_storage.modules_storage
      }
-@@ -1651,9 +1795,11 @@ impl<RT: Runtime> Application<RT> {
+@@ -1651,9 +1775,11 @@ impl<RT: Runtime> Application<RT> {
          identity.require_operation(DeploymentOp::CreateBackups)?;
          ensure_export_file_storage_within_limit(
              format,
@@ -570,7 +584,7 @@ index a843db0bd..12eff76a9 100644
          )?;
          if let Some(expiration_ts_ns) = expiration_ts_ns {
              let now = SystemTime::now()
-@@ -3919,7 +4065,10 @@ impl<RT: Runtime> Application<RT> {
+@@ -3919,7 +4045,10 @@ impl<RT: Runtime> Application<RT> {
      }
  
      pub async fn shutdown(&self) -> anyhow::Result<()> {
@@ -582,6 +596,52 @@ index a843db0bd..12eff76a9 100644
          self.log_manager_client.shutdown().await?;
          self.runner.shutdown().await?;
          self.database.shutdown().await?;
+diff --git a/crates/application/src/scheduled_jobs/mod.rs b/crates/application/src/scheduled_jobs/mod.rs
+index c41055ecc..5c874d336 100644
+--- a/crates/application/src/scheduled_jobs/mod.rs
++++ b/crates/application/src/scheduled_jobs/mod.rs
+@@ -196,8 +196,7 @@ pub struct ScheduledJobContext<RT: Runtime> {
+     function_log: FunctionExecutionLog<RT>,
+ }
+ 
+-impl<RT: Runtime> ScheduledJobContext<RT> {
+-}
++impl<RT: Runtime> ScheduledJobContext<RT> {}
+ 
+ impl<RT: Runtime> ScheduledJobExecutor<RT> {
+     pub async fn run(
+@@ -987,7 +986,30 @@ impl<RT: Runtime> ScheduledJobContext<RT> {
+                         context.clone(),
+                         true,
+                     )
+-                    .await?;
++                    .await;
++                let completion = match completion {
++                    Ok(completion) => completion,
++                    Err(error) => {
++                        if error.is_rejected_before_execution()
++                            && let Some((mut tx, mut job)) = self
++                                .new_transaction_for_job_state(
++                                    job_id,
++                                    &updated_job,
++                                    FunctionUsageTracker::new(),
++                                )
++                                .await?
++                        {
++                            job.state = ScheduledJobState::Pending;
++                            SchedulerModel::new(&mut tx, namespace)
++                                .replace(job_id, job)
++                                .await?;
++                            self.database
++                                .commit_with_write_source(tx, "scheduled_job_rejected")
++                                .await?;
++                        }
++                        return Err(error);
++                    },
++                };
+                 let state = match &completion.outcome.result {
+                     Ok(_) => ScheduledJobState::Success,
+                     Err(e) => ScheduledJobState::Failed(e.to_string()),
 diff --git a/crates/log_streaming/src/lib.rs b/crates/log_streaming/src/lib.rs
 index 7a69b7fe7..7ba8f9fff 100644
 --- a/crates/log_streaming/src/lib.rs
