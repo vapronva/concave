@@ -46,7 +46,6 @@ ha:
   followerPriority: 0
   requireNodeSpread: true
   spreadTopologyKey: kubernetes.io/hostname
-  demotionDrainTimeoutSeconds: ""
   pdb:
     enabled: true
   leader:

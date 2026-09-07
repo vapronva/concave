@@ -230,10 +230,6 @@ strategy:
   value: "https://{{ . }}"
 {{- end }}
 {{- include "convex.controlPlaneEnv" . }}
-{{- with .Values.ha.demotionDrainTimeoutSeconds }}
-- name: DEMOTION_DRAIN_TIMEOUT_SECS
-  value: {{ int64 . | quote }}
-{{- end }}
 {{- end -}}
 
 {{- define "convex.controlPlaneEnv" -}}
