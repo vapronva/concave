@@ -388,13 +388,19 @@ func (t *tracker) logStreamEnd(ctx, sctx context.Context, scanErr error, idle ti
 	log.Printf("usher: %s leader-stream read error: %v", t.host, scanErr)
 }
 
-func isBlockedControlPath(p string) bool {
-	c := strings.ToLower(path.Clean("/" + p))
-	return c == instancePrefix || strings.HasPrefix(c, instancePrefix+"/")
+func isBlockedAPIPath(p string) bool {
+	for _, candidate := range []string{p, path.Clean("/" + p)} {
+		c := strings.ToLower(candidate)
+		if c == instancePrefix || strings.HasPrefix(c, instancePrefix+"/") || c == "/http" ||
+			strings.HasPrefix(c, "/http/") {
+			return true
+		}
+	}
+	return false
 }
 
 func (t *tracker) serveHTTP(w http.ResponseWriter, r *http.Request, site bool) {
-	if !site && isBlockedControlPath(r.URL.Path) {
+	if !site && isBlockedAPIPath(r.URL.Path) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}

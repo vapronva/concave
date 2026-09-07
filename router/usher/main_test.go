@@ -44,7 +44,7 @@ func (t *tracker) setLeader(leaderURL string) bool {
 	return t.applyLeader(leaderResponse{LeaderURL: leaderURL, Seq: t.lastAppliedSeq + 1, Epoch: t.lastEpoch}, true)
 }
 
-func TestIsBlockedControlPath(t *testing.T) {
+func TestIsBlockedAPIPath(t *testing.T) {
 	t.Parallel()
 	blocked := []string{
 		"/instance",
@@ -60,9 +60,15 @@ func TestIsBlockedControlPath(t *testing.T) {
 		"/instance/../instance/promote",
 		"/INSTANCE/promote",
 		"/InStAnCe/leadership",
+		"/http",
+		"/http/",
+		"/http/myaction",
+		"/http/./myaction",
+		"/api/../http/myaction",
+		"/http/../myaction",
 	}
 	for _, p := range blocked {
-		if !isBlockedControlPath(p) {
+		if !isBlockedAPIPath(p) {
 			t.Errorf("path %q should be blocked", p)
 		}
 	}
@@ -74,15 +80,17 @@ func TestIsBlockedControlPath(t *testing.T) {
 		"/instancex",
 		"/instance_name",
 		"/instance_version",
+		"/https",
+		"/http_status",
 	}
 	for _, p := range allowed {
-		if isBlockedControlPath(p) {
+		if isBlockedAPIPath(p) {
 			t.Errorf("path %q should NOT be blocked", p)
 		}
 	}
 }
 
-func TestServeHTTP_RejectsActuationPaths(t *testing.T) {
+func TestServeHTTP_RejectsInternalPaths(t *testing.T) {
 	t.Parallel()
 	var hits hitLog
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -102,6 +110,9 @@ func TestServeHTTP_RejectsActuationPaths(t *testing.T) {
 		wantBodyContains string
 	}{
 		{http.MethodPost, "/instance/promote", http.StatusNotFound, false, ""},
+		{http.MethodPost, "/http/myaction", http.StatusNotFound, false, ""},
+		{http.MethodPost, "/http/../myaction", http.StatusNotFound, false, ""},
+		{http.MethodPost, "/http%2Fmyaction", http.StatusNotFound, false, ""},
 		{http.MethodGet, "/instance_name", http.StatusOK, true, "upstream-reached"},
 		{http.MethodPost, "/api/mutation", http.StatusOK, true, "upstream-reached"},
 	}
@@ -986,6 +997,9 @@ func TestNewMux_MonoRoutesUnknownHostToTheDeployment(t *testing.T) {
 	}
 	if code, _ := do(http.MethodPost, "/instance/promote", "anything.bogus.invalid"); code != http.StatusNotFound {
 		t.Fatalf("mono: /instance/* must stay blocked on the catch-all (api surface), got %d", code)
+	}
+	if code, _ := do(http.MethodGet, "/http/myaction", "anything.bogus.invalid"); code != http.StatusNotFound {
+		t.Fatalf("mono: /http/* must stay blocked on the catch-all (api surface), got %d", code)
 	}
 	if code, _ := do(http.MethodGet, readyzPath, "10.0.0.1:8080"); code != http.StatusServiceUnavailable {
 		t.Fatalf("mono: readyz before first resolve must 503 (not proxy), got %d", code)
