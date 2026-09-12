@@ -355,7 +355,7 @@ func (t *tracker) openStream(ctx context.Context, u string) (*http.Response, err
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		drainClose(resp.Body)
+		_ = resp.Body.Close()
 		return nil, fmt.Errorf("unexpected status %d", resp.StatusCode)
 	}
 	return resp, nil
