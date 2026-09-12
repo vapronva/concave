@@ -1,8 +1,8 @@
 diff --git a/crates/application/src/cron_jobs/mod.rs b/crates/application/src/cron_jobs/mod.rs
-index 4a490a155..0cbd8f974 100644
+index 1bdb86710..d32b06f51 100644
 --- a/crates/application/src/cron_jobs/mod.rs
 +++ b/crates/application/src/cron_jobs/mod.rs
-@@ -680,7 +680,28 @@ impl<RT: Runtime> CronJobContext<RT> {
+@@ -681,7 +681,28 @@ impl<RT: Runtime> CronJobContext<RT> {
                          context.clone(),
                          true,
                      )
@@ -45,7 +45,7 @@ index bceb6b977..f2f937c1f 100644
                          outcome.result.is_ok(),
                          usage_stats,
 diff --git a/crates/application/src/lib.rs b/crates/application/src/lib.rs
-index a843db0bd..f88ef7606 100644
+index 50012bd55..f08d51308 100644
 --- a/crates/application/src/lib.rs
 +++ b/crates/application/src/lib.rs
 @@ -135,6 +135,7 @@ use common::{
@@ -56,7 +56,7 @@ index a843db0bd..f88ef7606 100644
          ConvexOrigin,
          ConvexSite,
          DeploymentMetadata,
-@@ -173,6 +174,7 @@ use database::{
+@@ -174,6 +175,7 @@ use database::{
      UserFacingModel,
      WriteSource,
      MAX_OCC_FAILURES,
@@ -64,7 +64,7 @@ index a843db0bd..f88ef7606 100644
  };
  use either::Either;
  use errors::{
-@@ -285,6 +287,7 @@ use model::{
+@@ -286,6 +288,7 @@ use model::{
          FileStorageModel,
      },
      fivetran_import::FivetranImportModel,
@@ -72,7 +72,7 @@ index a843db0bd..f88ef7606 100644
      migrations::MigrationWorker,
      modules::{
          module_versions::{
-@@ -321,7 +324,6 @@ use model::{
+@@ -322,7 +325,6 @@ use model::{
          types::UdfConfig,
          UdfConfigModel,
      },
@@ -80,7 +80,7 @@ index a843db0bd..f88ef7606 100644
  };
  use node_executor::NodeActions;
  use parking_lot::Mutex;
-@@ -383,7 +385,6 @@ use usage_gauges_tracking_worker::UsageGaugesTrackingWorker;
+@@ -384,7 +386,6 @@ use usage_gauges_tracking_worker::UsageGaugesTrackingWorker;
  use usage_limits::{
      UsageLimitNotifier,
      UsageLimitRecorder,
@@ -88,7 +88,7 @@ index a843db0bd..f88ef7606 100644
      UsageMeter,
  };
  use usage_tracking::{
-@@ -594,6 +595,13 @@ pub(crate) fn validate_env_var_values(
+@@ -595,6 +596,13 @@ pub(crate) fn validate_env_var_values(
      Ok(())
  }
  
@@ -102,7 +102,7 @@ index a843db0bd..f88ef7606 100644
  #[derive(Clone)]
  pub struct ApplicationStorage {
      pub files_storage: Arc<dyn Storage>,
-@@ -614,15 +622,20 @@ pub struct Application<RT: Runtime> {
+@@ -615,15 +623,20 @@ pub struct Application<RT: Runtime> {
      usage_counter: UsageCounter,
      usage_event_logger: Arc<dyn UsageEventLogger>,
      usage_meter: Arc<UsageMeter>,
@@ -124,7 +124,7 @@ index a843db0bd..f88ef7606 100644
  }
  
  /// Create storage based on the storage type configuration
-@@ -681,29 +694,32 @@ impl<RT: Runtime> Application<RT> {
+@@ -682,29 +695,32 @@ impl<RT: Runtime> Application<RT> {
              storage_type
          };
  
@@ -170,7 +170,7 @@ index a843db0bd..f88ef7606 100644
          Ok(ApplicationStorage {
              files_storage,
              modules_storage,
-@@ -713,7 +729,29 @@ impl<RT: Runtime> Application<RT> {
+@@ -714,7 +730,29 @@ impl<RT: Runtime> Application<RT> {
          })
      }
  
@@ -200,7 +200,7 @@ index a843db0bd..f88ef7606 100644
          runtime: RT,
          database: Database<RT>,
          file_storage: FileStorage<RT>,
-@@ -727,7 +765,7 @@ impl<RT: Runtime> Application<RT> {
+@@ -728,7 +766,7 @@ impl<RT: Runtime> Application<RT> {
          convex_site: ConvexSite,
          searcher: Arc<dyn Searcher>,
          segment_term_metadata_fetcher: Arc<dyn SegmentTermMetadataFetcher>,
@@ -209,7 +209,7 @@ index a843db0bd..f88ef7606 100644
          node_actions: NodeActions<RT>,
          log_visibility: Arc<dyn LogVisibility<RT>>,
          app_auth: Arc<ApplicationAuth<RT>>,
-@@ -754,6 +792,143 @@ impl<RT: Runtime> Application<RT> {
+@@ -755,6 +793,143 @@ impl<RT: Runtime> Application<RT> {
              CONVEX_SITE.clone() => convex_site.parse()?
          };
  
@@ -353,7 +353,7 @@ index a843db0bd..f88ef7606 100644
          let mut index_worker = Arc::new(Mutex::new(None));
          if *ENABLE_INDEX_BACKFILL {
              let index_worker_fut = IndexWorker::new(
-@@ -778,12 +953,12 @@ impl<RT: Runtime> Application<RT> {
+@@ -779,12 +954,12 @@ impl<RT: Runtime> Application<RT> {
              database.clone(),
              persistence.reader(),
              application_storage.search_storage.clone(),
@@ -369,7 +369,7 @@ index a843db0bd..f88ef7606 100644
          let table_summary_worker = TableSummaryWorker::start(
              runtime.clone(),
              database.clone(),
-@@ -805,90 +980,7 @@ impl<RT: Runtime> Application<RT> {
+@@ -806,90 +981,7 @@ impl<RT: Runtime> Application<RT> {
              runtime.spawn("system_table_cleanup_worker", system_table_cleanup_worker),
          ));
  
@@ -461,7 +461,7 @@ index a843db0bd..f88ef7606 100644
  
          let scheduled_job_runner = ScheduledJobRunner::start(
              runtime.clone(),
-@@ -914,7 +1006,7 @@ impl<RT: Runtime> Application<RT> {
+@@ -915,7 +1007,7 @@ impl<RT: Runtime> Application<RT> {
              database.clone(),
              application_storage.exports_storage.clone(),
              application_storage.files_storage.clone(),
@@ -470,7 +470,7 @@ index a843db0bd..f88ef7606 100644
              usage_counter.clone(),
              deployment_name.clone(),
          );
-@@ -951,7 +1043,7 @@ impl<RT: Runtime> Application<RT> {
+@@ -952,7 +1044,7 @@ impl<RT: Runtime> Application<RT> {
              deployment_name.clone(),
          )?;
  
@@ -479,7 +479,7 @@ index a843db0bd..f88ef7606 100644
              usage_gauges_tracking_worker,
              scheduled_job_runner,
              cron_job_executor,
-@@ -966,29 +1058,57 @@ impl<RT: Runtime> Application<RT> {
+@@ -967,29 +1059,57 @@ impl<RT: Runtime> Application<RT> {
              system_table_cleanup_worker,
              migration_worker,
              usage_limit_worker,
@@ -558,7 +558,7 @@ index a843db0bd..f88ef7606 100644
      }
  
      pub fn usage_meter(&self) -> &Arc<UsageMeter> {
-@@ -999,6 +1119,10 @@ impl<RT: Runtime> Application<RT> {
+@@ -1000,6 +1120,10 @@ impl<RT: Runtime> Application<RT> {
          self.runtime.clone()
      }
  
@@ -569,7 +569,7 @@ index a843db0bd..f88ef7606 100644
      pub fn modules_storage(&self) -> &Arc<dyn Storage> {
          &self.application_storage.modules_storage
      }
-@@ -1651,9 +1775,11 @@ impl<RT: Runtime> Application<RT> {
+@@ -1652,9 +1776,11 @@ impl<RT: Runtime> Application<RT> {
          identity.require_operation(DeploymentOp::CreateBackups)?;
          ensure_export_file_storage_within_limit(
              format,
@@ -584,7 +584,7 @@ index a843db0bd..f88ef7606 100644
          )?;
          if let Some(expiration_ts_ns) = expiration_ts_ns {
              let now = SystemTime::now()
-@@ -3919,7 +4045,10 @@ impl<RT: Runtime> Application<RT> {
+@@ -3920,7 +4046,10 @@ impl<RT: Runtime> Application<RT> {
      }
  
      pub async fn shutdown(&self) -> anyhow::Result<()> {
@@ -597,10 +597,10 @@ index a843db0bd..f88ef7606 100644
          self.runner.shutdown().await?;
          self.database.shutdown().await?;
 diff --git a/crates/application/src/scheduled_jobs/mod.rs b/crates/application/src/scheduled_jobs/mod.rs
-index c41055ecc..5c874d336 100644
+index cd7255387..a1ca71827 100644
 --- a/crates/application/src/scheduled_jobs/mod.rs
 +++ b/crates/application/src/scheduled_jobs/mod.rs
-@@ -196,8 +196,7 @@ pub struct ScheduledJobContext<RT: Runtime> {
+@@ -197,8 +197,7 @@ pub struct ScheduledJobContext<RT: Runtime> {
      function_log: FunctionExecutionLog<RT>,
  }
  
@@ -610,7 +610,7 @@ index c41055ecc..5c874d336 100644
  
  impl<RT: Runtime> ScheduledJobExecutor<RT> {
      pub async fn run(
-@@ -987,7 +986,30 @@ impl<RT: Runtime> ScheduledJobContext<RT> {
+@@ -988,7 +987,30 @@ impl<RT: Runtime> ScheduledJobContext<RT> {
                          context.clone(),
                          true,
                      )
@@ -643,7 +643,7 @@ index c41055ecc..5c874d336 100644
                      Ok(_) => ScheduledJobState::Success,
                      Err(e) => ScheduledJobState::Failed(e.to_string()),
 diff --git a/crates/log_streaming/src/lib.rs b/crates/log_streaming/src/lib.rs
-index 7a69b7fe7..7ba8f9fff 100644
+index 7a69b7fe7..412b03392 100644
 --- a/crates/log_streaming/src/lib.rs
 +++ b/crates/log_streaming/src/lib.rs
 @@ -100,6 +100,11 @@ use crate::sinks::{
@@ -658,13 +658,13 @@ index 7a69b7fe7..7ba8f9fff 100644
      handle: Arc<Mutex<Option<Box<dyn SpawnHandle>>>>,
      event_sender: mpsc::Sender<Arc<LogEvent>>,
      active_sinks_count: Arc<AtomicUsize>,
-@@ -107,12 +112,36 @@ pub struct LogManagerClient {
+@@ -107,12 +112,28 @@ pub struct LogManagerClient {
  }
  
  impl LogManagerClient {
 +    pub fn noop() -> Self {
 +        let (event_sender, _rx) = mpsc::channel(1);
-+        LogManagerClient::from_inner(LogManagerClientInner {
++        LogManagerClient::from(LogManagerClientInner {
 +            handle: Arc::new(Mutex::new(None)),
 +            event_sender,
 +            active_sinks_count: Arc::new(AtomicUsize::new(0)),
@@ -672,17 +672,9 @@ index 7a69b7fe7..7ba8f9fff 100644
 +        })
 +    }
 +
-+    fn from_inner(inner: LogManagerClientInner) -> Self {
-+        Self {
-+            inner: Arc::new(RwLock::new(inner)),
-+        }
-+    }
-+
 +    pub fn replace_with(&self, other: &Self) {
-+        if Arc::ptr_eq(&self.inner, &other.inner) {
-+            return;
-+        }
-+        *self.inner.write() = other.inner.read().clone();
++        let inner = other.inner.read().clone();
++        *self.inner.write() = inner;
 +    }
 +
      fn send_logs_inner(&self, logs: Vec<LogEvent>) -> Result<(), SendLogBatchError> {
@@ -696,7 +688,7 @@ index 7a69b7fe7..7ba8f9fff 100644
                  Err(mpsc::error::TrySendError::Full(_)) => {
                      dropped += 1;
                  },
-@@ -139,15 +168,21 @@ impl LogManagerClient {
+@@ -139,15 +160,21 @@ impl LogManagerClient {
      }
  
      pub fn set_entitlement_enabled(&self, enabled: bool) {
@@ -721,7 +713,18 @@ index 7a69b7fe7..7ba8f9fff 100644
      }
  
      fn is_active(&self) -> bool {
-@@ -158,7 +193,7 @@ impl LogManagerClient {
+@@ -155,10 +182,18 @@ impl LogManagerClient {
+     }
+ }
+ 
++impl From<LogManagerClientInner> for LogManagerClient {
++    fn from(inner: LogManagerClientInner) -> Self {
++        Self {
++            inner: Arc::new(RwLock::new(inner)),
++        }
++    }
++}
++
  #[async_trait]
  impl LogSender for LogManagerClient {
      async fn shutdown(&self) -> anyhow::Result<()> {
@@ -735,7 +738,7 @@ index 7a69b7fe7..7ba8f9fff 100644
          let handle = Arc::new(Mutex::new(Some(runtime.spawn("log_manager", worker.go()))));
          let entitlement_enabled = Arc::new(AtomicBool::new(entitlement_enabled));
 -        LogManagerClient {
-+        LogManagerClient::from_inner(LogManagerClientInner {
++        LogManagerClient::from(LogManagerClientInner {
              handle,
              event_sender: req_tx,
              active_sinks_count,

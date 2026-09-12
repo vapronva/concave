@@ -665,18 +665,16 @@ index 000000000..38aa09d74
 +}
 diff --git a/crates/funrun_server/src/config.rs b/crates/funrun_server/src/config.rs
 new file mode 100644
-index 000000000..2c9946728
+index 000000000..b6e156299
 --- /dev/null
 +++ b/crates/funrun_server/src/config.rs
-@@ -0,0 +1,73 @@
+@@ -0,0 +1,69 @@
 +use std::{
 +    net::SocketAddr,
 +    time::Duration,
 +};
 +
 +use anyhow::Context;
-+use clusters::DbDriverTag;
-+use common::types::PersistenceVersion;
 +use keybroker::DeploymentSecret;
 +
 +#[derive(Clone)]
@@ -692,7 +690,6 @@ index 000000000..2c9946728
 +    pub max_snapshot_lag: Duration,
 +    pub drain_delay: Duration,
 +    pub instance: FunrunInstanceConfig,
-+    pub db: DbDriverTag,
 +    pub require_ssl: bool,
 +}
 +
@@ -725,7 +722,6 @@ index 000000000..2c9946728
 +                instance_secret,
 +                db_spec,
 +            },
-+            db: DbDriverTag::Postgres(PersistenceVersion::V5),
 +            require_ssl,
 +        })
 +    }
@@ -1028,7 +1024,7 @@ index 000000000..131bf8c9b
 +}
 diff --git a/crates/funrun_server/src/metrics.rs b/crates/funrun_server/src/metrics.rs
 new file mode 100644
-index 000000000..34a66d550
+index 000000000..7b902cd7e
 --- /dev/null
 +++ b/crates/funrun_server/src/metrics.rs
 @@ -0,0 +1,63 @@
@@ -1051,7 +1047,7 @@ index 000000000..34a66d550
 +
 +register_convex_counter!(
 +    SNAPSHOT_COLD_TOTAL,
-+    "Funrun requests requiring follower replay or a historical snapshot load"
++    "Funrun requests that waited for follower replay"
 +);
 +pub(crate) fn log_snapshot_cold() {
 +    log_counter(&SNAPSHOT_COLD_TOTAL, 1);
@@ -1751,10 +1747,10 @@ index 000000000..29b7e24d9
 +}
 diff --git a/crates/funrun_server/src/snapshot.rs b/crates/funrun_server/src/snapshot.rs
 new file mode 100644
-index 000000000..119e381fd
+index 000000000..d94a7b7eb
 --- /dev/null
 +++ b/crates/funrun_server/src/snapshot.rs
-@@ -0,0 +1,466 @@
+@@ -0,0 +1,462 @@
 +use std::{
 +    sync::Arc,
 +    time::Duration,
@@ -1831,7 +1827,6 @@ index 000000000..119e381fd
 +
 +pub struct InstanceRegistry<RT: Runtime> {
 +    rt: RT,
-+    db: clusters::DbDriverTag,
 +    require_ssl: bool,
 +    instance: FunrunInstanceConfig,
 +    shared_isolate: SharedIsolateResources<RT>,
@@ -1873,7 +1868,6 @@ index 000000000..119e381fd
 +        Self::spawn_lag_sampler(rt.clone(), state.clone(), lag_sample.clone());
 +        Ok(Self {
 +            rt,
-+            db: config.db,
 +            require_ssl: config.require_ssl,
 +            instance: config.instance.clone(),
 +            shared_isolate,
@@ -1923,7 +1917,6 @@ index 000000000..119e381fd
 +                let state = InstanceState::load(
 +                    self.rt.clone(),
 +                    config,
-+                    self.db,
 +                    self.require_ssl,
 +                    self.shared_isolate.clone(),
 +                    self.searcher.clone(),
@@ -2026,13 +2019,12 @@ index 000000000..119e381fd
 +    pub async fn load(
 +        rt: RT,
 +        config: &FunrunInstanceConfig,
-+        db: clusters::DbDriverTag,
 +        require_ssl: bool,
 +        shared_isolate: SharedIsolateResources<RT>,
 +        searcher: Arc<dyn search::Searcher>,
 +    ) -> anyhow::Result<Self> {
 +        let reader = db_connection::connect_persistence_reader(
-+            db,
++            clusters::DbDriverTag::Postgres(common::types::PersistenceVersion::V5),
 +            &config.db_spec,
 +            require_ssl,
 +            false,

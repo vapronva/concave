@@ -329,7 +329,7 @@ index 000000000..8bff059c4
 +  }
 +};
 diff --git a/npm-packages/dashboard-common/src/features/health/components/DeploymentSummary.tsx b/npm-packages/dashboard-common/src/features/health/components/DeploymentSummary.tsx
-index 23b843041..29395395e 100644
+index 1cdaae3b8..6fc81f416 100644
 --- a/npm-packages/dashboard-common/src/features/health/components/DeploymentSummary.tsx
 +++ b/npm-packages/dashboard-common/src/features/health/components/DeploymentSummary.tsx
 @@ -203,6 +203,9 @@ export function DeploymentSummary({
@@ -457,10 +457,11 @@ index 23b843041..29395395e 100644
 -                    }
 -                  >
 -                    <DimensionsIcon
-+                  <Tooltip tip="Convex package version">
-+                    <CubeIcon
-                       className="size-4 shrink-0 text-content-secondary"
+-                      className="size-4 shrink-0 text-content-secondary"
 -                      aria-label="Deployment class"
++                  <Tooltip tip="Convex package version">
++                    <PackageVersionIcon
++                      className="text-content-secondary"
 +                      aria-label="Convex package version"
                      />
                    </Tooltip>
@@ -503,8 +504,8 @@ index 23b843041..29395395e 100644
 -            {lastPushEvent && (
 -              <div className="flex items-center gap-2">
 -                <Tooltip tip="Convex package version">
--                  <CubeIcon
--                    className="size-4 shrink-0 text-content-secondary"
+-                  <PackageVersionIcon
+-                    className="text-content-secondary"
 -                    aria-label="Convex package version"
 -                  />
 -                </Tooltip>

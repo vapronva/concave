@@ -38,10 +38,10 @@ index e66741039..762516c78 100644
 +}
 diff --git a/crates/local_backend/src/usage_forwarder.rs b/crates/local_backend/src/usage_forwarder.rs
 new file mode 100644
-index 000000000..dfdd59d1c
+index 000000000..cd415a662
 --- /dev/null
 +++ b/crates/local_backend/src/usage_forwarder.rs
-@@ -0,0 +1,354 @@
+@@ -0,0 +1,377 @@
 +use std::sync::Arc;
 +
 +use async_trait::async_trait;
@@ -96,6 +96,30 @@ index 000000000..dfdd59d1c
 +    USAGE_FORWARDER_DROPPED_BATCHES_TOTAL,
 +    "Usage-event batches dropped because the forwarder channel was full or closed"
 +);
++
++fn is_insight(event: &UsageEvent) -> bool {
++    match event {
++        UsageEvent::FunctionCall { fields } => fields.is_occ,
++        UsageEvent::InsightReadLimit { .. } => true,
++        UsageEvent::FunctionStorageCalls { .. }
++        | UsageEvent::FunctionStorageBandwidth { .. }
++        | UsageEvent::StorageCall { .. }
++        | UsageEvent::StorageBandwidth { .. }
++        | UsageEvent::DatabaseBandwidth { .. }
++        | UsageEvent::NetworkBandwidth { .. }
++        | UsageEvent::VectorBandwidth { .. }
++        | UsageEvent::TextWrites { .. }
++        | UsageEvent::TextQuery { .. }
++        | UsageEvent::VectorQuery { .. }
++        | UsageEvent::AuditLogBandwidth { .. }
++        | UsageEvent::CurrentVectorStorage { .. }
++        | UsageEvent::CurrentTextStorage { .. }
++        | UsageEvent::CurrentDatabaseStorage { .. }
++        | UsageEvent::CurrentFileStorage { .. }
++        | UsageEvent::CurrentDocumentCounts { .. }
++        | UsageEvent::CurrentBackendState { .. } => false,
++    }
++}
 +
 +fn usage_sink_token() -> Option<String> {
 +    std::env::var("CONVEX_USAGE_SINK_TOKEN")
@@ -227,6 +251,10 @@ index 000000000..dfdd59d1c
 +#[async_trait]
 +impl UsageEventLogger for HttpUsageForwarder {
 +    async fn record_async(&self, events: Vec<UsageEvent>) {
++        let events: Vec<UsageEvent> = events.into_iter().filter(is_insight).collect();
++        if events.is_empty() {
++            return;
++        }
 +        let n = events.len();
 +        if let Err(e) = self.tx.try_send(events) {
 +            let state = match e {
@@ -234,7 +262,7 @@ index 000000000..dfdd59d1c
 +                mpsc::error::TrySendError::Closed(_) => "closed",
 +            };
 +            log_counter(&USAGE_FORWARDER_DROPPED_BATCHES_TOTAL, 1);
-+            tracing::error!("usage forwarder {state}; dropping {n} events (billing under-count)");
++            tracing::error!("usage forwarder {state}; dropping {n} Insights events");
 +        }
 +    }
 +
@@ -252,8 +280,7 @@ index 000000000..dfdd59d1c
 +                log_counter(&USAGE_FORWARDER_DROPPED_BATCHES_TOTAL, queued as u64);
 +            }
 +            tracing::error!(
-+                "usage forwarder shutdown timed out; {queued} queued batches abandoned (billing \
-+                 under-count)"
++                "usage forwarder shutdown timed out; {queued} queued Insights batches abandoned"
 +            );
 +        }
 +        Ok(())
@@ -314,14 +341,10 @@ index 000000000..dfdd59d1c
 +            let status = resp.status();
 +            if status == StatusCode::NOT_FOUND {
 +                tracing::warn!(
-+                    "[concave] insights upstream does not know deployment {}",
++                    "[concave] insights upstream returned 404 for deployment {}",
 +                    st.instance_name
 +                );
-+                return (
-+                    StatusCode::BAD_GATEWAY,
-+                    "insights upstream does not know this deployment",
-+                )
-+                    .into_response();
++                return (StatusCode::BAD_GATEWAY, "insights upstream returned 404").into_response();
 +            }
 +            let content_type = resp.headers().get(http::header::CONTENT_TYPE).cloned();
 +            let body = match resp.bytes().await {

@@ -88,7 +88,7 @@ index 000000000..34cbd9254
 +}
 diff --git a/crates/local_backend/src/leadership.rs b/crates/local_backend/src/leadership.rs
 new file mode 100644
-index 000000000..e93df2cc4
+index 000000000..13d2bb0ca
 --- /dev/null
 +++ b/crates/local_backend/src/leadership.rs
 @@ -0,0 +1,616 @@
@@ -246,7 +246,7 @@ index 000000000..e93df2cc4
 +    pub fn rw_persistence(&self) -> Option<Arc<dyn Persistence>> {
 +        match &*self.role.lock() {
 +            Role::Leader(persistence) => Some(persistence.clone()),
-+            _ => None,
++            Role::Follower | Role::Promoting(_) => None,
 +        }
 +    }
 +

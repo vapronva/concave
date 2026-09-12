@@ -68,7 +68,7 @@ index 5456c4bbd..f7ba31aca 100644
  /// convenience) from allowing browsers to make these requests.
  pub fn platform_api_cors() -> CorsLayer {
 diff --git a/crates/common/src/knobs.rs b/crates/common/src/knobs.rs
-index cf42648c2..9d681eec4 100644
+index a3f686e1f..8bbdbcf3a 100644
 --- a/crates/common/src/knobs.rs
 +++ b/crates/common/src/knobs.rs
 @@ -618,6 +618,10 @@ pub static MAX_REPEATABLE_TIMESTAMP_IDLE_FREQUENCY: LazyLock<Duration> = LazyLoc
@@ -82,7 +82,7 @@ index cf42648c2..9d681eec4 100644
  /// The maximum delay between runs of retention, this is now only used for error
  /// backoff and the initial delay when backend is started.
  pub static MAX_RETENTION_DELAY_SECONDS: LazyLock<Duration> =
-@@ -944,6 +948,11 @@ pub static ISOLATE_QUEUE_CONGESTED_TIMEOUT: LazyLock<Duration> =
+@@ -955,6 +959,11 @@ pub static ISOLATE_QUEUE_CONGESTED_TIMEOUT: LazyLock<Duration> =
  pub static MAX_ISOLATE_WORKERS: LazyLock<usize> =
      LazyLock::new(|| env_config("MAX_ISOLATE_WORKERS", 300));
  
@@ -94,7 +94,7 @@ index cf42648c2..9d681eec4 100644
  /// The size of the pending commits in the committer queue. This is a FIFO
  /// queue, so if the queue is too large, we run into a risk of all requests
  /// waiting too long and no requests going through during overload. The size of
-@@ -1270,6 +1279,12 @@ pub static SOURCE_MAP_CACHE_QUEUE_SIZE: LazyLock<usize> =
+@@ -1281,6 +1290,12 @@ pub static SOURCE_MAP_CACHE_QUEUE_SIZE: LazyLock<usize> =
  pub static FUNRUN_INDEX_CACHE_SIZE: LazyLock<u64> =
      LazyLock::new(|| env_config("FUNRUN_INDEX_CACHE_SIZE", 50_000_000)); // 50 MB
  
@@ -107,7 +107,7 @@ index cf42648c2..9d681eec4 100644
  /// The maximum number of concurrent index cache requests in Funrun.
  pub static FUNRUN_INDEX_CACHE_CONCURRENCY: LazyLock<usize> =
      LazyLock::new(|| env_config("FUNRUN_INDEX_CACHE_CONCURRENCY", 200));
-@@ -1294,6 +1309,10 @@ pub static FUNRUN_MODULE_QUEUE_SIZE: LazyLock<usize> =
+@@ -1305,6 +1320,10 @@ pub static FUNRUN_MODULE_QUEUE_SIZE: LazyLock<usize> =
  pub static FUNRUN_CODE_CACHE_SIZE: LazyLock<u64> =
      LazyLock::new(|| env_config("FUNRUN_CODE_CACHE_SIZE", 500_000_000));
  
@@ -118,7 +118,7 @@ index cf42648c2..9d681eec4 100644
  /// The maximum number of fetch clients Funrun would create.
  pub static FUNRUN_FETCH_CLIENT_CACHE_SIZE: LazyLock<usize> =
      LazyLock::new(|| env_config("FUNRUN_FETCH_CLIENT_CACHE_SIZE", 100));
-@@ -1312,10 +1331,29 @@ pub static FUNRUN_FETCH_CLIENT_CACHE_SIZE: LazyLock<usize> =
+@@ -1323,10 +1342,29 @@ pub static FUNRUN_FETCH_CLIENT_CACHE_SIZE: LazyLock<usize> =
  pub static FUNRUN_CLIENT_MAX_REQUESTS_PER_UPSTREAM: LazyLock<usize> =
      LazyLock::new(|| env_config("FUNRUN_CLIENT_MAX_REQUESTS_PER_UPSTREAM", 15));
  
@@ -245,10 +245,10 @@ index 64a4c9068..998b61d70 100644
 +}
 diff --git a/crates/function_runner/src/proto.rs b/crates/function_runner/src/proto.rs
 new file mode 100644
-index 000000000..0b7216a3c
+index 000000000..52edcd226
 --- /dev/null
 +++ b/crates/function_runner/src/proto.rs
-@@ -0,0 +1,211 @@
+@@ -0,0 +1,220 @@
 +use std::{
 +    collections::BTreeMap,
 +    str::FromStr,
@@ -267,7 +267,10 @@ index 000000000..0b7216a3c
 +    },
 +    ReadSet,
 +};
-+use search::QueryReads as SearchQueryReads;
++use search::{
++    query::funrun_proto::QueryReadsProto,
++    QueryReads as SearchQueryReads,
++};
 +use sync_types::Timestamp;
 +use value::{
 +    FieldPath,
@@ -304,7 +307,10 @@ index 000000000..0b7216a3c
 +            .collect();
 +        let search = search_reads
 +            .map(|(index_name, query_reads)| {
-+                let (text_queries, filter_conditions) = query_reads.to_proto();
++                let QueryReadsProto {
++                    text_queries,
++                    filter_conditions,
++                } = query_reads.into();
 +                pb::funrun::SearchReads {
 +                    index_name: index_name.to_string(),
 +                    text_queries,
@@ -367,7 +373,10 @@ index 000000000..0b7216a3c
 +        {
 +            let index_name = TabletIndexName::from_str(&index_name)
 +                .with_context(|| format!("Invalid search index name {index_name}"))?;
-+            let query_reads = SearchQueryReads::from_proto(text_queries, filter_conditions)?;
++            let query_reads = SearchQueryReads::try_from(QueryReadsProto {
++                text_queries,
++                filter_conditions,
++            })?;
 +            search_map.insert(index_name, query_reads);
 +        }
 +        let reads = ReadSet::new(indexed_map, search_map);
@@ -1358,7 +1367,7 @@ index 000000000..0b8fcbc2f
 +    fn set_action_callbacks(&self, _action_callbacks: Arc<dyn ActionCallbacks>) {}
 +}
 diff --git a/crates/function_runner/src/server.rs b/crates/function_runner/src/server.rs
-index 8710c2e45..db1020ab1 100644
+index 985494a40..d52d91d44 100644
 --- a/crates/function_runner/src/server.rs
 +++ b/crates/function_runner/src/server.rs
 @@ -5,6 +5,7 @@ use std::{
@@ -1369,7 +1378,7 @@ index 8710c2e45..db1020ab1 100644
  };
  
  use anyhow::Context;
-@@ -23,7 +24,10 @@ use common::{
+@@ -24,7 +25,10 @@ use common::{
          fetch::FetchClient,
          RoutedHttpPath,
      },
@@ -1381,7 +1390,7 @@ index 8710c2e45..db1020ab1 100644
      log_lines::LogLine,
      persistence::RetentionValidator,
      query_journal::QueryJournal,
-@@ -54,7 +58,10 @@ use isolate::{
+@@ -55,7 +59,10 @@ use isolate::{
          EnvironmentData,
          IsolateWorker,
      },
@@ -1392,7 +1401,7 @@ index 8710c2e45..db1020ab1 100644
  };
  use keybroker::{
      FunctionRunnerKeyBroker,
-@@ -191,6 +198,66 @@ pub struct FunctionRunnerCore<RT: Runtime, S: StorageForDeployment<RT>> {
+@@ -192,6 +199,66 @@ pub struct FunctionRunnerCore<RT: Runtime, S: StorageForDeployment<RT>> {
      isolate_client: IsolateClient<RT>,
  }
  
@@ -1459,7 +1468,7 @@ index 8710c2e45..db1020ab1 100644
  impl<RT: Runtime, S: StorageForDeployment<RT>> Clone for FunctionRunnerCore<RT, S> {
      fn clone(&self) -> Self {
          Self {
-@@ -232,24 +299,30 @@ impl<RT: Runtime, S: StorageForDeployment<RT>> FunctionRunnerCore<RT, S> {
+@@ -233,24 +300,30 @@ impl<RT: Runtime, S: StorageForDeployment<RT>> FunctionRunnerCore<RT, S> {
          isolate_worker: W,
      ) -> anyhow::Result<Self> {
          let max_isolate_workers = *MAX_ISOLATE_WORKERS;
@@ -1853,10 +1862,19 @@ index 42f33efca..00e020949 100644
      operations::{
          bad_admin_key_error,
 diff --git a/crates/search/src/query.rs b/crates/search/src/query.rs
-index 4afa10e79..ef5272a6b 100644
+index 4afa10e79..12c9e4279 100644
 --- a/crates/search/src/query.rs
 +++ b/crates/search/src/query.rs
-@@ -600,12 +600,8 @@ impl TextQueryTermRead {
+@@ -56,6 +56,8 @@ use crate::{
+     EditDistance,
+ };
+ 
++pub mod funrun_proto;
++
+ /// A search query compiled against a particular `SearchIndexSchema`.
+ #[derive(Debug, Clone)]
+ pub struct CompiledQuery {
+@@ -600,12 +602,8 @@ impl TextQueryTermRead {
  // code.
  #[derive(Debug, Clone, PartialEq, Eq)]
  pub enum TextQueryTerm {
@@ -1871,10 +1889,27 @@ index 4afa10e79..ef5272a6b 100644
  }
  
  impl TextQueryTerm {
-@@ -688,6 +684,116 @@ impl HeapSize for QueryReads {
-     }
- }
- 
+diff --git a/crates/search/src/query/funrun_proto.rs b/crates/search/src/query/funrun_proto.rs
+new file mode 100644
+index 000000000..fbabce96a
+--- /dev/null
++++ b/crates/search/src/query/funrun_proto.rs
+@@ -0,0 +1,165 @@
++use anyhow::Context;
++use common::query::FilterValue;
++
++use crate::query::{
++    FilterConditionRead,
++    QueryReads,
++    TextQueryTerm,
++    TextQueryTermRead,
++};
++
++pub struct QueryReadsProto {
++    pub text_queries: Vec<pb::funrun::TextQueryTermRead>,
++    pub filter_conditions: Vec<pb::funrun::FilterConditionRead>,
++}
++
 +impl From<TextQueryTerm> for pb::funrun::TextQueryTerm {
 +    fn from(term: TextQueryTerm) -> Self {
 +        let term = match term {
@@ -1948,33 +1983,32 @@ index 4afa10e79..ef5272a6b 100644
 +    }
 +}
 +
-+impl QueryReads {
-+    pub fn to_proto(
-+        self,
-+    ) -> (
-+        Vec<pb::funrun::TextQueryTermRead>,
-+        Vec<pb::funrun::FilterConditionRead>,
-+    ) {
-+        let text_queries = Vec::from(self.text_queries)
-+            .into_iter()
-+            .map(pb::funrun::TextQueryTermRead::from)
-+            .collect();
-+        let filter_conditions = Vec::from(self.filter_conditions)
-+            .into_iter()
-+            .map(pb::funrun::FilterConditionRead::from)
-+            .collect();
-+        (text_queries, filter_conditions)
++impl From<QueryReads> for QueryReadsProto {
++    fn from(reads: QueryReads) -> Self {
++        QueryReadsProto {
++            text_queries: Vec::from(reads.text_queries)
++                .into_iter()
++                .map(pb::funrun::TextQueryTermRead::from)
++                .collect(),
++            filter_conditions: Vec::from(reads.filter_conditions)
++                .into_iter()
++                .map(pb::funrun::FilterConditionRead::from)
++                .collect(),
++        }
 +    }
++}
 +
-+    pub fn from_proto(
-+        text_queries: Vec<pb::funrun::TextQueryTermRead>,
-+        filter_conditions: Vec<pb::funrun::FilterConditionRead>,
-+    ) -> anyhow::Result<Self> {
-+        let text_queries: Vec<TextQueryTermRead> = text_queries
++impl TryFrom<QueryReadsProto> for QueryReads {
++    type Error = anyhow::Error;
++
++    fn try_from(proto: QueryReadsProto) -> anyhow::Result<Self> {
++        let text_queries: Vec<TextQueryTermRead> = proto
++            .text_queries
 +            .into_iter()
 +            .map(TextQueryTermRead::try_from)
 +            .collect::<anyhow::Result<_>>()?;
-+        let filter_conditions: Vec<FilterConditionRead> = filter_conditions
++        let filter_conditions: Vec<FilterConditionRead> = proto
++            .filter_conditions
 +            .into_iter()
 +            .map(FilterConditionRead::try_from)
 +            .collect::<anyhow::Result<_>>()?;
@@ -1985,16 +2019,8 @@ index 4afa10e79..ef5272a6b 100644
 +    }
 +}
 +
- #[derive(Debug, Clone, Default)]
- struct SearchTermTries<T: Clone + Ord> {
-     terms: BTreeMap<FieldPath, Tries<T>>,
-@@ -1031,3 +1137,44 @@ pub fn tokenize(value: ConvexString) -> SearchValueTokens {
- 
-     SearchValueTokens::from(tokens)
- }
-+
 +#[cfg(test)]
-+mod funrun_proto_tests {
++mod tests {
 +    use std::str::FromStr;
 +
 +    use common::query::FilterValue;
@@ -2003,7 +2029,8 @@ index 4afa10e79..ef5272a6b 100644
 +        FieldPath,
 +    };
 +
-+    use super::{
++    use super::QueryReadsProto;
++    use crate::query::{
 +        FilterConditionRead,
 +        QueryReads,
 +        TextQueryTerm,
@@ -2026,10 +2053,10 @@ index 4afa10e79..ef5272a6b 100644
 +            )]
 +            .into(),
 +        );
-+        let (text_queries, filter_conditions) = reads.clone().to_proto();
-+        assert_eq!(text_queries.len(), 2);
-+        assert_eq!(filter_conditions.len(), 1);
-+        let decoded = QueryReads::from_proto(text_queries, filter_conditions).unwrap();
++        let proto = QueryReadsProto::from(reads.clone());
++        assert_eq!(proto.text_queries.len(), 2);
++        assert_eq!(proto.filter_conditions.len(), 1);
++        let decoded = QueryReads::try_from(proto).unwrap();
 +        assert_eq!(reads, decoded);
 +    }
 +}

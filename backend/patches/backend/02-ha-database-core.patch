@@ -1,5 +1,5 @@
 diff --git a/crates/database/src/committer.rs b/crates/database/src/committer.rs
-index 676ccc9ae..106c91341 100644
+index 13389625f..24d944134 100644
 --- a/crates/database/src/committer.rs
 +++ b/crates/database/src/committer.rs
 @@ -302,6 +302,7 @@ impl<RT: Runtime> Committer<RT> {
@@ -30,55 +30,11 @@ index 676ccc9ae..106c91341 100644
      pub async fn finish_search_and_vector_bootstrap(
          &self,
          bootstrapped_indexes: BootstrappedSearchIndexes,
-@@ -1554,7 +1551,10 @@ impl CommitterClient {
-         // This makes it resilient to the committer being full.
-         select_biased! {
-             result = self.sender.send(message).fuse() => {
--                result.map_err(|_| metrics::shutdown_error())?
-+                result.map_err(|_| {
-+                    anyhow::anyhow!(ErrorMetadata::misdirected_request())
-+                        .context("committer is unavailable; retry on the current leader")
-+                })?
-             },
-             _ = rt.wait(*SEND_COMMIT_MESSAGE_TIMEOUT_MILLIS) => {
-                 anyhow::bail!(metrics::committer_full_error());
 diff --git a/crates/database/src/database.rs b/crates/database/src/database.rs
-index 27693cbb2..c6c77d3b8 100644
+index c83eeb519..711263573 100644
 --- a/crates/database/src/database.rs
 +++ b/crates/database/src/database.rs
-@@ -59,6 +59,7 @@ use common::{
-         DATA_SYNC_PAGE_BYTES_LIMIT,
-         DATA_SYNC_PAGE_SIZE_LIMIT,
-         DEFAULT_DOCUMENTS_PAGE_SIZE,
-+        DOCUMENT_RETENTION_RATE_LIMIT,
-         LIST_SNAPSHOT_MAX_AGE_SECS,
-         PERSISTENCE_INDEX_ID_ALLOCATION_ENABLED,
-         SNAPSHOT_LIST_TIME_LIMIT,
-@@ -66,6 +67,7 @@ use common::{
-     pause::Fault,
-     persistence::{
-         new_idle_repeatable_ts,
-+        new_static_repeatable_recent,
-         ConflictStrategy,
-         DocumentLogEntry,
-         DocumentRevisionStream,
-@@ -86,6 +88,7 @@ use common::{
-         Order,
-     },
-     runtime::{
-+        new_rate_limiter,
-         tokio_spawn,
-         RateLimiter,
-         Runtime,
-@@ -133,6 +136,7 @@ use futures::{
-     TryFutureExt as _,
-     TryStreamExt,
- };
-+use governor::Quota;
- use imbl::OrdMap;
- use indexing::{
-     database_index_snapshot::{
-@@ -144,6 +148,7 @@ use indexing::{
+@@ -144,6 +144,7 @@ use indexing::{
          NoInMemoryIndexes,
      },
      index_cache::{
@@ -86,41 +42,36 @@ index 27693cbb2..c6c77d3b8 100644
          IndexCacheHandle,
          IndexCacheHandleBuilder,
      },
-@@ -203,6 +208,11 @@ use crate::{
+@@ -204,6 +205,7 @@ use crate::{
          bootstrap_system_tables,
          DEFAULT_BOOTSTRAP_TABLE_NUMBERS,
      },
-+    follower_tailer::{
-+        FollowerLogTailer,
-+        FollowerTailerClient,
-+        FollowerTailerHandle,
-+    },
++    follower_tailer::FollowerTailerHandle,
      metrics::{
          self,
          load_indexes_into_memory_timer,
-@@ -210,12 +220,19 @@ use crate::{
-         verify_invariants_timer,
-     },
-     retention::{
-+        FollowerRetentionManager,
-         LeaderRetentionManager,
+@@ -215,7 +217,10 @@ use crate::{
          LeaderRetentionWorkers,
      },
      schema_registry::SchemaRegistry,
 -    search_flusher_wake::SearchFlusherWakeSubscriber,
--    search_index_bootstrap::SearchIndexBootstrapWorker,
 +    search_flusher_wake::{
 +        SearchFlusherWakeSignals,
 +        SearchFlusherWakeSubscriber,
 +    },
-+    search_index_bootstrap::{
-+        bootstrap_search_indexes,
-+        SearchIndexBootstrapWorker,
-+    },
+     search_index_bootstrap::SearchIndexBootstrapWorker,
      snapshot_manager::{
          Snapshot,
-         SnapshotManager,
-@@ -310,9 +327,7 @@ const MAX_VECTOR_ATTEMPTS: u32 = 5;
+@@ -292,6 +297,8 @@ const MAX_OVERLOADED_BACKOFF: Duration = Duration::from_secs(30);
+ const INITIAL_VECTOR_BACKOFF: Duration = Duration::from_millis(150);
+ const MAX_VECTOR_BACKOFF: Duration = Duration::from_millis(2500);
+ // 150 * 2^5 ~= 5000 or 5 seconds total.
++mod ha;
++
+ const MAX_VECTOR_ATTEMPTS: u32 = 5;
+ 
+ /// Public entry point for interacting with the database.
+@@ -311,9 +318,7 @@ const MAX_VECTOR_ATTEMPTS: u32 = 5;
  /// See the diagram in `database/README.md` for more details.
  #[derive(Clone)]
  pub struct Database<RT: Runtime> {
@@ -131,7 +82,7 @@ index 27693cbb2..c6c77d3b8 100644
      snapshot_manager: Reader<SnapshotManager>,
      /// Table shapes maintained asynchronously by the `TableSummaryWorker`,
      /// `None` until the worker has published for the first time.
-@@ -320,11 +335,8 @@ pub struct Database<RT: Runtime> {
+@@ -321,11 +326,8 @@ pub struct Database<RT: Runtime> {
      pub(crate) runtime: RT,
      reader: Arc<dyn PersistenceReader>,
      write_commits_since_load: Arc<AtomicUsize>,
@@ -143,7 +94,7 @@ index 27693cbb2..c6c77d3b8 100644
      virtual_system_mapping: VirtualSystemMapping,
      pub bootstrap_metadata: BootstrapMetadata,
      invalidation_callback: InvalidationMetricCallback,
-@@ -335,6 +347,20 @@ pub struct Database<RT: Runtime> {
+@@ -336,6 +338,20 @@ pub struct Database<RT: Runtime> {
      component_paths_snapshot_cache: AsyncLru<RT, Timestamp, BTreeMap<ComponentId, ComponentPath>>,
      list_snapshot_table_iterator_cache:
          Arc<tokio::sync::Mutex<Option<ListSnapshotTableIteratorCacheEntry<RT>>>>,
@@ -164,33 +115,7 @@ index 27693cbb2..c6c77d3b8 100644
  }
  
  struct ListSnapshotTableIteratorCacheEntry<RT: Runtime> {
-@@ -413,6 +439,25 @@ pub struct BootstrapMetadata {
- }
- 
- impl<RT: Runtime> DatabaseSnapshot<RT> {
-+    pub async fn load_search_indexes(&mut self) -> anyhow::Result<()> {
-+        let persistence = RepeatablePersistence::new(
-+            self.persistence_reader.clone(),
-+            self.ts,
-+            self.retention_validator.clone(),
-+        );
-+        let indexes = bootstrap_search_indexes(
-+            self.snapshot.index_registry.clone(),
-+            &persistence,
-+            self.snapshot
-+                .table_mapping()
-+                .namespace(TableNamespace::Global),
-+        )
-+        .await?;
-+        self.snapshot.text_indexes = indexes.text_index_manager;
-+        self.snapshot.vector_indexes = indexes.vector_index_manager;
-+        Ok(())
-+    }
-+
-     pub async fn max_ts(reader: &dyn PersistenceReader) -> anyhow::Result<Timestamp> {
-         reader
-             .max_ts()
-@@ -1084,6 +1129,7 @@ impl<RT: Runtime> Database<RT> {
+@@ -1111,6 +1127,7 @@ impl<RT: Runtime> Database<RT> {
          let invalidation_callback = InvalidationMetricCallback::new();
          let subscriptions =
              SubscriptionsWorker::start(log_owner, runtime.clone(), invalidation_callback.clone());
@@ -198,7 +123,7 @@ index 27693cbb2..c6c77d3b8 100644
          let committer = Committer::start(
              log_writer,
              snapshot_writer,
-@@ -1094,6 +1140,7 @@ impl<RT: Runtime> Database<RT> {
+@@ -1121,6 +1138,7 @@ impl<RT: Runtime> Database<RT> {
              virtual_system_mapping.clone(),
              index_cache_handle.clone(),
              deployment_name,
@@ -206,7 +131,7 @@ index 27693cbb2..c6c77d3b8 100644
          );
          let table_mapping_snapshot_cache =
              AsyncLru::new(runtime.clone(), 20, 2, 200, "table_mapping_snapshot");
-@@ -1103,19 +1150,22 @@ impl<RT: Runtime> Database<RT> {
+@@ -1130,19 +1148,22 @@ impl<RT: Runtime> Database<RT> {
              AsyncLru::new(runtime.clone(), 20, 2, 200, "component_paths_snapshot");
          let list_snapshot_table_iterator_cache = Arc::new(tokio::sync::Mutex::new(None));
          let database = Self {
@@ -235,7 +160,7 @@ index 27693cbb2..c6c77d3b8 100644
              virtual_system_mapping,
              bootstrap_metadata,
              invalidation_callback,
-@@ -1123,11 +1173,289 @@ impl<RT: Runtime> Database<RT> {
+@@ -1150,6 +1171,10 @@ impl<RT: Runtime> Database<RT> {
              by_id_indexes_snapshot_cache,
              component_paths_snapshot_cache,
              list_snapshot_table_iterator_cache,
@@ -246,8 +171,223 @@ index 27693cbb2..c6c77d3b8 100644
          };
  
          Ok(database)
+@@ -1221,45 +1246,64 @@ impl<RT: Runtime> Database<RT> {
+         Ok(Some(Arc::new(snapshot.into())))
      }
  
+-    pub fn start_search_and_vector_bootstrap(&self) -> Box<dyn SpawnHandle> {
+-        let worker = self.new_search_and_vector_bootstrap_worker();
+-        self.runtime
++    pub fn start_search_and_vector_bootstrap(&self) -> anyhow::Result<Box<dyn SpawnHandle>> {
++        let worker = self.new_search_and_vector_bootstrap_worker()?;
++        Ok(self
++            .runtime
+             .spawn("search_and_vector_bootstrap", async move {
+                 worker.start().await
+-            })
++            }))
+     }
+ 
+     pub async fn finish_table_summary_bootstrap(&self) -> anyhow::Result<()> {
+-        self.committer.finish_table_summary_bootstrap().await
++        self.committer()?.finish_table_summary_bootstrap().await
+     }
+ 
+-    fn new_search_and_vector_bootstrap_worker(&self) -> SearchIndexBootstrapWorker<RT> {
++    fn new_search_and_vector_bootstrap_worker(
++        &self,
++    ) -> anyhow::Result<SearchIndexBootstrapWorker<RT>> {
+         let (ts, snapshot) = self.snapshot_manager.lock().latest();
+         let vector_persistence =
+             RepeatablePersistence::new(self.reader.clone(), ts, self.retention_validator());
+         let table_mapping = snapshot.table_mapping().namespace(TableNamespace::Global);
+-        SearchIndexBootstrapWorker::new(
++        Ok(SearchIndexBootstrapWorker::new(
+             self.runtime.clone(),
+             snapshot.index_registry,
+             vector_persistence,
+             table_mapping,
+-            self.committer.clone(),
+-        )
++            self.committer()?,
++        ))
+     }
+ 
+     pub async fn shutdown(&self) -> anyhow::Result<()> {
+-        self.committer.shutdown();
+-        self.subscriptions.shutdown();
+-        if let Some(handle) = &self.index_cache_handle {
++        drop(self.lease_watch_handle.lock().take());
++        let (committer, subscriptions, retention_workers) = {
++            let leader_state = self.leader_state.read();
++            (
++                leader_state.committer.clone(),
++                leader_state.subscriptions.clone(),
++                leader_state.retention_workers.clone(),
++            )
++        };
++        if let Some(committer) = &committer {
++            committer.shutdown();
++        }
++        subscriptions.shutdown();
++        if let Some(handle) = self.index_cache_handle() {
+             handle.remove_deployment();
+         }
+-        self.retention_workers.shutdown().await?;
++        if let Some(retention_workers) = &retention_workers {
++            retention_workers.shutdown().await?;
++        }
++        if let Some(handle) = self.follower_tailer_handle.lock().await.take() {
++            handle.shutdown().await?;
++        }
+         tracing::info!("Database shutdown");
+         Ok(())
+     }
+ 
+     pub fn retention_validator(&self) -> Arc<dyn RetentionValidator> {
+-        self.retention_manager.clone()
++        self.leader_state.read().retention_manager.clone()
+     }
+ 
+     /// Load the set of documents and tombstones in the given table between
+@@ -1763,7 +1807,7 @@ impl<RT: Runtime> Database<RT> {
+             };
+             let mut reader = Arc::new(persistence_snapshot) as Arc<dyn IndexReader>;
+             if let Some(snapshot) = snapshot
+-                && let Some(handle) = self.index_cache_handle.clone()
++                && let Some(handle) = self.index_cache_handle()
+             {
+                 // TODO: it is probably OK to still use the index cache even if
+                 // we don't have an index_registry at the same timestamp.
+@@ -2027,11 +2071,11 @@ impl<RT: Runtime> Database<RT> {
+                     RepeatablePersistence::new(
+                         self.reader.clone(),
+                         repeatable_ts,
+-                        self.retention_manager.clone(),
++                        self.retention_validator(),
+                     )
+                     .read_snapshot(repeatable_ts)?,
+                 ),
+-                self.index_cache_handle.clone(),
++                self.index_cache_handle(),
+                 index_cache,
+             ),
+             Arc::new(TextIndexManagerSnapshot::new(
+@@ -2096,7 +2140,7 @@ impl<RT: Runtime> Database<RT> {
+             snapshot,
+             table_summaries: None,
+             persistence_snapshot: repeatable_persistence.read_snapshot(ts)?,
+-            index_cache_handle: self.index_cache_handle.clone(),
++            index_cache_handle: self.index_cache_handle(),
+             persistence_reader: self.reader.clone(),
+             retention_validator: self.retention_validator(),
+         })
+@@ -2118,7 +2162,7 @@ impl<RT: Runtime> Database<RT> {
+         task::consume_budget().await;
+         let readonly = transaction.is_readonly();
+         let result = self
+-            .committer
++            .committer()?
+             .commit(transaction, write_source.into())
+             .await?;
+         if !readonly {
+@@ -2132,7 +2176,7 @@ impl<RT: Runtime> Database<RT> {
+         &self,
+         tables: BTreeSet<TableName>,
+     ) -> anyhow::Result<()> {
+-        self.committer.load_indexes_into_memory(tables).await
++        self.committer()?.load_indexes_into_memory(tables).await
+     }
+ 
+     pub fn write_commits_since_load(&self) -> usize {
+@@ -2143,14 +2187,16 @@ impl<RT: Runtime> Database<RT> {
+     /// N.B. Only use this function for user subscriptions. System subscriptions
+     /// should use `subscribe_and_wait_for_invalidation`.
+     pub async fn subscribe(&self, token: Token) -> anyhow::Result<Subscription> {
+-        self.subscriptions.subscribe(token, false)
++        let leader_state = self.leader_state.read();
++        Self::committer_of(&leader_state)?;
++        leader_state.subscriptions.subscribe(token, false)
+     }
+ 
+     pub async fn subscribe_and_wait_for_invalidation(
+         &self,
+         token: Token,
+     ) -> anyhow::Result<Option<Timestamp>> {
+-        let subscription = self.subscriptions.subscribe(token, true)?;
++        let subscription = self.subscriptions().subscribe(token, true)?;
+         let invalid_ts = subscription.wait_for_invalidation().await;
+         let current_ts = self.now_ts_for_reads();
+         metrics::log_subscription_invalidation_lag(invalid_ts, *current_ts);
+@@ -2604,11 +2650,11 @@ impl<RT: Runtime> Database<RT> {
+         ts: Timestamp,
+     ) -> anyhow::Result<Result<Token, Option<Timestamp>>> {
+         let _timer = metrics::refresh_token_timer();
+-        self.log.refresh_token(token, ts)
++        self.log().refresh_token(token, ts)
+     }
+ 
+-    pub fn log(&self) -> &LogReader {
+-        &self.log
++    pub fn log(&self) -> LogReader {
++        self.leader_state.read().log.clone()
+     }
+ 
+     pub fn memory_consistency_check(&self) -> anyhow::Result<()> {
+@@ -2761,7 +2807,7 @@ impl<RT: Runtime> Database<RT> {
+         &self,
+         search_type: SearchType,
+     ) -> SearchFlusherWakeSubscriber {
+-        self.committer.search_flusher_wake().subscribe(search_type)
++        self.search_flusher_wake.subscribe(search_type)
+     }
+ }
+ 
+diff --git a/crates/database/src/database/ha.rs b/crates/database/src/database/ha.rs
+new file mode 100644
+index 000000000..c154b7d58
+--- /dev/null
++++ b/crates/database/src/database/ha.rs
+@@ -0,0 +1,335 @@
++use common::{
++    knobs::DOCUMENT_RETENTION_RATE_LIMIT,
++    persistence::new_static_repeatable_recent,
++    runtime::new_rate_limiter,
++};
++use governor::Quota;
++
++use super::*;
++use crate::{
++    follower_tailer::{
++        FollowerLogTailer,
++        FollowerTailerClient,
++    },
++    retention::FollowerRetentionManager,
++    search_index_bootstrap::bootstrap_search_indexes,
++};
++
++impl<RT: Runtime> DatabaseSnapshot<RT> {
++    pub async fn load_search_indexes(&mut self) -> anyhow::Result<()> {
++        let persistence = RepeatablePersistence::new(
++            self.persistence_reader.clone(),
++            self.ts,
++            self.retention_validator.clone(),
++        );
++        let indexes = bootstrap_search_indexes(
++            self.snapshot.index_registry.clone(),
++            &persistence,
++            self.snapshot
++                .table_mapping()
++                .namespace(TableNamespace::Global),
++        )
++        .await?;
++        self.snapshot.text_indexes = indexes.text_index_manager;
++        self.snapshot.vector_indexes = indexes.vector_index_manager;
++        Ok(())
++    }
++}
++
++impl<RT: Runtime> Database<RT> {
 +    #[fastrace::trace]
 +    pub async fn load_follower(
 +        reader: Arc<dyn PersistenceReader>,
@@ -522,207 +662,34 @@ index 27693cbb2..c6c77d3b8 100644
 +        drop(old_handle);
 +    }
 +
-     /// Sets the invalidation callback for tracking which mutations invalidate
-     /// subscriptions. Must be called after `load` and before any subscriptions
-     /// are invalidated.
-@@ -1194,45 +1522,76 @@ impl<RT: Runtime> Database<RT> {
-         Ok(Some(Arc::new(snapshot.into())))
-     }
- 
--    pub fn start_search_and_vector_bootstrap(&self) -> Box<dyn SpawnHandle> {
--        let worker = self.new_search_and_vector_bootstrap_worker();
--        self.runtime
-+    pub fn start_search_and_vector_bootstrap(&self) -> anyhow::Result<Box<dyn SpawnHandle>> {
-+        let worker = self.new_search_and_vector_bootstrap_worker()?;
-+        Ok(self
-+            .runtime
-             .spawn("search_and_vector_bootstrap", async move {
-                 worker.start().await
--            })
-+            }))
-+    }
-+
-+    fn committer(&self) -> anyhow::Result<CommitterClient> {
++    pub(super) fn committer(&self) -> anyhow::Result<CommitterClient> {
 +        Self::committer_of(&self.leader_state.read())
 +    }
 +
-+    fn committer_of(leader_state: &DatabaseLeaderState) -> anyhow::Result<CommitterClient> {
++    pub(super) fn committer_of(
++        leader_state: &DatabaseLeaderState,
++    ) -> anyhow::Result<CommitterClient> {
 +        leader_state
 +            .committer
 +            .clone()
 +            .context(ErrorMetadata::misdirected_request())
 +            .context("write attempted on follower (no committer)")
-     }
- 
-     pub async fn finish_table_summary_bootstrap(&self) -> anyhow::Result<()> {
--        self.committer.finish_table_summary_bootstrap().await
-+        self.committer()?.finish_table_summary_bootstrap().await
-     }
- 
--    fn new_search_and_vector_bootstrap_worker(&self) -> SearchIndexBootstrapWorker<RT> {
-+    fn new_search_and_vector_bootstrap_worker(
-+        &self,
-+    ) -> anyhow::Result<SearchIndexBootstrapWorker<RT>> {
-         let (ts, snapshot) = self.snapshot_manager.lock().latest();
-         let vector_persistence =
-             RepeatablePersistence::new(self.reader.clone(), ts, self.retention_validator());
-         let table_mapping = snapshot.table_mapping().namespace(TableNamespace::Global);
--        SearchIndexBootstrapWorker::new(
-+        Ok(SearchIndexBootstrapWorker::new(
-             self.runtime.clone(),
-             snapshot.index_registry,
-             vector_persistence,
-             table_mapping,
--            self.committer.clone(),
--        )
-+            self.committer()?,
-+        ))
-     }
- 
-     pub async fn shutdown(&self) -> anyhow::Result<()> {
--        self.committer.shutdown();
--        self.subscriptions.shutdown();
--        if let Some(handle) = &self.index_cache_handle {
-+        drop(self.lease_watch_handle.lock().take());
-+        let (committer, subscriptions, retention_workers) = {
-+            let leader_state = self.leader_state.read();
-+            (
-+                leader_state.committer.clone(),
-+                leader_state.subscriptions.clone(),
-+                leader_state.retention_workers.clone(),
-+            )
-+        };
-+        if let Some(committer) = &committer {
-+            committer.shutdown();
-+        }
-+        subscriptions.shutdown();
-+        if let Some(handle) = self.index_cache_handle() {
-             handle.remove_deployment();
-         }
--        self.retention_workers.shutdown().await?;
-+        if let Some(retention_workers) = &retention_workers {
-+            retention_workers.shutdown().await?;
-+        }
-+        if let Some(handle) = self.follower_tailer_handle.lock().await.take() {
-+            handle.shutdown().await?;
-+        }
-         tracing::info!("Database shutdown");
-         Ok(())
-     }
- 
-     pub fn retention_validator(&self) -> Arc<dyn RetentionValidator> {
--        self.retention_manager.clone()
-+        self.leader_state.read().retention_manager.clone()
-     }
- 
-     /// Load the set of documents and tombstones in the given table between
-@@ -1705,7 +2064,7 @@ impl<RT: Runtime> Database<RT> {
-                     .read_snapshot(ts)?;
-             let mut reader = Arc::new(persistence_snapshot) as Arc<dyn IndexReader>;
-             if let Some(snapshot) = snapshot
--                && let Some(handle) = self.index_cache_handle.clone()
-+                && let Some(handle) = self.index_cache_handle()
-             {
-                 // TODO: it is probably OK to still use the index cache even if
-                 // we don't have an index_registry at the same timestamp.
-@@ -1969,11 +2328,11 @@ impl<RT: Runtime> Database<RT> {
-                     RepeatablePersistence::new(
-                         self.reader.clone(),
-                         repeatable_ts,
--                        self.retention_manager.clone(),
-+                        self.retention_validator(),
-                     )
-                     .read_snapshot(repeatable_ts)?,
-                 ),
--                self.index_cache_handle.clone(),
-+                self.index_cache_handle(),
-                 index_cache,
-             ),
-             Arc::new(TextIndexManagerSnapshot::new(
-@@ -2038,7 +2397,7 @@ impl<RT: Runtime> Database<RT> {
-             snapshot,
-             table_summaries: None,
-             persistence_snapshot: repeatable_persistence.read_snapshot(ts)?,
--            index_cache_handle: self.index_cache_handle.clone(),
-+            index_cache_handle: self.index_cache_handle(),
-             persistence_reader: self.reader.clone(),
-             retention_validator: self.retention_validator(),
-         })
-@@ -2060,7 +2419,7 @@ impl<RT: Runtime> Database<RT> {
-         task::consume_budget().await;
-         let readonly = transaction.is_readonly();
-         let result = self
--            .committer
-+            .committer()?
-             .commit(transaction, write_source.into())
-             .await?;
-         if !readonly {
-@@ -2074,7 +2433,7 @@ impl<RT: Runtime> Database<RT> {
-         &self,
-         tables: BTreeSet<TableName>,
-     ) -> anyhow::Result<()> {
--        self.committer.load_indexes_into_memory(tables).await
-+        self.committer()?.load_indexes_into_memory(tables).await
-     }
- 
-     pub fn write_commits_since_load(&self) -> usize {
-@@ -2085,14 +2444,16 @@ impl<RT: Runtime> Database<RT> {
-     /// N.B. Only use this function for user subscriptions. System subscriptions
-     /// should use `subscribe_and_wait_for_invalidation`.
-     pub async fn subscribe(&self, token: Token) -> anyhow::Result<Subscription> {
--        self.subscriptions.subscribe(token, false)
-+        let leader_state = self.leader_state.read();
-+        Self::committer_of(&leader_state)?;
-+        leader_state.subscriptions.subscribe(token, false)
-     }
- 
-     pub async fn subscribe_and_wait_for_invalidation(
-         &self,
-         token: Token,
-     ) -> anyhow::Result<Option<Timestamp>> {
--        let subscription = self.subscriptions.subscribe(token, true)?;
-+        let subscription = self.subscriptions().subscribe(token, true)?;
-         let invalid_ts = subscription.wait_for_invalidation().await;
-         let current_ts = self.now_ts_for_reads();
-         metrics::log_subscription_invalidation_lag(invalid_ts, *current_ts);
-@@ -2546,11 +2907,19 @@ impl<RT: Runtime> Database<RT> {
-         ts: Timestamp,
-     ) -> anyhow::Result<Result<Token, Option<Timestamp>>> {
-         let _timer = metrics::refresh_token_timer();
--        self.log.refresh_token(token, ts)
-+        self.log().refresh_token(token, ts)
 +    }
 +
-+    pub fn log(&self) -> LogReader {
-+        self.leader_state.read().log.clone()
-+    }
-+
-+    fn subscriptions(&self) -> SubscriptionsClient {
++    pub(super) fn subscriptions(&self) -> SubscriptionsClient {
 +        self.leader_state.read().subscriptions.clone()
-     }
- 
--    pub fn log(&self) -> &LogReader {
--        &self.log
-+    fn index_cache_handle(&self) -> Option<IndexCacheHandle> {
++    }
++
++    pub(super) fn index_cache_handle(&self) -> Option<IndexCacheHandle> {
 +        self.leader_state.read().index_cache_handle.clone()
-     }
- 
-     pub fn memory_consistency_check(&self) -> anyhow::Result<()> {
-@@ -2703,7 +3072,7 @@ impl<RT: Runtime> Database<RT> {
-         &self,
-         search_type: SearchType,
-     ) -> SearchFlusherWakeSubscriber {
--        self.committer.search_flusher_wake().subscribe(search_type)
-+        self.search_flusher_wake.subscribe(search_type)
-     }
- }
- 
++    }
++}
 diff --git a/crates/database/src/follower_tailer.rs b/crates/database/src/follower_tailer.rs
 new file mode 100644
-index 000000000..b095b5450
+index 000000000..e0d634bc9
 --- /dev/null
 +++ b/crates/database/src/follower_tailer.rs
-@@ -0,0 +1,496 @@
+@@ -0,0 +1,495 @@
 +use std::{
 +    ops::Bound,
 +    sync::Arc,
@@ -731,7 +698,7 @@ index 000000000..b095b5450
 +
 +use anyhow::Context;
 +use common::{
-+    document::DocumentUpdate,
++    document::DocumentUpdateWithPrevTs,
 +    errors::{
 +        is_transient_db_error,
 +        report_error,
@@ -832,18 +799,14 @@ index 000000000..b095b5450
 +
 +pub struct FollowerTailerHandle {
 +    pub(crate) client: FollowerTailerClient,
-+    promote_tx: Option<oneshot::Sender<PromoteRequest>>,
++    promote_tx: oneshot::Sender<PromoteRequest>,
 +    join: Box<dyn SpawnHandle>,
 +}
 +
 +impl FollowerTailerHandle {
-+    pub async fn promote(mut self) -> anyhow::Result<PromotedTailerState> {
-+        let promote_tx = self
-+            .promote_tx
-+            .take()
-+            .context("follower tailer already asked to promote")?;
++    pub async fn promote(self) -> anyhow::Result<PromotedTailerState> {
 +        let (reply_tx, reply_rx) = oneshot::channel();
-+        promote_tx
++        self.promote_tx
 +            .send(reply_tx)
 +            .ok()
 +            .context("follower tailer exited before promotion handshake")?;
@@ -854,8 +817,8 @@ index 000000000..b095b5450
 +        Ok(state)
 +    }
 +
-+    pub async fn shutdown(mut self) -> anyhow::Result<()> {
-+        drop(self.promote_tx.take());
++    pub async fn shutdown(self) -> anyhow::Result<()> {
++        drop(self.promote_tx);
 +        self.join.shutdown_and_join().await
 +    }
 +}
@@ -900,7 +863,7 @@ index 000000000..b095b5450
 +                demand: demand_tx,
 +                progress: progress_rx,
 +            },
-+            promote_tx: Some(promote_tx),
++            promote_tx,
 +            join,
 +        }
 +    }
@@ -1184,9 +1147,12 @@ index 000000000..b095b5450
 +            let table_number = new_snapshot.table_mapping().tablet_number(tablet_id)?;
 +            let id = rp.id.to_resolved(table_number);
 +            write_bytes += rp.document().map_or(0, |d| d.size() as u64);
-+            let update = DocumentUpdate {
++            let update = DocumentUpdateWithPrevTs {
 +                id,
-+                old_document: rp.prev_document().cloned(),
++                old_document: rp
++                    .prev_rev
++                    .as_ref()
++                    .and_then(|prev| prev.document.clone().map(|document| (document, prev.ts))),
 +                new_document: rp.document().cloned(),
 +            };
 +            new_snapshot.update(&update, ts)?;

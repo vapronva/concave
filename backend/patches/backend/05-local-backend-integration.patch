@@ -1,8 +1,8 @@
 diff --git a/crates/db_connection/src/lib.rs b/crates/db_connection/src/lib.rs
-index fc2a1bc8b..42f44694d 100644
+index fc2a1bc8b..b7f223842 100644
 --- a/crates/db_connection/src/lib.rs
 +++ b/crates/db_connection/src/lib.rs
-@@ -233,6 +233,40 @@ pub async fn connect_persistence_reader<RT: Runtime>(
+@@ -233,6 +233,42 @@ pub async fn connect_persistence_reader<RT: Runtime>(
      }
  }
  
@@ -36,7 +36,9 @@ index fc2a1bc8b..42f44694d 100644
 +            };
 +            PostgresPersistence::schema_initialized(pool, reader_options).await
 +        },
-+        _ => anyhow::bail!("the boot-role probe requires a Postgres persistence backend"),
++        PersistenceSeed::Sqlite { .. } | PersistenceSeed::MySql { .. } => {
++            anyhow::bail!("the boot-role probe requires a Postgres persistence backend")
++        },
 +    }
 +}
 +
@@ -1004,65 +1006,6 @@ index 427497fc2..53940ca07 100644
              Some(v) => v.to_str().context("Convex-Root-Request must be a string")? == "true",
              None => false,
          };
-diff --git a/crates/local_backend/src/proxy.rs b/crates/local_backend/src/proxy.rs
-index 0ea3363be..d401785cc 100644
---- a/crates/local_backend/src/proxy.rs
-+++ b/crates/local_backend/src/proxy.rs
-@@ -1,6 +1,10 @@
--use std::net::SocketAddr;
-+use std::{
-+    net::SocketAddr,
-+    sync::LazyLock,
-+};
- 
- use axum::{
-+    body::Body,
-     extract::{
-         Request,
-         State,
-@@ -15,9 +19,21 @@ use common::{
-         HttpResponseError,
-         NoopRouteMapper,
-     },
--    knobs::HTTP_SERVER_TIMEOUT_DURATION,
-+    knobs::{
-+        HTTP_SERVER_MAX_CONCURRENT_REQUESTS,
-+        HTTP_SERVER_TIMEOUT_DURATION,
-+    },
- };
--use hyper_util::rt::TokioExecutor;
-+use hyper_util::{
-+    client::legacy::{
-+        connect::HttpConnector,
-+        Client,
-+    },
-+    rt::TokioExecutor,
-+};
-+
-+static PROXY_CLIENT: LazyLock<Client<HttpConnector, Body>> =
-+    LazyLock::new(|| Client::builder(TokioExecutor::new()).build_http());
- 
- /// Routes HTTP actions to the main webserver
- pub async fn dev_site_proxy(
-@@ -37,8 +53,7 @@ pub async fn dev_site_proxy(
-     ) -> Result<impl IntoResponse, HttpResponseError> {
-         let new_uri = format!("{}{}", site_forward_prefix, request.uri());
-         *request.uri_mut() = new_uri.parse().map_err(anyhow::Error::new)?;
--        let resp = hyper_util::client::legacy::Client::builder(TokioExecutor::new())
--            .build_http()
-+        let resp = PROXY_CLIENT
-             .request(request)
-             .await
-             .map_err(anyhow::Error::new)?;
-@@ -60,7 +75,7 @@ pub async fn dev_site_proxy(
-         Router::new().fallback_service(router),
-         "backend_http_proxy",
-         "unknown".to_string(),
--        4,
-+        *HTTP_SERVER_MAX_CONCURRENT_REQUESTS,
-         *HTTP_SERVER_TIMEOUT_DURATION,
-         NoopRouteMapper,
-     );
 diff --git a/self-hosted/docker-build/read_credentials.sh b/self-hosted/docker-build/read_credentials.sh
 index f7a79d85a..081c8f173 100644
 --- a/self-hosted/docker-build/read_credentials.sh

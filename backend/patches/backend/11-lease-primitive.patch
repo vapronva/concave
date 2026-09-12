@@ -1,8 +1,8 @@
 diff --git a/crates/common/src/persistence/mod.rs b/crates/common/src/persistence/mod.rs
-index 5ec3445b3..3f519452a 100644
+index d5e1ea6e9..70563bcf8 100644
 --- a/crates/common/src/persistence/mod.rs
 +++ b/crates/common/src/persistence/mod.rs
-@@ -326,6 +326,22 @@ pub trait Persistence: Sync + Send + 'static {
+@@ -341,6 +341,22 @@ pub trait Persistence: Sync + Send + 'static {
      async fn finish_loading(&self) -> anyhow::Result<()> {
          Ok(())
      }
@@ -25,7 +25,7 @@ index 5ec3445b3..3f519452a 100644
  }
  
  #[derive(Debug, Clone, Copy)]
-@@ -605,7 +621,6 @@ pub trait PersistenceReader: Send + Sync + 'static {
+@@ -620,7 +636,6 @@ pub trait PersistenceReader: Send + Sync + 'static {
      async fn table_size_stats(&self) -> anyhow::Result<Vec<PersistenceTableSize>> {
          Ok(vec![])
      }
@@ -34,10 +34,10 @@ index 5ec3445b3..3f519452a 100644
  
  /// Timestamp that is repeatable because the caller is holding the lease and
 diff --git a/crates/postgres/src/lib.rs b/crates/postgres/src/lib.rs
-index 0d0691d42..b27da2ea9 100644
+index 35df19ff7..c07ce57c4 100644
 --- a/crates/postgres/src/lib.rs
 +++ b/crates/postgres/src/lib.rs
-@@ -468,6 +468,41 @@ impl PostgresPersistence {
+@@ -469,6 +469,41 @@ impl PostgresPersistence {
              .await?
              .is_none())
      }
@@ -79,7 +79,7 @@ index 0d0691d42..b27da2ea9 100644
  }
  
  #[async_trait]
-@@ -524,6 +559,18 @@ impl Persistence for PostgresPersistence {
+@@ -525,6 +560,18 @@ impl Persistence for PostgresPersistence {
          })
      }
  
@@ -98,7 +98,7 @@ index 0d0691d42..b27da2ea9 100644
      #[fastrace::trace]
      async fn write<'a>(
          &self,
-@@ -1782,27 +1829,27 @@ impl Lease {
+@@ -1783,27 +1830,27 @@ impl Lease {
              .as_nanos() as i64;
  
          tracing::info!("attempting to acquire lease");
@@ -140,7 +140,7 @@ index 0d0691d42..b27da2ea9 100644
              schema: schema.clone(),
              instance_name,
              multitenant,
-@@ -1810,6 +1857,32 @@ impl Lease {
+@@ -1811,6 +1858,32 @@ impl Lease {
          })
      }
  
