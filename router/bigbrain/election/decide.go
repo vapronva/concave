@@ -59,6 +59,10 @@ func anyTransitioning(obs []observation) bool {
 	return slices.ContainsFunc(obs, isTransitioning)
 }
 
+func isPromotable(o observation) bool {
+	return o.reach && !o.status.IsLeader && !isTransitioning(o)
+}
+
 func incumbentDiscoveredUnreachable(obs []observation, incumbent string) bool {
 	if incumbent == "" {
 		return false
@@ -105,7 +109,7 @@ func bestCandidate(obs []observation) (observation, bool) {
 	var best observation
 	var found bool
 	for _, o := range obs {
-		if !o.reach || o.status.IsLeader || isTransitioning(o) {
+		if !isPromotable(o) {
 			continue
 		}
 		if !found || morePreferredCandidate(o, best) {
@@ -145,6 +149,7 @@ func decide(obs []observation, p decideParams) decision {
 	d := decision{liveLeaderCount: len(claims), hasTransitioning: anyTransitioning(obs)}
 	if len(claims) == 0 {
 		d.incumbentUnreachable = incumbentDiscoveredUnreachable(obs, p.incumbent)
+		d.failbackState = retainedFailback(obs, p.failback.prior)
 		if d.hasTransitioning {
 			return d
 		}
@@ -162,10 +167,20 @@ func decide(obs []observation, p decideParams) decision {
 	}
 	if len(claims) == 1 {
 		fb, st := evaluateFailback(obs, leader, p.failback)
-		d.failbackTarget = fb
 		d.failbackState = st
+		if !d.hasTransitioning {
+			d.failbackTarget = fb
+		}
 	}
 	return d
+}
+
+func retainedFailback(obs []observation, prior failbackState) failbackState {
+	isCandidate := func(o observation) bool { return o.be.Pod == prior.candidate && isPromotable(o) }
+	if slices.ContainsFunc(obs, isCandidate) {
+		return prior
+	}
+	return failbackState{}
 }
 
 func evaluateFailback(
@@ -199,7 +214,7 @@ func bestFailbackCandidate(
 	var best observation
 	var found bool
 	for _, o := range obs {
-		if !o.reach || o.status.IsLeader || isTransitioning(o) {
+		if !isPromotable(o) {
 			continue
 		}
 		if o.be.Pod == leader.be.Pod {

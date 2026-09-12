@@ -3,7 +3,6 @@ package insights
 import (
 	"encoding/json"
 	"errors"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -18,7 +17,7 @@ const (
 	groupSep                   = "\x1f"
 	maxRecentPerGroup          = 50
 	inclusiveEndHours          = 24
-	occKeyPartsCount           = 3
+	occKeyPartsCount           = 4
 	readKeyPartsCount          = 2
 	kindOCC                    = "occ"
 	kindRead                   = "read"
@@ -40,7 +39,6 @@ const (
 var ErrBadDateRange = errors.New("from must be on or before to")
 
 type Row struct {
-	Deployment           string
 	TS                   time.Time
 	Kind                 string
 	UDFID                string
@@ -97,7 +95,7 @@ func (i *Insights) Ingest(deployment string, limits ReadLimits, events []AnyEven
 	kept := 0
 	for _, ev := range events {
 		for k, payload := range ev {
-			row, ok := makeRow(deployment, k, payload)
+			row, ok := makeRow(k, payload)
 			if !ok {
 				continue
 			}
@@ -173,18 +171,13 @@ func aggregateOCC(rows []Row) [][]any {
 	out := make([][]any, 0, len(groups))
 	for key, grp := range groups {
 		parts := strings.SplitN(key, groupSep, occKeyPartsCount)
-		udfID, comp, occTable := parts[0], parts[1], parts[2]
-		out = append(out, buildOCCRow(udfID, comp, occTable, grp))
+		udfID, comp, occTable, kind := parts[0], parts[1], parts[2], parts[3]
+		out = append(out, buildOCCRow(udfID, comp, occTable, kind, grp))
 	}
 	return out
 }
 
-func buildOCCRow(udfID, comp, occTable string, grp []Row) []any {
-	permanently := slices.ContainsFunc(grp, func(r Row) bool { return r.OCCFailedPermanently })
-	kind := kindOCCRetried
-	if permanently {
-		kind = kindOCCFailedPermanent
-	}
+func buildOCCRow(udfID, comp, occTable, kind string, grp []Row) []any {
 	hourly := bucket(timestampsOf(grp))
 	sort.Slice(grp, func(i, j int) bool { return grp[i].TS.After(grp[j].TS) })
 	occCalls := len(grp)
@@ -226,7 +219,11 @@ func groupByOCC(rows []Row) map[string][]Row {
 		}
 		comp := derefOr(r.ComponentPath, rootComponent)
 		occTbl := derefOr(r.OCCTableName, "")
-		key := r.UDFID + groupSep + comp + groupSep + occTbl
+		kind := kindOCCRetried
+		if r.OCCFailedPermanently {
+			kind = kindOCCFailedPermanent
+		}
+		key := strings.Join([]string{r.UDFID, comp, occTbl, kind}, groupSep)
 		g[key] = append(g[key], r)
 	}
 	return g
@@ -238,50 +235,80 @@ func aggregateRead(rows []Row, limits ReadLimits) [][]any {
 	for key, grp := range groups {
 		parts := strings.SplitN(key, groupSep, readKeyPartsCount)
 		udfID, comp := parts[0], parts[1]
-		maxBytes, maxDocs := readMaxes(grp)
-		hourly := bucket(timestampsOf(grp))
-		count := len(grp)
-		sort.Slice(grp, func(i, j int) bool { return grp[i].TS.After(grp[j].TS) })
-		if len(grp) > maxRecentPerGroup {
-			grp = grp[:maxRecentPerGroup]
+		bytes := readDimension{
+			limit:         limits.Bytes,
+			measure:       bytesRead,
+			kindLimit:     kindBytesReadLimit,
+			kindThreshold: kindBytesReadThreshold,
 		}
-		recent := readRecent(grp)
-		emit := func(kind string) {
-			body := map[string]any{
-				"count":        count,
-				"hourlyCounts": hourly,
-				"recentEvents": recent,
+		docs := readDimension{
+			limit:         limits.Documents,
+			measure:       documentsRead,
+			kindLimit:     kindDocumentsReadLimit,
+			kindThreshold: kindDocumentsReadThreshold,
+		}
+		for _, dim := range []readDimension{bytes, docs} {
+			if row, ok := dim.row(udfID, comp, grp); ok {
+				out = append(out, row)
 			}
-			out = append(out, []any{kind, udfID, comp, string(mustJSON(body))})
-		}
-		switch {
-		case maxBytes >= limits.Bytes:
-			emit(kindBytesReadLimit)
-		case maxBytes >= limits.Bytes*4/5:
-			emit(kindBytesReadThreshold)
-		}
-		switch {
-		case maxDocs >= limits.Documents:
-			emit(kindDocumentsReadLimit)
-		case maxDocs >= limits.Documents*4/5:
-			emit(kindDocumentsReadThreshold)
 		}
 	}
 	return out
 }
 
-func readMaxes(grp []Row) (int, int) {
-	maxBytes, maxDocs := 0, 0
+type readDimension struct {
+	limit         int
+	measure       func(Row) int
+	kindLimit     string
+	kindThreshold string
+}
+
+func (d readDimension) row(udfID, comp string, grp []Row) ([]any, bool) {
+	var rows []Row
+	peak := 0
 	for _, r := range grp {
-		bsum, dsum := 0, 0
-		for _, c := range r.Calls {
-			bsum += c.BytesRead
-			dsum += c.DocumentsRead
+		v := d.measure(r)
+		if v < d.limit*4/5 {
+			continue
 		}
-		maxBytes = max(maxBytes, bsum)
-		maxDocs = max(maxDocs, dsum)
+		rows = append(rows, r)
+		peak = max(peak, v)
 	}
-	return maxBytes, maxDocs
+	if len(rows) == 0 {
+		return nil, false
+	}
+	kind := d.kindThreshold
+	if peak >= d.limit {
+		kind = d.kindLimit
+	}
+	count := len(rows)
+	hourly := bucket(timestampsOf(rows))
+	sort.Slice(rows, func(i, j int) bool { return rows[i].TS.After(rows[j].TS) })
+	if len(rows) > maxRecentPerGroup {
+		rows = rows[:maxRecentPerGroup]
+	}
+	body := map[string]any{
+		"count":        count,
+		"hourlyCounts": hourly,
+		"recentEvents": readRecent(rows),
+	}
+	return []any{kind, udfID, comp, string(mustJSON(body))}, true
+}
+
+func bytesRead(r Row) int {
+	sum := 0
+	for _, c := range r.Calls {
+		sum += c.BytesRead
+	}
+	return sum
+}
+
+func documentsRead(r Row) int {
+	sum := 0
+	for _, c := range r.Calls {
+		sum += c.DocumentsRead
+	}
+	return sum
 }
 
 func readRecent(grp []Row) []map[string]any {
@@ -341,7 +368,7 @@ type hourlyCount struct {
 	Count int    `json:"count"`
 }
 
-func makeRow(deployment, kind string, p map[string]any) (Row, bool) {
+func makeRow(kind string, p map[string]any) (Row, bool) {
 	now := eventTime(p)
 	switch kind {
 	case eventFunctionCall:
@@ -349,7 +376,6 @@ func makeRow(deployment, kind string, p map[string]any) (Row, bool) {
 			return Row{}, false
 		}
 		return Row{
-			Deployment:           deployment,
 			TS:                   now,
 			Kind:                 kindOCC,
 			UDFID:                getString(p, "udf_id"),
@@ -364,7 +390,6 @@ func makeRow(deployment, kind string, p map[string]any) (Row, bool) {
 		}, true
 	case eventInsightReadLimit:
 		return Row{
-			Deployment:    deployment,
 			TS:            now,
 			Kind:          kindRead,
 			UDFID:         getString(p, "udf_id"),

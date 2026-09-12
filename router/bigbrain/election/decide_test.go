@@ -322,6 +322,46 @@ func TestDecide_Failback_FlappingResetsEligibleSince(t *testing.T) {
 	}
 }
 
+func TestDecide_Failback_IncumbentBlipKeepsCandidateClock(t *testing.T) {
+	t.Parallel()
+	t0 := time.Unix(1000, 0)
+	leader := withPriority(obs("standby", true, 100, 100), 0)
+	primary := withPriority(obs("primary", false, 99, -1), 100)
+	d0 := decide([]observation{leader, primary}, decideParams{incumbent: "standby", failback: fb(t0, failbackState{})})
+	blip := decideParams{incumbent: "standby", failback: fb(t0.Add(5*time.Second), d0.failbackState)}
+	d1 := decide([]observation{unreachable("standby"), primary}, blip)
+	if d1.failbackState != d0.failbackState || d1.failbackTarget != nil {
+		t.Fatalf("an incumbent blip must keep the candidate's clock and not fail back, got %+v", d1)
+	}
+	back := decideParams{incumbent: "standby", failback: fb(t0.Add(20*time.Second), d1.failbackState)}
+	d2 := decide([]observation{leader, primary}, back)
+	if d2.failbackTarget == nil || d2.failbackTarget.be.Pod != "primary" {
+		t.Fatalf("the clock accrued through the blip must fire once the leader is back, got %+v", d2.failbackTarget)
+	}
+	d3 := decide([]observation{unreachable("standby"), unreachable("primary")}, blip)
+	if d3.failbackState != (failbackState{}) {
+		t.Fatalf("an unreachable candidate must reset the clock, got %+v", d3.failbackState)
+	}
+}
+
+func TestDecide_Failback_WaitsWhileAnotherPodTransitions(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(1000, 0)
+	prior := failbackState{candidate: "primary", eligibleSince: now.Add(-1 * time.Hour)}
+	in := []observation{
+		withPriority(obs("standby", true, 100, 100), 0),
+		withPriority(obs("primary", false, 99, -1), 100),
+		withPriority(obs("other", false, 99, 7), 200),
+	}
+	d := decide(in, decideParams{incumbent: "standby", failback: fb(now, prior)})
+	if d.failbackTarget != nil {
+		t.Fatalf("no failback promote while a pod is mid-promotion, got %q", d.failbackTarget.be.Pod)
+	}
+	if d.failbackState != prior {
+		t.Fatalf("waiting on a transition must not touch the clock, got %+v", d.failbackState)
+	}
+}
+
 func TestDecide_Failback_DisabledIsPureSticky(t *testing.T) {
 	t.Parallel()
 	now := time.Unix(1000, 0)

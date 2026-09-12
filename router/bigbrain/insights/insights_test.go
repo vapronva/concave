@@ -129,3 +129,60 @@ func TestIngestQueryRoundTripRowShapes(t *testing.T) {
 		}
 	}
 }
+
+func TestQueryOCCPermanenceSplitsGroups(t *testing.T) {
+	t.Parallel()
+	i := insights.New(100)
+	_ = i.Ingest("p", insights.DefaultReadLimits(), []insights.AnyEvent{
+		{"FunctionCall": map[string]any{
+			"is_occ": true, "udf_id": "f", "id": "a", "component_path": "_default", "occ_table_name": "t",
+		}},
+		{"FunctionCall": map[string]any{
+			"is_occ": true, "udf_id": "f", "id": "b", "component_path": "_default", "occ_table_name": "t",
+			"occ_failed_permanently": true,
+		}},
+	})
+	today := time.Now().UTC().Format("2006-01-02")
+	out, _ := i.Query("p", today, today)
+	bodies := make(map[string]string)
+	for _, row := range out {
+		bodies[row[0].(string)] = row[3].(string)
+	}
+	for _, kind := range []string{"occRetried", "occFailedPermanently"} {
+		if body, ok := bodies[kind]; !ok || !strings.Contains(body, `"occCalls":1`) {
+			t.Errorf("want a %s row counting one call; got %v", kind, out)
+		}
+	}
+}
+
+func TestQueryReadDimensionsCountTheirOwnRows(t *testing.T) {
+	t.Parallel()
+	i := insights.New(100)
+	calls := func(bytes, docs string) []any {
+		return []any{map[string]any{
+			"table_name": "t", "bytes_read": json.Number(bytes), "documents_read": json.Number(docs),
+		}}
+	}
+	_ = i.Ingest("p", insights.DefaultReadLimits(), []insights.AnyEvent{
+		{"InsightReadLimit": map[string]any{
+			"udf_id": "f", "id": "a", "component_path": "_default", "calls": calls("16777216", "1"),
+		}},
+		{"InsightReadLimit": map[string]any{
+			"udf_id": "f", "id": "b", "component_path": "_default", "calls": calls("1", "30000"),
+		}},
+	})
+	today := time.Now().UTC().Format("2006-01-02")
+	out, _ := i.Query("p", today, today)
+	bodies := make(map[string]string)
+	for _, row := range out {
+		bodies[row[0].(string)] = row[3].(string)
+	}
+	if len(bodies) != 2 {
+		t.Fatalf("want one bytes row and one documents row, got %v", out)
+	}
+	for _, kind := range []string{"bytesReadLimit", "documentsReadThreshold"} {
+		if body, ok := bodies[kind]; !ok || !strings.Contains(body, `"count":1`) {
+			t.Errorf("want a %s row counting only its own execution; got %v", kind, out)
+		}
+	}
+}
