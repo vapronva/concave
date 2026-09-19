@@ -160,7 +160,7 @@ func TestServeHTTP_SiteRoutePassesControlPaths(t *testing.T) {
 		client:         &http.Client{},
 		proxyTransport: newProxyTransport(),
 	}
-	tr.siteProxy = newReverseProxy(u, func() {}, newProxyTransport())
+	tr.siteProxy = tr.newReverseProxy(u)
 	for _, p := range []string{"/instance/leadership", "/instance/promote", "/instance_version", "/arbitrary/action"} {
 		hits.reset()
 		rr := httptest.NewRecorder()
@@ -943,6 +943,36 @@ func TestConsumeStream_ConnectFailureNudgesResolve(t *testing.T) {
 	case <-tr.resolveCh:
 	default:
 		t.Fatal("a connect failure must queue an immediate resolve")
+	}
+}
+
+func TestConsumeStream_EndedStreamFlipsGateDownAndNudges(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: leader\ndata: {\"leaderUrl\":\"http://10.0.0.9:3210\",\"seq\":4}\n\n")
+	}))
+	defer srv.Close()
+	tr := &tracker{
+		host:           "api.example",
+		resolveCh:      make(chan struct{}, 1),
+		streamClient:   &http.Client{},
+		streamIdle:     streamIdleTimeout,
+		proxyTransport: newProxyTransport(),
+	}
+	if tr.consumeStream(t.Context(), srv.URL) {
+		t.Fatal("a stream that ends at once must not count as healthy")
+	}
+	if got := leaderSnapshot(tr); got != "http://10.0.0.9:3210" {
+		t.Fatalf("leader=%q want the event applied before the stream ended", got)
+	}
+	if !tr.streamGate.down.Load() {
+		t.Fatal("an ended stream must flip the stream gate down")
+	}
+	select {
+	case <-tr.resolveCh:
+	default:
+		t.Fatal("an ended stream must queue an immediate resolve")
 	}
 }
 

@@ -50,6 +50,7 @@ const (
 	readyzPath              = "/usher/readyz"
 	routesPerDeployment     = 2
 	maxHeaderBytes          = 64 * 1024
+	proxyBufferSize         = 32 * 1024
 	defaultConnIdle         = time.Hour
 	connWatchFloor          = 10 * time.Millisecond
 	connWatchCeil           = time.Minute
@@ -98,6 +99,9 @@ type tracker struct {
 	pollGate       stateGate
 	streamGate     stateGate
 	eventGate      stateGate
+	upstreamErrLog logThrottle
+	noLeaderLog    logThrottle
+	proxyBuffers   bufferPool
 	resolved       atomic.Bool
 	mu             sync.RWMutex
 	lastAppliedSeq uint64
@@ -143,7 +147,33 @@ func newProxyTransport() *http.Transport {
 	return tr
 }
 
-func newReverseProxy(u *url.URL, nudge func(), tr *http.Transport) *httputil.ReverseProxy {
+type bufferPool struct{ pool sync.Pool }
+
+func (p *bufferPool) Get() []byte {
+	if b, ok := p.pool.Get().(*[]byte); ok {
+		return *b
+	}
+	return make([]byte, proxyBufferSize)
+}
+
+func (p *bufferPool) Put(b []byte) { p.pool.Put(&b) }
+
+type logThrottle struct {
+	mu   sync.Mutex
+	last time.Time
+}
+
+func (l *logThrottle) allow() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if time.Since(l.last) < time.Second {
+		return false
+	}
+	l.last = time.Now()
+	return true
+}
+
+func (t *tracker) newReverseProxy(u *url.URL) *httputil.ReverseProxy {
 	return &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(u)
@@ -154,7 +184,8 @@ func newReverseProxy(u *url.URL, nudge func(), tr *http.Transport) *httputil.Rev
 			}
 			pr.Out.Host = pr.In.Host
 		},
-		Transport:     tr,
+		Transport:     t.proxyTransport,
+		BufferPool:    &t.proxyBuffers,
 		FlushInterval: -1,
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			if r.Context().Err() != nil {
@@ -164,8 +195,10 @@ func newReverseProxy(u *url.URL, nudge func(), tr *http.Transport) *httputil.Rev
 				http.Error(w, "request entity too large", http.StatusRequestEntityTooLarge)
 				return
 			}
-			log.Printf("usher: upstream error: %v", err)
-			nudge()
+			if t.upstreamErrLog.allow() {
+				log.Printf("usher: %s upstream error: %v", t.host, err)
+			}
+			t.nudgeResolve()
 			w.Header().Set("Retry-After", "1")
 			http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 		},
@@ -187,7 +220,7 @@ func newReverseProxy(u *url.URL, nudge func(), tr *http.Transport) *httputil.Rev
 			resp.Body = io.NopCloser(bytes.NewReader(body))
 			resp.Trailer = nil
 			resp.TransferEncoding = nil
-			nudge()
+			t.nudgeResolve()
 			return nil
 		},
 	}
@@ -227,11 +260,11 @@ func (t *tracker) applyLeader(lr leaderResponse, fromPoll bool) bool {
 		log.Printf("usher: %s leader cleared (none available)", t.host)
 		return true
 	}
-	t.leaderURL, t.proxy = leaderURL, newReverseProxy(u, t.nudgeResolve, t.proxyTransport)
+	t.leaderURL, t.proxy = leaderURL, t.newReverseProxy(u)
 	if t.siteHost != "" {
 		su := *u
 		su.Path = "/http"
-		t.siteProxy = newReverseProxy(&su, t.nudgeResolve, t.proxyTransport)
+		t.siteProxy = t.newReverseProxy(&su)
 		log.Printf("usher: %s leader -> %s (site %s -> %s)", t.host, leaderURL, t.siteHost, su.String())
 	} else {
 		log.Printf("usher: %s leader -> %s", t.host, leaderURL)
@@ -323,7 +356,7 @@ func (t *tracker) consumeStream(ctx context.Context, u string) bool {
 	if err != nil {
 		if ctx.Err() == nil && t.streamGate.fail() {
 			log.Printf("usher: %s leader-stream connect failed: %v", t.host, err)
-			t.nudgeResolve()
+			t.wakeResolve()
 		}
 		return false
 	}
@@ -339,9 +372,13 @@ func (t *tracker) consumeStream(ctx context.Context, u string) bool {
 		watchdog.Reset(idle)
 		t.handleStreamLine(sc.Text())
 	}
-	healthy := time.Since(started) >= streamHealthyAfter
-	t.logStreamEnd(ctx, sctx, sc.Err(), idle)
-	return healthy
+	if ctx.Err() != nil {
+		return false
+	}
+	t.streamGate.fail()
+	log.Printf("usher: %s leader-stream %s", t.host, streamEndReason(sctx, sc.Err(), idle))
+	t.wakeResolve()
+	return time.Since(started) >= streamHealthyAfter
 }
 
 func (t *tracker) openStream(ctx context.Context, u string) (*http.Response, error) {
@@ -377,15 +414,14 @@ func (t *tracker) handleStreamLine(line string) {
 	t.applyLeader(ev, false)
 }
 
-func (t *tracker) logStreamEnd(ctx, sctx context.Context, scanErr error, idle time.Duration) {
-	if scanErr == nil || ctx.Err() != nil {
-		return
-	}
+func streamEndReason(sctx context.Context, scanErr error, idle time.Duration) string {
 	if sctx.Err() != nil {
-		log.Printf("usher: %s leader-stream idle for %s, reconnecting", t.host, idle)
-		return
+		return fmt.Sprintf("idle for %s, reconnecting", idle)
 	}
-	log.Printf("usher: %s leader-stream read error: %v", t.host, scanErr)
+	if scanErr != nil {
+		return fmt.Sprintf("read error: %v", scanErr)
+	}
+	return "ended, reconnecting"
 }
 
 func isBlockedAPIPath(p string) bool {
@@ -417,7 +453,9 @@ func (t *tracker) serveHTTP(w http.ResponseWriter, r *http.Request, site bool) {
 	}
 	p := t.currentLeader(site)
 	if p == nil {
-		log.Printf("usher: %s no leader available", t.host)
+		if t.noLeaderLog.allow() {
+			log.Printf("usher: %s no leader available", t.host)
+		}
 		w.Header().Set("Retry-After", "1")
 		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 		return
@@ -505,6 +543,10 @@ func (t *tracker) nudgeResolve() {
 	}
 	t.nextResolve = time.Now().Add(forcedResolveInterval)
 	t.resolveMu.Unlock()
+	t.wakeResolve()
+}
+
+func (t *tracker) wakeResolve() {
 	select {
 	case t.resolveCh <- struct{}{}:
 	default:
