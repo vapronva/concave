@@ -47,7 +47,7 @@ spec:
             httpGet: { path: /, port: http }
             initialDelaySeconds: 5
             periodSeconds: 10
-            failureThreshold: 12
+            failureThreshold: 3
           livenessProbe:
             httpGet: { path: /, port: http }
             initialDelaySeconds: 30
