@@ -421,4 +421,7 @@ func TestDecide_Failback_SplitBrainResolvesFirst(t *testing.T) {
 	if d.failbackTarget != nil {
 		t.Fatalf("split-brain takes precedence: must NOT also fail back, got %q", d.failbackTarget.be.Pod)
 	}
+	if d.failbackState != prior {
+		t.Fatalf("a split-brain tick must keep the candidate's clock, got %+v", d.failbackState)
+	}
 }

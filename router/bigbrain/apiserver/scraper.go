@@ -2,6 +2,7 @@ package apiserver
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -27,8 +28,9 @@ import (
 const (
 	funrunHealthPort    = 8091
 	healthPortName      = "health"
-	busyGauge           = "convex_funrun_isolate_busy_threads"
-	totalGauge          = "convex_funrun_isolate_total_threads"
+	isolateGaugePrefix  = "convex_funrun_isolate_"
+	busyGauge           = isolateGaugePrefix + "busy_threads"
+	totalGauge          = isolateGaugePrefix + "total_threads"
 	scrapeTimeout       = 2 * time.Second
 	listTimeout         = 5 * time.Second
 	scrapeBufferInitial = 64 * 1024
@@ -98,7 +100,7 @@ func (s *Scraper) scrapeAll(ctx context.Context) {
 func (s *Scraper) scrapeNamespace(ctx context.Context, ns string) map[types.NamespacedName]podSample {
 	sel := fmt.Sprintf("%s=funrun", s.componentLabel)
 	lctx, cancel := context.WithTimeout(ctx, listTimeout)
-	pods, err := s.cs.CoreV1().Pods(ns).List(lctx, metav1.ListOptions{LabelSelector: sel})
+	pods, err := s.cs.CoreV1().Pods(ns).List(lctx, metav1.ListOptions{LabelSelector: sel, ResourceVersion: "0"})
 	cancel()
 	if err != nil {
 		s.log.WarnContext(ctx, "scraper: list funrun pods failed", "namespace", ns, "err", err)
@@ -173,11 +175,11 @@ func parsePromGauges(r io.Reader) (float64, float64, error) {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, scrapeBufferInitial), scrapeBufferMax)
 	for sc.Scan() {
-		line := sc.Text()
-		if line == "" || line[0] == '#' {
+		line := sc.Bytes()
+		if !bytes.HasPrefix(line, []byte(isolateGaugePrefix)) {
 			continue
 		}
-		name, valStr, ok := cutMetricLine(line)
+		name, valStr, ok := cutMetricLine(string(line))
 		if !ok {
 			continue
 		}

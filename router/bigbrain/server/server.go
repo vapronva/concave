@@ -259,6 +259,9 @@ func logging(log *slog.Logger, next http.Handler) http.Handler {
 		if quietPattern(r.Pattern) {
 			level = slog.LevelDebug
 		}
+		if !log.Enabled(r.Context(), level) {
+			return
+		}
 		log.Log(r.Context(), level, "http",
 			"method", r.Method, "path", r.URL.Path, "status", sw.status, "dur", time.Since(start).String())
 	})

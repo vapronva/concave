@@ -146,10 +146,13 @@ type decideParams struct {
 
 func decide(obs []observation, p decideParams) decision {
 	claims := claimedLeaders(obs, p.leaseUnverifiedGrace)
-	d := decision{liveLeaderCount: len(claims), hasTransitioning: anyTransitioning(obs)}
+	d := decision{
+		liveLeaderCount:  len(claims),
+		hasTransitioning: anyTransitioning(obs),
+		failbackState:    retainedFailback(obs, p.failback.prior),
+	}
 	if len(claims) == 0 {
 		d.incumbentUnreachable = incumbentDiscoveredUnreachable(obs, p.incumbent)
-		d.failbackState = retainedFailback(obs, p.failback.prior)
 		if d.hasTransitioning {
 			return d
 		}

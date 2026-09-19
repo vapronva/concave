@@ -91,42 +91,40 @@ func (i *Insights) Ingest(deployment string, limits ReadLimits, events []AnyEven
 	if limits.Documents <= 0 || limits.Bytes <= 0 {
 		limits = DefaultReadLimits()
 	}
-	dep := i.deployment(deployment, limits)
-	kept := 0
-	for _, ev := range events {
-		for k, payload := range ev {
-			row, ok := makeRow(k, payload)
-			if !ok {
-				continue
-			}
-			i.store(dep, row)
-			kept++
-		}
-	}
-	return kept
-}
-
-func (i *Insights) deployment(name string, limits ReadLimits) *deploymentRows {
+	rows := makeRows(events)
 	i.memMu.Lock()
 	defer i.memMu.Unlock()
-	dep := i.mem[name]
+	dep := i.mem[deployment]
 	if dep == nil {
 		dep = &deploymentRows{}
-		i.mem[name] = dep
+		i.mem[deployment] = dep
 	}
 	dep.limits = limits
-	return dep
+	for _, r := range rows {
+		dep.push(r, i.cap)
+	}
+	return len(rows)
 }
 
-func (i *Insights) store(dep *deploymentRows, r Row) {
-	i.memMu.Lock()
-	defer i.memMu.Unlock()
-	if len(dep.rows) < i.cap {
-		dep.rows = append(dep.rows, r)
+func makeRows(events []AnyEvent) []Row {
+	var rows []Row
+	for _, ev := range events {
+		for k, payload := range ev {
+			if row, ok := makeRow(k, payload); ok {
+				rows = append(rows, row)
+			}
+		}
+	}
+	return rows
+}
+
+func (d *deploymentRows) push(r Row, ringCap int) {
+	if len(d.rows) < ringCap {
+		d.rows = append(d.rows, r)
 		return
 	}
-	dep.rows[dep.start] = r
-	dep.start = (dep.start + 1) % len(dep.rows)
+	d.rows[d.start] = r
+	d.start = (d.start + 1) % len(d.rows)
 }
 
 func (i *Insights) rows(deployment string, fromMs, toMs int64) ([]Row, ReadLimits) {
