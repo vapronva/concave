@@ -18,7 +18,7 @@ RUN --mount=type=cache,target=/var/cache/apt --mount=type=cache,target=/var/lib/
 set -o errexit -o nounset -o xtrace
 echo 'Acquire::ForceIPv4 "true";' > /etc/apt/apt.conf.d/99force-ipv4
 pkg-base-setup
-apt-get install --assume-yes cmake libclang-dev clang curl pkg-config git protobuf-compiler
+apt-get install --assume-yes cmake libclang-dev clang curl pkg-config git protobuf-compiler python3
 EOF
 
 ARG JUST_VERSION=1.58.0
@@ -33,6 +33,21 @@ tar --extract --gzip --directory=/usr/local/bin --file=/tmp/just.tar.gz just
 rm /tmp/just.tar.gz
 just --version
 EOF
+
+ARG UV_VERSION=0.11.33
+
+ARG UV_SHA256=aa9fca823c03289fb6e3460b3dc864f3ea895cafaf9b99247701a67b17d1b018
+
+RUN <<EOF
+set -o errexit -o nounset -o xtrace
+curl --fail --silent --show-error --location --retry 5 --retry-all-errors --retry-delay 3 --connect-timeout 30 --output /tmp/uv.tar.gz "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-x86_64-unknown-linux-gnu.tar.gz"
+echo "${UV_SHA256}  /tmp/uv.tar.gz" | sha256sum --check -
+tar --extract --gzip --strip-components=1 --directory=/usr/local/bin --file=/tmp/uv.tar.gz uv-x86_64-unknown-linux-gnu/uv
+rm /tmp/uv.tar.gz
+uv --version
+EOF
+
+ENV UV_PYTHON_DOWNLOADS=never
 
 WORKDIR /convex
 
@@ -68,10 +83,13 @@ ARG MIRROR_NPM_URL=""
 
 ARG MIRROR_CARGO_URL=""
 
+ARG MIRROR_PYPI_URL=""
+
 RUN <<EOF
 set -o errexit -o nounset -o xtrace
 [ -z "${MIRROR_NPM_URL}" ] || printf 'registry=%s\n' "${MIRROR_NPM_URL%/}/" | tee /root/.npmrc >> npm-packages/.npmrc
 [ -z "${MIRROR_CARGO_URL}" ] || printf '\n[source.crates-io]\nreplace-with = "proxy"\n\n[source.proxy]\nregistry = "sparse+%s/"\n' "${MIRROR_CARGO_URL%/}" >> .cargo/config.toml
+[ -z "${MIRROR_PYPI_URL}" ] || { mkdir --parents /root/.config/uv && printf '[[index]]\nurl = "%s/"\ndefault = true\n' "${MIRROR_PYPI_URL%/}" > /root/.config/uv/uv.toml; }
 EOF
 
 RUN --mount=type=cache,target=/root/.npm \
@@ -81,7 +99,8 @@ RUN --mount=type=cache,target=/root/.npm \
 RUN --mount=type=cache,target=/convex/target/ \
     --mount=type=cache,target=/usr/local/cargo/git/db \
     --mount=type=cache,target=/usr/local/cargo/git/checkouts \
-    --mount=type=cache,target=/usr/local/cargo/registry/ <<EOF
+    --mount=type=cache,target=/usr/local/cargo/registry/ \
+    --mount=type=cache,target=/root/.cache/uv <<EOF
 set -o errexit -o nounset -o xtrace
 cargo build --locked --release --package local_backend --bin convex-local-backend --package keybroker --bin generate_key --package funrun_server --bin convex-funrun
 cp target/release/convex-local-backend target/release/generate_key target/release/convex-funrun /convex/

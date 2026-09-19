@@ -12,9 +12,24 @@ COPY --from=tools /usr/local/bin/pkg-base-setup /usr/local/bin/
 
 RUN echo 'Acquire::ForceIPv4 "true";' > /etc/apt/apt.conf.d/99force-ipv4 && \
       pkg-base-setup && \
-      apt-get install --assume-yes --no-install-recommends build-essential git python3 perl && \
+      apt-get install --assume-yes --no-install-recommends build-essential curl git python3 perl && \
       apt-get clean && \
       rm --recursive --force /var/lib/apt/lists/*
+
+ARG UV_VERSION=0.11.33
+
+ARG UV_SHA256=aa9fca823c03289fb6e3460b3dc864f3ea895cafaf9b99247701a67b17d1b018
+
+RUN <<EOF
+set -o errexit -o nounset -o xtrace
+curl --fail --silent --show-error --location --retry 5 --retry-all-errors --retry-delay 3 --connect-timeout 30 --output /tmp/uv.tar.gz "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-x86_64-unknown-linux-gnu.tar.gz"
+echo "${UV_SHA256}  /tmp/uv.tar.gz" | sha256sum --check -
+tar --extract --gzip --strip-components=1 --directory=/usr/local/bin --file=/tmp/uv.tar.gz uv-x86_64-unknown-linux-gnu/uv
+rm /tmp/uv.tar.gz
+uv --version
+EOF
+
+ENV UV_PYTHON_DOWNLOADS=never
 
 WORKDIR /src
 
@@ -33,7 +48,11 @@ RUN PATCHES_DIR=/tmp/patches/backend bash /tmp/apply-patches.sh /src
 
 ARG MIRROR_NPM_URL=""
 
+ARG MIRROR_PYPI_URL=""
+
 RUN [ -z "${MIRROR_NPM_URL}" ] || printf 'registry=%s\n' "${MIRROR_NPM_URL%/}/" | tee /root/.npmrc >> npm-packages/.npmrc
+
+RUN [ -z "${MIRROR_PYPI_URL}" ] || { mkdir --parents /root/.config/uv && printf '[[index]]\nurl = "%s/"\ndefault = true\n' "${MIRROR_PYPI_URL%/}" > /root/.config/uv/uv.toml; }
 
 RUN --mount=type=cache,target=/root/.npm npm ci --prefix scripts/
 
@@ -51,7 +70,7 @@ ARG NEXT_PUBLIC_LOAD_MONACO_INTERNALLY="true"
 ENV NEXT_PUBLIC_LOAD_MONACO_INTERNALLY=${NEXT_PUBLIC_LOAD_MONACO_INTERNALLY}
 
 
-RUN turbo run build --filter=dashboard-self-hosted...
+RUN --mount=type=cache,target=/root/.cache/uv turbo run build --filter=dashboard-self-hosted...
 
 FROM docker.io/library/node:24.21.0-trixie-slim
 
