@@ -68,10 +68,10 @@ index 5456c4bbd..f7ba31aca 100644
  /// convenience) from allowing browsers to make these requests.
  pub fn platform_api_cors() -> CorsLayer {
 diff --git a/crates/common/src/knobs.rs b/crates/common/src/knobs.rs
-index a3f686e1f..8bbdbcf3a 100644
+index 6b0fb24ba..5dd5c335d 100644
 --- a/crates/common/src/knobs.rs
 +++ b/crates/common/src/knobs.rs
-@@ -618,6 +618,10 @@ pub static MAX_REPEATABLE_TIMESTAMP_IDLE_FREQUENCY: LazyLock<Duration> = LazyLoc
+@@ -644,6 +644,10 @@ pub static MAX_REPEATABLE_TIMESTAMP_IDLE_FREQUENCY: LazyLock<Duration> = LazyLoc
  pub static MAX_REPEATABLE_TIMESTAMP_COMMIT_DELAY: LazyLock<Duration> =
      LazyLock::new(|| Duration::from_secs(env_config("MAX_REPEATABLE_TIMESTAMP_COMMIT_DELAY", 5)));
  
@@ -82,7 +82,7 @@ index a3f686e1f..8bbdbcf3a 100644
  /// The maximum delay between runs of retention, this is now only used for error
  /// backoff and the initial delay when backend is started.
  pub static MAX_RETENTION_DELAY_SECONDS: LazyLock<Duration> =
-@@ -955,6 +959,11 @@ pub static ISOLATE_QUEUE_CONGESTED_TIMEOUT: LazyLock<Duration> =
+@@ -981,6 +985,11 @@ pub static ISOLATE_QUEUE_CONGESTED_TIMEOUT: LazyLock<Duration> =
  pub static MAX_ISOLATE_WORKERS: LazyLock<usize> =
      LazyLock::new(|| env_config("MAX_ISOLATE_WORKERS", 300));
  
@@ -94,7 +94,7 @@ index a3f686e1f..8bbdbcf3a 100644
  /// The size of the pending commits in the committer queue. This is a FIFO
  /// queue, so if the queue is too large, we run into a risk of all requests
  /// waiting too long and no requests going through during overload. The size of
-@@ -1281,6 +1290,12 @@ pub static SOURCE_MAP_CACHE_QUEUE_SIZE: LazyLock<usize> =
+@@ -1307,6 +1316,12 @@ pub static SOURCE_MAP_CACHE_QUEUE_SIZE: LazyLock<usize> =
  pub static FUNRUN_INDEX_CACHE_SIZE: LazyLock<u64> =
      LazyLock::new(|| env_config("FUNRUN_INDEX_CACHE_SIZE", 50_000_000)); // 50 MB
  
@@ -107,7 +107,7 @@ index a3f686e1f..8bbdbcf3a 100644
  /// The maximum number of concurrent index cache requests in Funrun.
  pub static FUNRUN_INDEX_CACHE_CONCURRENCY: LazyLock<usize> =
      LazyLock::new(|| env_config("FUNRUN_INDEX_CACHE_CONCURRENCY", 200));
-@@ -1305,6 +1320,10 @@ pub static FUNRUN_MODULE_QUEUE_SIZE: LazyLock<usize> =
+@@ -1331,6 +1346,10 @@ pub static FUNRUN_MODULE_QUEUE_SIZE: LazyLock<usize> =
  pub static FUNRUN_CODE_CACHE_SIZE: LazyLock<u64> =
      LazyLock::new(|| env_config("FUNRUN_CODE_CACHE_SIZE", 500_000_000));
  
@@ -118,7 +118,7 @@ index a3f686e1f..8bbdbcf3a 100644
  /// The maximum number of fetch clients Funrun would create.
  pub static FUNRUN_FETCH_CLIENT_CACHE_SIZE: LazyLock<usize> =
      LazyLock::new(|| env_config("FUNRUN_FETCH_CLIENT_CACHE_SIZE", 100));
-@@ -1323,10 +1342,29 @@ pub static FUNRUN_FETCH_CLIENT_CACHE_SIZE: LazyLock<usize> =
+@@ -1349,10 +1368,29 @@ pub static FUNRUN_FETCH_CLIENT_CACHE_SIZE: LazyLock<usize> =
  pub static FUNRUN_CLIENT_MAX_REQUESTS_PER_UPSTREAM: LazyLock<usize> =
      LazyLock::new(|| env_config("FUNRUN_CLIENT_MAX_REQUESTS_PER_UPSTREAM", 15));
  
@@ -471,10 +471,10 @@ index 000000000..52edcd226
 +}
 diff --git a/crates/function_runner/src/remote.rs b/crates/function_runner/src/remote.rs
 new file mode 100644
-index 000000000..0b8fcbc2f
+index 000000000..d148f9365
 --- /dev/null
 +++ b/crates/function_runner/src/remote.rs
-@@ -0,0 +1,891 @@
+@@ -0,0 +1,883 @@
 +use std::{
 +    collections::{
 +        BTreeMap,
@@ -669,15 +669,7 @@ index 000000000..0b8fcbc2f
 +                            let _ = tx.send(Change::Remove(*addr)).await;
 +                        }
 +                        if next != current {
-+                            if next.len() <= 1 {
-+                                tracing::warn!(
-+                                    "[funrun-lb] {} endpoint(s) for {host}:{port}; need a \
-+                                     headless Service",
-+                                    next.len()
-+                                );
-+                            } else {
-+                                tracing::info!("[funrun-lb] p2c across {} endpoint(s)", next.len());
-+                            }
++                            tracing::info!("[funrun-lb] p2c across {} endpoint(s)", next.len());
 +                            current = next;
 +                        }
 +                    }
@@ -1069,6 +1061,7 @@ index 000000000..0b8fcbc2f
 +            propagate_component_auth(&identity, component, component.is_root()).into();
 +        let auth_header = token_to_authorization_header(identity.clone().into())?;
 +        let callback_token = self.key_broker.issue_action_token(component);
++        self.wait_for_endpoints().await?;
 +        let http_request_body = match http_request.body {
 +            Some(mut body) => {
 +                let mut buf = Vec::new();
@@ -1123,7 +1116,6 @@ index 000000000..0b8fcbc2f
 +            http_request_head: Some(request_head.clone().into()),
 +            http_request_body,
 +        };
-+        self.wait_for_endpoints().await?;
 +        let mut client = pb::funrun::funrun_client::FunrunClient::new(self.channel.clone())
 +            .max_decoding_message_size(*MAX_GRPC_MESSAGE_BYTES)
 +            .max_encoding_message_size(*MAX_GRPC_MESSAGE_BYTES);
@@ -1862,7 +1854,7 @@ index 42f33efca..00e020949 100644
      operations::{
          bad_admin_key_error,
 diff --git a/crates/search/src/query.rs b/crates/search/src/query.rs
-index 4afa10e79..12c9e4279 100644
+index df1037052..414d9628c 100644
 --- a/crates/search/src/query.rs
 +++ b/crates/search/src/query.rs
 @@ -56,6 +56,8 @@ use crate::{
@@ -1874,7 +1866,7 @@ index 4afa10e79..12c9e4279 100644
  /// A search query compiled against a particular `SearchIndexSchema`.
  #[derive(Debug, Clone)]
  pub struct CompiledQuery {
-@@ -600,12 +602,8 @@ impl TextQueryTermRead {
+@@ -603,12 +605,8 @@ impl TextQueryTermRead {
  // code.
  #[derive(Debug, Clone, PartialEq, Eq)]
  pub enum TextQueryTerm {

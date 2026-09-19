@@ -45,7 +45,7 @@ index bceb6b977..f2f937c1f 100644
                          outcome.result.is_ok(),
                          usage_stats,
 diff --git a/crates/application/src/lib.rs b/crates/application/src/lib.rs
-index 50012bd55..f08d51308 100644
+index 362b7c8b3..9323673a1 100644
 --- a/crates/application/src/lib.rs
 +++ b/crates/application/src/lib.rs
 @@ -135,6 +135,7 @@ use common::{
@@ -597,7 +597,7 @@ index 50012bd55..f08d51308 100644
          self.runner.shutdown().await?;
          self.database.shutdown().await?;
 diff --git a/crates/application/src/scheduled_jobs/mod.rs b/crates/application/src/scheduled_jobs/mod.rs
-index cd7255387..a1ca71827 100644
+index d3bf4e6c1..c630f1b3b 100644
 --- a/crates/application/src/scheduled_jobs/mod.rs
 +++ b/crates/application/src/scheduled_jobs/mod.rs
 @@ -197,8 +197,7 @@ pub struct ScheduledJobContext<RT: Runtime> {
@@ -643,7 +643,7 @@ index cd7255387..a1ca71827 100644
                      Ok(_) => ScheduledJobState::Success,
                      Err(e) => ScheduledJobState::Failed(e.to_string()),
 diff --git a/crates/log_streaming/src/lib.rs b/crates/log_streaming/src/lib.rs
-index 7a69b7fe7..412b03392 100644
+index af879823b..2d40debdb 100644
 --- a/crates/log_streaming/src/lib.rs
 +++ b/crates/log_streaming/src/lib.rs
 @@ -100,6 +100,11 @@ use crate::sinks::{

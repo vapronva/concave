@@ -31,7 +31,7 @@ index 13389625f..24d944134 100644
          &self,
          bootstrapped_indexes: BootstrappedSearchIndexes,
 diff --git a/crates/database/src/database.rs b/crates/database/src/database.rs
-index c83eeb519..711263573 100644
+index d33417025..51665d010 100644
 --- a/crates/database/src/database.rs
 +++ b/crates/database/src/database.rs
 @@ -144,6 +144,7 @@ use indexing::{
@@ -1186,7 +1186,7 @@ index 000000000..e0d634bc9
 +    }
 +}
 diff --git a/crates/database/src/lib.rs b/crates/database/src/lib.rs
-index 48708690f..ceae0e8e3 100644
+index fb81ad0a0..5b4ab57e0 100644
 --- a/crates/database/src/lib.rs
 +++ b/crates/database/src/lib.rs
 @@ -16,6 +16,7 @@ mod committer;

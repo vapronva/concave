@@ -1,8 +1,8 @@
 diff --git a/crates/common/src/persistence/mod.rs b/crates/common/src/persistence/mod.rs
-index d5e1ea6e9..70563bcf8 100644
+index 2f8ec1a05..f95b06db7 100644
 --- a/crates/common/src/persistence/mod.rs
 +++ b/crates/common/src/persistence/mod.rs
-@@ -341,6 +341,22 @@ pub trait Persistence: Sync + Send + 'static {
+@@ -417,6 +417,22 @@ pub trait Persistence: Sync + Send + 'static {
      async fn finish_loading(&self) -> anyhow::Result<()> {
          Ok(())
      }
@@ -25,7 +25,7 @@ index d5e1ea6e9..70563bcf8 100644
  }
  
  #[derive(Debug, Clone, Copy)]
-@@ -620,7 +636,6 @@ pub trait PersistenceReader: Send + Sync + 'static {
+@@ -696,7 +712,6 @@ pub trait PersistenceReader: Send + Sync + 'static {
      async fn table_size_stats(&self) -> anyhow::Result<Vec<PersistenceTableSize>> {
          Ok(vec![])
      }

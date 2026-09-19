@@ -1,5 +1,5 @@
 diff --git a/crates/local_backend/src/config.rs b/crates/local_backend/src/config.rs
-index 986cfe59a..82f7a31a8 100644
+index 578b19dad..9f722d7dd 100644
 --- a/crates/local_backend/src/config.rs
 +++ b/crates/local_backend/src/config.rs
 @@ -10,6 +10,7 @@ use clap::{
@@ -23,7 +23,7 @@ index 986cfe59a..82f7a31a8 100644
      /// Host interface to bind to
      #[clap(short, long, default_value = "0.0.0.0")]
      pub interface: ::std::net::Ipv4Addr,
-@@ -248,5 +255,4 @@ impl LocalConfig {
+@@ -259,5 +266,4 @@ impl LocalConfig {
              }
          }
      }
@@ -709,7 +709,7 @@ index 000000000..13d2bb0ca
 +    }
 +}
 diff --git a/crates/local_backend/src/router.rs b/crates/local_backend/src/router.rs
-index bd26f6736..824f6b743 100644
+index 0f98ae244..708c01c72 100644
 --- a/crates/local_backend/src/router.rs
 +++ b/crates/local_backend/src/router.rs
 @@ -1,6 +1,9 @@
@@ -747,7 +747,7 @@ index bd26f6736..824f6b743 100644
          CorsLayer,
      },
      decompression::RequestDecompressionLayer,
-@@ -102,11 +101,14 @@ use crate::{
+@@ -103,11 +102,14 @@ use crate::{
          internal_action_post,
          internal_mutation_post,
          internal_query_post,
@@ -762,7 +762,7 @@ index bd26f6736..824f6b743 100644
          vector_search,
      },
      public_api::public_api_router,
-@@ -352,8 +354,7 @@ pub fn router(st: LocalAppState) -> Router {
+@@ -353,8 +355,7 @@ pub fn router(st: LocalAppState) -> Router {
          .route("/schema_state/{schema_id}", get(schema_state))
          .route("/stream_udf_execution", get(stream_udf_execution))
          .route("/stream_function_logs", get(stream_function_logs))
@@ -772,7 +772,7 @@ index bd26f6736..824f6b743 100644
  
      let snapshot_export_routes = Router::new()
          .route("/request/zip", post(request_zip_export))
-@@ -387,6 +388,10 @@ pub fn router(st: LocalAppState) -> Router {
+@@ -388,6 +389,10 @@ pub fn router(st: LocalAppState) -> Router {
          .nest("/actions", action_callback_routes(st.clone()))
          .nest("/export", snapshot_export_routes)
          .nest("/streaming_import", streaming_import_routes())
@@ -783,7 +783,7 @@ index bd26f6736..824f6b743 100644
          .nest("/v1", platform_routes);
  
      // Endpoints migrated to use the RouterState trait instead of application.
-@@ -425,6 +430,9 @@ pub fn router(st: LocalAppState) -> Router {
+@@ -426,6 +431,9 @@ pub fn router(st: LocalAppState) -> Router {
      Router::new()
          .nest("/api", api_routes)
          .merge(health_check_routes(version))
@@ -793,7 +793,7 @@ index bd26f6736..824f6b743 100644
          .layer(cors())
          .with_state(st)
          .merge(migrated)
-@@ -469,6 +477,9 @@ where
+@@ -471,6 +479,9 @@ where
          .route("/storage_get_url", post(storage_get_url))
          .route("/storage_get_metadata", post(storage_get_metadata))
          .route("/storage_delete", post(storage_delete))
@@ -803,7 +803,7 @@ index bd26f6736..824f6b743 100644
          .route("/audit_log", post(audit_log))
          // All routes above this line get the increased limit
          .layer(DefaultBodyLimit::max(*MAX_BACKEND_RPC_REQUEST_SIZE))
-@@ -549,6 +560,7 @@ where
+@@ -551,6 +562,7 @@ where
              get(|MtState(st): MtState<LocalAppState>| async move { st.instance_name.clone() }),
          )
          .route("/instance_version", get(|| async move { version }))
@@ -811,7 +811,7 @@ index bd26f6736..824f6b743 100644
          .route(
              "/",
              get(|| async { "This Convex deployment is running. See https://docs.convex.dev/." }),
-@@ -615,10 +627,16 @@ where
+@@ -617,10 +629,16 @@ where
          )
  }
  
@@ -829,7 +829,7 @@ index bd26f6736..824f6b743 100644
          .allow_methods(vec![
              Method::GET,
              Method::POST,
-@@ -627,6 +645,5 @@ pub fn cors() -> CorsLayer {
+@@ -629,6 +647,5 @@ pub fn cors() -> CorsLayer {
              Method::DELETE,
              Method::PUT,
          ])

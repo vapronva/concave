@@ -1,5 +1,5 @@
 diff --git a/crates/events/src/usage.rs b/crates/events/src/usage.rs
-index e66741039..762516c78 100644
+index fcea2dc03..aaa5cac18 100644
 --- a/crates/events/src/usage.rs
 +++ b/crates/events/src/usage.rs
 @@ -13,6 +13,8 @@ pub enum UdfType {
@@ -20,7 +20,7 @@ index e66741039..762516c78 100644
  }
  
  #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-@@ -141,6 +145,8 @@ pub enum UsageEvent {
+@@ -142,6 +146,8 @@ pub enum UsageEvent {
          egress: u64,
      },
      InsightReadLimit {
@@ -29,7 +29,7 @@ index e66741039..762516c78 100644
          id: String,
          request_id: String,
          udf_id: String,
-@@ -277,4 +283,4 @@ impl UsageEventLogger for NoOpUsageEventLogger {
+@@ -282,4 +288,4 @@ impl UsageEventLogger for NoOpUsageEventLogger {
      async fn shutdown(&self) -> anyhow::Result<()> {
          Ok(())
      }
@@ -38,11 +38,17 @@ index e66741039..762516c78 100644
 +}
 diff --git a/crates/local_backend/src/usage_forwarder.rs b/crates/local_backend/src/usage_forwarder.rs
 new file mode 100644
-index 000000000..cd415a662
+index 000000000..f82d07edc
 --- /dev/null
 +++ b/crates/local_backend/src/usage_forwarder.rs
-@@ -0,0 +1,377 @@
-+use std::sync::Arc;
+@@ -0,0 +1,393 @@
++use std::sync::{
++    atomic::{
++        AtomicBool,
++        Ordering,
++    },
++    Arc,
++};
 +
 +use async_trait::async_trait;
 +use axum::{
@@ -144,6 +150,7 @@ index 000000000..cd415a662
 +    tx: mpsc::Sender<Vec<UsageEvent>>,
 +    shutdown_tx: Mutex<Option<oneshot::Sender<()>>>,
 +    worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
++    dropping: AtomicBool,
 +}
 +
 +struct Sink {
@@ -244,6 +251,7 @@ index 000000000..cd415a662
 +            tx,
 +            shutdown_tx: Mutex::new(Some(shutdown_tx)),
 +            worker: Mutex::new(Some(worker)),
++            dropping: AtomicBool::new(false),
 +        })
 +    }
 +}
@@ -255,14 +263,22 @@ index 000000000..cd415a662
 +        if events.is_empty() {
 +            return;
 +        }
-+        let n = events.len();
-+        if let Err(e) = self.tx.try_send(events) {
-+            let state = match e {
-+                mpsc::error::TrySendError::Full(_) => "full",
-+                mpsc::error::TrySendError::Closed(_) => "closed",
-+            };
-+            log_counter(&USAGE_FORWARDER_DROPPED_BATCHES_TOTAL, 1);
-+            tracing::error!("usage forwarder {state}; dropping {n} Insights events");
++        match self.tx.try_send(events) {
++            Ok(()) => {
++                if self.dropping.swap(false, Ordering::Relaxed) {
++                    tracing::info!("usage forwarder accepting Insights events again");
++                }
++            },
++            Err(e) => {
++                let state = match e {
++                    mpsc::error::TrySendError::Full(_) => "full",
++                    mpsc::error::TrySendError::Closed(_) => "closed",
++                };
++                log_counter(&USAGE_FORWARDER_DROPPED_BATCHES_TOTAL, 1);
++                if !self.dropping.swap(true, Ordering::Relaxed) {
++                    tracing::warn!("usage forwarder {state}; dropping Insights events");
++                }
++            },
 +        }
 +    }
 +
@@ -420,7 +436,7 @@ index 000000000..cd415a662
 +    }
 +}
 diff --git a/crates/usage_tracking/src/lib.rs b/crates/usage_tracking/src/lib.rs
-index 188024d95..82801b97e 100644
+index 3bbf40c91..0ba25f03f 100644
 --- a/crates/usage_tracking/src/lib.rs
 +++ b/crates/usage_tracking/src/lib.rs
 @@ -5,7 +5,11 @@ use std::{
@@ -492,7 +508,7 @@ index 188024d95..82801b97e 100644
              },
          });
  
-@@ -495,6 +520,7 @@ impl UsageCounter {
+@@ -444,6 +469,7 @@ impl UsageCounter {
                  }
  
                  usage_metrics.push(UsageEvent::InsightReadLimit {
