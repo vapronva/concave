@@ -32,7 +32,7 @@ spec:
       automountServiceAccountToken: false
       containers:
         - name: dashboard
-          image: {{ include "convex.image" (dict "ctx" . "spec" .Values.image.dashboard) }}
+          image: {{ include "convex.image" (dict "ctx" . "spec" .Values.image.dashboard) | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           ports:
             - { name: http, containerPort: {{ .Values.dashboard.port }} }

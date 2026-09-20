@@ -268,7 +268,7 @@ seccompProfile:
 {{- define "convex.backendContainer" -}}
 {{- $ctx := .ctx -}}
 - name: backend
-  image: {{ include "convex.image" (dict "ctx" $ctx "spec" $ctx.Values.image) }}
+  image: {{ include "convex.image" (dict "ctx" $ctx "spec" $ctx.Values.image) | quote }}
   imagePullPolicy: {{ $ctx.Values.image.pullPolicy }}
   ports:
     - { name: cloud, containerPort: 3210 }

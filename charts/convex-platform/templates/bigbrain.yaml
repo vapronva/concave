@@ -94,7 +94,7 @@ spec:
       {{- end }}
       containers:
         - name: bigbrain
-          image: {{ include "convex-platform.image" (dict "ctx" . "spec" $b.image) }}
+          image: {{ include "convex-platform.image" (dict "ctx" . "spec" $b.image) | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           env:
             - name: BIGBRAIN_ADDR

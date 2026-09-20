@@ -1,0 +1,48 @@
+---
+deployments:
+  - name: convex-ci
+    namespace: convex-ci
+    host: api.convex.example.com
+    siteHost: convex.example.com
+    controlPlaneTokenSecretRef:
+      name: convex-ci-control-plane
+    usageTokenSecretRef:
+      name: convex-ci-usage
+
+image:
+  pullSecrets:
+    - name: registry-credentials
+
+usher:
+  image:
+    tag: ci
+  updateStrategy:
+    type: Recreate
+  preferredNode: worker-1
+  nodes:
+    - worker-1
+    - worker-2
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: topology.kubernetes.io/zone
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/component: usher
+
+bigbrain:
+  image:
+    tag: ci
+  listen: :8082
+  tolerations:
+    - key: CriticalAddonsOnly
+      operator: Exists
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: node.kubernetes.io/nodegroup
+                operator: In
+                values:
+                  - control

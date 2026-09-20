@@ -52,7 +52,7 @@ spec:
       {{- end }}
       containers:
         - name: funrun
-          image: {{ include "convex.image" (dict "ctx" . "spec" .Values.image) }}
+          image: {{ include "convex.image" (dict "ctx" . "spec" .Values.image) | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["/convex/convex-funrun"]
           ports:

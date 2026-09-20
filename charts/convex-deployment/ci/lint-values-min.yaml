@@ -1,0 +1,33 @@
+---
+instance:
+  name: convex_ci
+
+image:
+  tag: ci
+
+db:
+  host: db.ci.example.com
+
+storage:
+  nfs:
+    server: nfs.ci.example.com
+    path: /exports/concave
+
+hosts:
+  api: api.convex.example.com
+  site: convex.example.com
+
+ha:
+  requireNodeSpread: false
+
+funrun:
+  enabled: false
+  hpa:
+    enabled: false
+
+dashboard:
+  enabled: false
+
+ingress:
+  ckic:
+    enabled: false

@@ -1,0 +1,17 @@
+---
+deployments:
+  - name: convex-ci
+    namespace: convex-ci
+    host: api.convex.example.com
+
+usher:
+  image:
+    tag: ci
+  mono: true
+  replicas: 1
+  bigbrainUrl: http://bigbrain.convex-system.svc.cluster.local:8081
+
+bigbrain:
+  enabled: false
+  metricsApiserver:
+    enabled: false

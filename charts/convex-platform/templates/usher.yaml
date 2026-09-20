@@ -72,7 +72,7 @@ spec:
       automountServiceAccountToken: false
       containers:
         - name: usher
-          image: {{ include "convex-platform.image" (dict "ctx" . "spec" $u.image) }}
+          image: {{ include "convex-platform.image" (dict "ctx" . "spec" $u.image) | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
             - --config=/etc/usher/config.json
