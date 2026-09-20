@@ -44,7 +44,7 @@ COPY patches/backend /tmp/patches/backend
 
 COPY apply-patches.sh /tmp/apply-patches.sh
 
-RUN PATCHES_DIR=/tmp/patches/backend bash /tmp/apply-patches.sh /src
+RUN PATCHES_DIR=/tmp/patches/backend UPSTREAM_PIN=/tmp/patches/UPSTREAM bash /tmp/apply-patches.sh /src
 
 ARG MIRROR_NPM_URL=""
 
