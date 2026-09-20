@@ -35,6 +35,26 @@ func unreachable(pod string) observation {
 	return observation{be: k8sclient.Backend{Pod: pod, URL: "http://" + pod + ":3210"}, reach: false}
 }
 
+func withTailer(o observation, healthy bool) observation {
+	o.status.TailerHealthy = &healthy
+	return o
+}
+
+func TestDecide_Leaderless_UnhealthyTailerIsNotACandidate(t *testing.T) {
+	t.Parallel()
+	in := []observation{
+		withTailer(withPriority(obs("backend-0", false, 100, -1), 100), false),
+		withTailer(obs("backend-1", false, 90, -1), true),
+	}
+	d := decide(in, sticky("backend-0"))
+	if d.promoteTarget == nil || d.promoteTarget.be.Pod != "backend-1" {
+		t.Fatalf("want the standby that reaches Postgres promoted, got %+v", d.promoteTarget)
+	}
+	if d = decide(in[:1], sticky("backend-0")); d.promoteTarget != nil {
+		t.Fatalf("want no target when the only standby cannot reach Postgres, got %+v", d.promoteTarget)
+	}
+}
+
 func sticky(incumbent string) decideParams {
 	return decideParams{incumbent: incumbent}
 }

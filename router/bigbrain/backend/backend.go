@@ -16,6 +16,7 @@ type Leadership struct {
 	LatestTS            uint64  `json:"latest_ts"`
 	LeaseTS             *uint64 `json:"lease_ts"`
 	LeaseUnverifiedSecs *uint64 `json:"lease_unverified_secs"`
+	TailerHealthy       *bool   `json:"tailer_healthy"`
 }
 
 const (
@@ -29,7 +30,12 @@ type Client struct {
 }
 
 func New(tokens map[string]string) *Client {
-	return &Client{http: &http.Client{}, tokens: tokens}
+	return &Client{
+		http: &http.Client{
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		},
+		tokens: tokens,
+	}
 }
 
 func (c *Client) Leadership(ctx context.Context, deployment, base string) (Leadership, error) {

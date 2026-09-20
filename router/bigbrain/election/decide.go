@@ -60,7 +60,11 @@ func anyTransitioning(obs []observation) bool {
 }
 
 func isPromotable(o observation) bool {
-	return o.reach && !o.status.IsLeader && !isTransitioning(o)
+	return o.reach && !o.status.IsLeader && !isTransitioning(o) && tailerHealthy(o)
+}
+
+func tailerHealthy(o observation) bool {
+	return o.status.TailerHealthy == nil || *o.status.TailerHealthy
 }
 
 func incumbentDiscoveredUnreachable(obs []observation, incumbent string) bool {
@@ -218,9 +222,6 @@ func bestFailbackCandidate(
 	var found bool
 	for _, o := range obs {
 		if !isPromotable(o) {
-			continue
-		}
-		if o.be.Pod == leader.be.Pod {
 			continue
 		}
 		if o.be.Priority <= leader.be.Priority {

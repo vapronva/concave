@@ -14,6 +14,8 @@ import (
 	"syscall"
 	"time"
 
+	"k8s.io/apimachinery/pkg/util/validation"
+
 	"git.horse/vapronva/concave/router/bigbrain/apiserver"
 	"git.horse/vapronva/concave/router/bigbrain/backend"
 	"git.horse/vapronva/concave/router/bigbrain/election"
@@ -57,7 +59,7 @@ func run() int {
 		return 1
 	}
 	cfg := electionConfigFromEnv()
-	insightsRingCap := envInt("INSIGHTS_RING_CAP", defaultInsightsRingCap)
+	insightsRingCap := envInt("BIGBRAIN_INSIGHTS_RING_CAP", defaultInsightsRingCap)
 	if err = validateRuntimeConfig(cfg, insightsRingCap, log); err != nil {
 		return 1
 	}
@@ -146,7 +148,7 @@ func buildRegistry(
 func validateRuntimeConfig(cfg election.Config, insightsRingCap int, log *slog.Logger) error {
 	if insightsRingCap <= 0 {
 		err := fmt.Errorf("insights ring cap must be > 0, got %d", insightsRingCap)
-		log.Error("bigbrain: invalid INSIGHTS_RING_CAP", "err", err)
+		log.Error("bigbrain: invalid BIGBRAIN_INSIGHTS_RING_CAP", "err", err)
 		return err
 	}
 	if err := cfg.Validate(); err != nil {
@@ -285,9 +287,24 @@ func parseDeployments(s string) ([]deploymentRef, error) {
 		if name == "" {
 			return nil, fmt.Errorf("deployment entry %q has an empty name", part)
 		}
+		if errs := validation.IsValidLabelValue(name); len(errs) > 0 {
+			return nil, fmt.Errorf(
+				"deployment name %q must be a Kubernetes label value: %s",
+				name,
+				strings.Join(errs, "; "),
+			)
+		}
 		ns = strings.TrimSpace(ns)
 		if !ok || ns == "" {
 			ns = name
+		}
+		if errs := validation.IsDNS1123Label(ns); len(errs) > 0 {
+			return nil, fmt.Errorf(
+				"deployment %q namespace %q must be a DNS label: %s",
+				name,
+				ns,
+				strings.Join(errs, "; "),
+			)
 		}
 		if _, dup := seen[name]; dup {
 			return nil, fmt.Errorf("duplicate deployment name %q", name)

@@ -222,15 +222,15 @@ func (c *Controller) commitState(st *deploymentState, dec decision, emptyList bo
 	st.failback = dec.failbackState
 	if emptyList {
 		st.emptyStreak++
+		st.leaderlessStreak = 0
 	} else {
 		st.emptyStreak = 0
-	}
-	if dec.liveLeaderCount == 0 {
-		if !emptyList && !dec.hasTransitioning {
+		switch {
+		case dec.liveLeaderCount > 0:
+			st.leaderlessStreak = 0
+		case !dec.hasTransitioning:
 			st.leaderlessStreak++
 		}
-	} else {
-		st.leaderlessStreak = 0
 	}
 	retain := false
 	if dec.incumbentUnreachable {

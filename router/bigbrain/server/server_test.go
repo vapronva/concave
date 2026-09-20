@@ -198,7 +198,7 @@ func TestServer_UsageIngestThenQuery(t *testing.T) {
 	t.Parallel()
 	reg, h := newTestServer(t)
 	reg.EnsureDeployment("dev", "convex-dev")
-	ingest := `{"deployment":"dev","read_limits":{"documents":64000,"bytes":16777216},"events":[` +
+	ingest := `{"deployment":"dev","read_limits":{"documents":64000,"bytes":16777216,"warning_ratio":0.8},"events":[` +
 		`{"FunctionCall":{"is_occ":true,"udf_id":"mod:occFn","id":"o1","request_id":"q1",` +
 		`"component_path":"-root-component-","occ_table_name":"docs","status":"retried"}},` +
 		`{"InsightReadLimit":{"udf_id":"mod:readFn","id":"r1","request_id":"q2",` +

@@ -61,9 +61,6 @@ func (c *Controller) actEmptyDiscovery(ctx context.Context, name, ns string, st 
 		c.log.DebugContext(ctx, "election: discovery still empty",
 			"deployment", name, "namespace", ns, "streak", streak)
 	}
-	c.mu.Lock()
-	st.leaderlessStreak = 0
-	c.mu.Unlock()
 	c.setLeader(name, st, "", "")
 }
 

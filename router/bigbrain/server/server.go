@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -69,10 +70,9 @@ func (s *Server) bearerOK(r *http.Request, deployment string) bool {
 	if expected == "" {
 		return false
 	}
-	provided := bearerToken(r.Header.Get("Authorization"))
-	a := sha256.Sum256([]byte(provided))
+	a := sha256.Sum256([]byte(bearerToken(r.Header.Get("Authorization"))))
 	b := sha256.Sum256([]byte(expected))
-	return provided != "" && subtle.ConstantTimeCompare(a[:], b[:]) == 1
+	return subtle.ConstantTimeCompare(a[:], b[:]) == 1
 }
 
 func (s *Server) handleUsageIngest(w http.ResponseWriter, r *http.Request) {
@@ -90,6 +90,10 @@ func (s *Server) handleUsageIngest(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeErr(w, http.StatusBadRequest, "invalid usage body")
+		return
+	}
+	if err := dec.Decode(new(json.RawMessage)); !errors.Is(err, io.EOF) {
+		writeErr(w, http.StatusBadRequest, "trailing data after usage body")
 		return
 	}
 	if body.Deployment == "" {
@@ -126,7 +130,7 @@ func (s *Server) handleUsageQuery(w http.ResponseWriter, r *http.Request) {
 	}
 	out, err := s.ins.Query(dep, from, to)
 	if err != nil {
-		if errors.Is(err, insights.ErrBadDateRange) {
+		if errors.Is(err, insights.ErrBadDate) || errors.Is(err, insights.ErrBadDateRange) {
 			writeErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -243,7 +247,8 @@ func quietPattern(pattern string) bool {
 	case "GET /healthz",
 		"GET /readyz",
 		"GET /registry/deployments/{name}/leader",
-		"GET /registry/deployments/{name}/leader-stream":
+		"GET /registry/deployments/{name}/leader-stream",
+		"POST /internal/usage":
 		return true
 	default:
 		return false
@@ -256,7 +261,7 @@ func logging(log *slog.Logger, next http.Handler) http.Handler {
 		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(sw, r)
 		level := slog.LevelInfo
-		if quietPattern(r.Pattern) {
+		if quietPattern(r.Pattern) && sw.status < http.StatusBadRequest {
 			level = slog.LevelDebug
 		}
 		if !log.Enabled(r.Context(), level) {

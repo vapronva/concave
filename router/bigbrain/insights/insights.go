@@ -3,6 +3,7 @@ package insights
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -13,12 +14,14 @@ import (
 const (
 	defaultDocumentsReadLimit  = 32000
 	defaultBytesReadLimit      = 16 * 1024 * 1024
+	defaultWarningRatio        = 0.8
 	rootComponent              = "-root-component-"
 	groupSep                   = "\x1f"
 	maxRecentPerGroup          = 50
 	inclusiveEndHours          = 24
 	occKeyPartsCount           = 4
 	readKeyPartsCount          = 2
+	sortKeyFields              = 3
 	kindOCC                    = "occ"
 	kindRead                   = "read"
 	kindOCCRetried             = "occRetried"
@@ -36,7 +39,10 @@ const (
 	fieldSuccess               = "success"
 )
 
-var ErrBadDateRange = errors.New("from must be on or before to")
+var (
+	ErrBadDate      = errors.New("dates must be YYYY-MM-DD")
+	ErrBadDateRange = errors.New("from must be on or before to")
+)
 
 type Row struct {
 	TS                   time.Time
@@ -61,12 +67,25 @@ type Call struct {
 }
 
 type ReadLimits struct {
-	Documents int `json:"documents"`
-	Bytes     int `json:"bytes"`
+	Documents    int     `json:"documents"`
+	Bytes        int     `json:"bytes"`
+	WarningRatio float64 `json:"warning_ratio"`
 }
 
 func DefaultReadLimits() ReadLimits {
-	return ReadLimits{Documents: defaultDocumentsReadLimit, Bytes: defaultBytesReadLimit}
+	return ReadLimits{
+		Documents:    defaultDocumentsReadLimit,
+		Bytes:        defaultBytesReadLimit,
+		WarningRatio: defaultWarningRatio,
+	}
+}
+
+func (l ReadLimits) valid() bool {
+	return l.Documents > 0 && l.Bytes > 0 && l.WarningRatio > 0 && l.WarningRatio <= 1
+}
+
+func (l ReadLimits) threshold(limit int) int {
+	return int(float64(limit) * l.WarningRatio)
 }
 
 type Insights struct {
@@ -88,7 +107,7 @@ func New(ringCap int) *Insights {
 type AnyEvent map[string]map[string]any
 
 func (i *Insights) Ingest(deployment string, limits ReadLimits, events []AnyEvent) int {
-	if limits.Documents <= 0 || limits.Bytes <= 0 {
+	if !limits.valid() {
 		limits = DefaultReadLimits()
 	}
 	rows := makeRows(events)
@@ -148,11 +167,11 @@ func (i *Insights) rows(deployment string, fromMs, toMs int64) ([]Row, ReadLimit
 func (i *Insights) Query(deployment, fromDate, toDate string) ([][]any, error) {
 	from, err := time.Parse("2006-01-02", fromDate)
 	if err != nil {
-		return nil, ErrBadDateRange
+		return nil, ErrBadDate
 	}
 	to, err := time.Parse("2006-01-02", toDate)
 	if err != nil {
-		return nil, ErrBadDateRange
+		return nil, ErrBadDate
 	}
 	fromMs := from.UTC().UnixMilli()
 	toMs := to.UTC().Add(inclusiveEndHours * time.Hour).UnixMilli()
@@ -160,8 +179,19 @@ func (i *Insights) Query(deployment, fromDate, toDate string) ([][]any, error) {
 		return nil, ErrBadDateRange
 	}
 	rows, limits := i.rows(deployment, fromMs, toMs)
-	out := aggregateOCC(rows)
-	return append(out, aggregateRead(rows, limits)...), nil
+	out := append(aggregateOCC(rows), aggregateRead(rows, limits)...)
+	sort.Slice(out, func(a, b int) bool { return rowLess(out[a], out[b]) })
+	return out, nil
+}
+
+func rowLess(a, b []any) bool {
+	for i := range sortKeyFields {
+		as, bs := fmt.Sprint(a[i]), fmt.Sprint(b[i])
+		if as != bs {
+			return as < bs
+		}
+	}
+	return false
 }
 
 func aggregateOCC(rows []Row) [][]any {
@@ -235,12 +265,14 @@ func aggregateRead(rows []Row, limits ReadLimits) [][]any {
 		udfID, comp := parts[0], parts[1]
 		bytes := readDimension{
 			limit:         limits.Bytes,
+			threshold:     limits.threshold(limits.Bytes),
 			measure:       bytesRead,
 			kindLimit:     kindBytesReadLimit,
 			kindThreshold: kindBytesReadThreshold,
 		}
 		docs := readDimension{
 			limit:         limits.Documents,
+			threshold:     limits.threshold(limits.Documents),
 			measure:       documentsRead,
 			kindLimit:     kindDocumentsReadLimit,
 			kindThreshold: kindDocumentsReadThreshold,
@@ -256,6 +288,7 @@ func aggregateRead(rows []Row, limits ReadLimits) [][]any {
 
 type readDimension struct {
 	limit         int
+	threshold     int
 	measure       func(Row) int
 	kindLimit     string
 	kindThreshold string
@@ -266,7 +299,7 @@ func (d readDimension) row(udfID, comp string, grp []Row) ([]any, bool) {
 	peak := 0
 	for _, r := range grp {
 		v := d.measure(r)
-		if v < d.limit*4/5 {
+		if v < d.threshold {
 			continue
 		}
 		rows = append(rows, r)
