@@ -30,19 +30,15 @@ index 6c018be51..0b891fcc1 100644
        {children}
 diff --git a/npm-packages/dashboard-common/src/features/health/components/ChartForInsight.tsx b/npm-packages/dashboard-common/src/features/health/components/ChartForInsight.tsx
 new file mode 100644
-index 000000000..8bff059c4
+index 000000000..40c4a0d4c
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/health/components/ChartForInsight.tsx
-@@ -0,0 +1,294 @@
+@@ -0,0 +1,277 @@
 +import {
 +  useInsightsPeriod,
 +  Insight,
 +} from "@common/features/health/lib/insights";
-+import {
-+  formatBytes,
-+  formatNumberCompact,
-+  toNumericUTC,
-+} from "@common/lib/format";
++import { formatBytes, formatNumberCompact } from "@common/lib/format";
 +import { ChartTooltip } from "@common/elements/ChartTooltip";
 +import { format } from "date-fns";
 +import {
@@ -100,7 +96,7 @@ index 000000000..8bff059c4
 +  formatY?: (value: number) => string;
 +}) {
 +  const { from } = useInsightsPeriod();
-+  const auditLogs = useDeploymentAuditLogs(toNumericUTC(from), {
++  const auditLogs = useDeploymentAuditLogs(Date.parse(from), {
 +    actions: ["push_config", "push_config_with_components"],
 +  });
 +  const deploysByHour = auditLogs?.map(
@@ -116,7 +112,7 @@ index 000000000..8bff059c4
 +    },
 +  );
 +  const midnightTicks = (data ?? [])
-+    .filter((d) => new Date(toNumericUTCWithHour(d.hour)).getHours() === 0)
++    .filter((d) => new Date(toNumericUTCWithHour(d.hour)).getUTCHours() === 0)
 +    .map((d) => d.hour);
 +  return (
 +    <div>
@@ -258,19 +254,6 @@ index 000000000..8bff059c4
 +
 +function toNumericUTCWithHour(dateString: string) {
 +  try {
-+    if (dateString.includes("T")) {
-+      const [datePart, timePart] = dateString.split("T");
-+      const [year, month, day] = datePart.split("-");
-+      const hour = timePart;
-+      return Date.UTC(
-+        Number(year),
-+        Number(month) - 1,
-+        Number(day),
-+        Number(hour),
-+        0,
-+        0,
-+      );
-+    }
 +    const [datePart, timePart] = dateString.split(" ");
 +    if (!datePart) return NaN;
 +    const [year, month, day] = datePart.split("-");
@@ -547,10 +530,10 @@ index 1cdaae3b8..6fc81f416 100644
            <div className="flex flex-wrap items-center gap-6 gap-y-4">
 diff --git a/npm-packages/dashboard-common/src/features/health/components/EventsForInsight.tsx b/npm-packages/dashboard-common/src/features/health/components/EventsForInsight.tsx
 new file mode 100644
-index 000000000..4d828e7ab
+index 000000000..ef3c06896
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/health/components/EventsForInsight.tsx
-@@ -0,0 +1,689 @@
+@@ -0,0 +1,698 @@
 +import { DeploymentInfoContext } from "@common/lib/deploymentContext";
 +import {
 +  Disclosure,
@@ -935,7 +918,10 @@ index 000000000..4d828e7ab
 +  );
 +}
 +
-+function EventsTable<T extends { id: string }, I extends Insight>({
++function EventsTable<
++  T extends { id: string; timestamp: string },
++  I extends Insight,
++>({
 +  events,
 +  insight,
 +  columns,
@@ -977,7 +963,7 @@ index 000000000..4d828e7ab
 +        {events &&
 +          events.map((event) => (
 +            <div
-+              key={event.id}
++              key={`${event.id}:${event.timestamp}`}
 +              className="flex min-w-fit animate-fadeInFromLoading gap-2 border-b p-2 text-xs last:border-b-0"
 +            >
 +              {columns.map((col) => (
@@ -1094,6 +1080,12 @@ index 000000000..4d828e7ab
 +  );
 +}
 +
++function selfWriteSource(insight: Insight) {
++  return insight.componentPath
++    ? `${insight.componentPath}/${insight.functionId}`
++    : insight.functionId;
++}
++
 +function EventOccWriteSource({
 +  insight,
 +  event,
@@ -1111,7 +1103,7 @@ index 000000000..4d828e7ab
 +        <span className="text-content-secondary">Unknown</span>
 +      )}
 +      {event.occWriteSource &&
-+        (insight.functionId === event.occWriteSource ? (
++        (selfWriteSource(insight) === event.occWriteSource ? (
 +          <span className="flex items-center gap-1 text-content-secondary">
 +            Self{" "}
 +            <HelpTooltip>
@@ -1242,10 +1234,10 @@ index 000000000..4d828e7ab
 +}
 diff --git a/npm-packages/dashboard-common/src/features/health/components/HealthWithInsights.tsx b/npm-packages/dashboard-common/src/features/health/components/HealthWithInsights.tsx
 new file mode 100644
-index 000000000..e12efdc0b
+index 000000000..cdfb0dfcf
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/health/components/HealthWithInsights.tsx
-@@ -0,0 +1,292 @@
+@@ -0,0 +1,294 @@
 +import React, {
 +  useState,
 +  useCallback,
@@ -1448,6 +1440,7 @@ index 000000000..e12efdc0b
 +function InsightsWrapper({ children }: { children: React.ReactNode }) {
 +  const { insights, selectedFunctions, page } =
 +    useContext(InsightsContext) || {};
++  const moduleFunctions = useModuleFunctions();
 +  const notConfigured = useIsInsightsNotConfigured();
 +  const errored = useInsightsErrored();
 +  return (
@@ -1474,12 +1467,13 @@ index 000000000..e12efdc0b
 +              if (!selectedFunctions) return true;
 +              if (selectedFunctions === "all") return true;
 +              return (
-+                selectedFunctions.includes(
-+                  functionIdentifierValue(
-+                    insight.functionId,
-+                    insight.componentPath ?? undefined,
-+                  ),
-+                ) || selectedFunctions.includes("_other")
++                selectedFunctions.includes("_other") ||
++                moduleFunctions.some(
++                  (mf) =>
++                    mf.identifier === insight.functionId &&
++                    (mf.componentPath ?? null) === insight.componentPath &&
++                    selectedFunctions.includes(itemIdentifier(mf)),
++                )
 +              );
 +            })}
 +            notConfigured={notConfigured}
@@ -2244,28 +2238,27 @@ index 000000000..4005b536b
 +}
 diff --git a/npm-packages/dashboard-common/src/features/health/lib/insights.ts b/npm-packages/dashboard-common/src/features/health/lib/insights.ts
 new file mode 100644
-index 000000000..8391d5d8f
+index 000000000..9cc07bbbd
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/health/lib/insights.ts
-@@ -0,0 +1,219 @@
+@@ -0,0 +1,218 @@
 +import { ParsedUrlQuery } from "querystring";
 +import { UrlObject } from "url";
 +import {
 +  rootComponentPath,
 +  useUsageQuery,
 +} from "@common/features/health/lib/usage";
-+import {
-+  itemIdentifier,
-+  useModuleFunctions,
-+} from "@common/lib/functions/FunctionsProvider";
-+import { functionIdentifierValue } from "@common/lib/functions/generateFileTree";
++import { useModuleFunctions } from "@common/lib/functions/FunctionsProvider";
++
++const HOUR_MS = 60 * 60 * 1000;
++const PERIOD_MS = 72 * HOUR_MS;
 +
 +export function useInsightsPeriod() {
-+  const now = new Date();
-+  const hoursAgo72 = new Date(now.getTime() - 72 * 60 * 60 * 1000);
++  const now = Date.now();
++  const from = Math.floor((now - PERIOD_MS) / HOUR_MS) * HOUR_MS;
 +  return {
-+    from: hoursAgo72.toISOString(),
-+    to: now.toISOString(),
++    from: new Date(from).toISOString(),
++    to: new Date(now).toISOString(),
 +  };
 +}
 +
@@ -2422,13 +2415,13 @@ index 000000000..8391d5d8f
 +    };
 +    return order[a.kind] - order[b.kind];
 +  });
-+  return insights.filter((insight) => {
-+    const id = functionIdentifierValue(
-+      insight.functionId,
-+      insight.componentPath ?? undefined,
-+    );
-+    return moduleFunctions.some((mf) => itemIdentifier(mf) === id);
-+  });
++  return insights.filter((insight) =>
++    moduleFunctions.some(
++      (mf) =>
++        mf.identifier === insight.functionId &&
++        (mf.componentPath ?? null) === insight.componentPath,
++    ),
++  );
 +}
 +
 +export function useIsInsightsNotConfigured(): boolean {
@@ -3174,7 +3167,7 @@ index 28ae40fc5..01524ff9a 100644
    return pages;
  }
 diff --git a/npm-packages/dashboard-common/src/lib/deploymentApi.ts b/npm-packages/dashboard-common/src/lib/deploymentApi.ts
-index 3d3625939..25ce3742d 100644
+index 3d3625939..2745fd837 100644
 --- a/npm-packages/dashboard-common/src/lib/deploymentApi.ts
 +++ b/npm-packages/dashboard-common/src/lib/deploymentApi.ts
 @@ -1,14 +1,15 @@
@@ -3212,7 +3205,7 @@ index 3d3625939..25ce3742d 100644
  export function useFunctionUrl(udfPath: string, componentId?: string | null) {
    const { deploymentsURI } = useContext(DeploymentInfoContext);
  
-@@ -102,3 +100,172 @@ export const deploymentAuthMiddleware: Middleware =
+@@ -102,3 +100,178 @@ export const deploymentAuthMiddleware: Middleware =
  
      return useSWRNext(swrKey, fetcher, config);
    };
@@ -3235,10 +3228,16 @@ index 3d3625939..25ce3742d 100644
 +  const { reportHttpError } = useContext(DeploymentInfoContext);
 +  return useCallback(
 +    async (path: string, init: RequestInit = {}): Promise<Response | null> => {
-+      const res = await fetch(`${deploymentUrl}${path}`, {
-+        ...init,
-+        headers: { Authorization: `Convex ${adminKey}`, ...init.headers },
-+      });
++      let res: Response;
++      try {
++        res = await fetch(`${deploymentUrl}${path}`, {
++          ...init,
++          headers: { Authorization: `Convex ${adminKey}`, ...init.headers },
++        });
++      } catch (e) {
++        toast("error", e instanceof Error ? e.message : String(e));
++        return null;
++      }
 +      if (res.ok) {
 +        return res;
 +      }

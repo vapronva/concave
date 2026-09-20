@@ -430,12 +430,12 @@ index 1f9454d70..7f5398f90 100644
  clusters = { workspace = true, features = ["testing"] }
  common = { workspace = true, features = ["testing"] }
 diff --git a/rust-toolchain b/rust-toolchain
-index 1ba2c04ca..1401e02c4 100644
+index 1ba2c04ca..67961579e 100644
 --- a/rust-toolchain
 +++ b/rust-toolchain
 @@ -1,3 +1,4 @@
  [toolchain]
 -channel = "nightly-2026-06-28"
-+channel = "nightly-2026-09-19"
++channel = "nightly-2026-09-20"
  targets = ["wasm32-wasip1"]
 +components = ["rustfmt"]

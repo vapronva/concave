@@ -740,10 +740,10 @@ index 000000000..b6e156299
 +}
 diff --git a/crates/funrun_server/src/main.rs b/crates/funrun_server/src/main.rs
 new file mode 100644
-index 000000000..131bf8c9b
+index 000000000..7539beb45
 --- /dev/null
 +++ b/crates/funrun_server/src/main.rs
-@@ -0,0 +1,278 @@
+@@ -0,0 +1,288 @@
 +#![recursion_limit = "256"]
 +
 +use std::sync::{
@@ -799,7 +799,6 @@ index 000000000..131bf8c9b
 +        config.listen,
 +    );
 +    let registry = Arc::new(InstanceRegistry::new(runtime.clone(), &config)?);
-+    registry.prewarm().await;
 +    spawn_pod_deletion_cost_updater(&runtime, registry.clone());
 +    let service = FunrunService::new(runtime.clone(), registry.clone())?;
 +    let server = pb::funrun::funrun_server::FunrunServer::new(service)
@@ -821,13 +820,27 @@ index 000000000..131bf8c9b
 +        });
 +    }
 +    tracing::info!(
-+        "[convex-funrun] listening on {} (health {})",
-+        config.listen,
-+        config.health_listen
++        "[convex-funrun] health on {}; gRPC on {} once the instance is warm",
++        config.health_listen,
++        config.listen
 +    );
-+    let grpc = builder
-+        .add_service(server)
-+        .serve_with_shutdown(config.listen, wait_for_shutdown(shutdown_rx.clone()));
++    let grpc_registry = registry.clone();
++    let grpc_shutdown = shutdown_rx.clone();
++    let grpc = async move {
++        tokio::select! {
++            () = grpc_registry.warm() => {},
++            () = wait_for_shutdown(grpc_shutdown.clone()) => return Ok(()),
++        }
++        tracing::info!(
++            "[convex-funrun] instance warm; listening on {}",
++            config.listen
++        );
++        builder
++            .add_service(server)
++            .serve_with_shutdown(config.listen, wait_for_shutdown(grpc_shutdown))
++            .await
++            .context("convex-funrun gRPC server exited")
++    };
 +    let health = serve_health(
 +        config.health_listen,
 +        config.max_snapshot_lag,
@@ -835,10 +848,7 @@ index 000000000..131bf8c9b
 +        shutdown_rx,
 +        shutting_down,
 +    );
-+    tokio::try_join!(
-+        async { grpc.await.context("convex-funrun gRPC server exited") },
-+        health
-+    )?;
++    tokio::try_join!(grpc, health)?;
 +    Ok(())
 +}
 +
@@ -1747,10 +1757,10 @@ index 000000000..29b7e24d9
 +}
 diff --git a/crates/funrun_server/src/snapshot.rs b/crates/funrun_server/src/snapshot.rs
 new file mode 100644
-index 000000000..d94a7b7eb
+index 000000000..8a967292d
 --- /dev/null
 +++ b/crates/funrun_server/src/snapshot.rs
-@@ -0,0 +1,462 @@
+@@ -0,0 +1,473 @@
 +use std::{
 +    sync::Arc,
 +    time::Duration,
@@ -1807,7 +1817,10 @@ index 000000000..d94a7b7eb
 +    searcher::InProcessSearcher,
 +    TextIndexManager,
 +};
-+use sync_types::Timestamp;
++use sync_types::{
++    backoff::Backoff,
++    Timestamp,
++};
 +use tokio::sync::OnceCell;
 +
 +use crate::{
@@ -1824,6 +1837,8 @@ index 000000000..d94a7b7eb
 +};
 +
 +const MAX_PERCENT_PER_CLIENT: usize = 100;
++const WARMUP_BACKOFF_INITIAL: Duration = Duration::from_secs(1);
++const WARMUP_BACKOFF_MAX: Duration = Duration::from_secs(60);
 +
 +pub struct InstanceRegistry<RT: Runtime> {
 +    rt: RT,
@@ -1933,9 +1948,15 @@ index 000000000..d94a7b7eb
 +            .cloned()
 +    }
 +
-+    pub async fn prewarm(&self) {
-+        if let Err(e) = self.get_or_create(&self.instance.instance_name).await {
-+            tracing::error!("[convex-funrun] prewarm failed: {e:#}; will retry on demand");
++    pub async fn warm(&self) {
++        let mut backoff = Backoff::new(WARMUP_BACKOFF_INITIAL, WARMUP_BACKOFF_MAX);
++        while let Err(e) = self.get_or_create(&self.instance.instance_name).await {
++            let delay = backoff.fail(&mut self.rt.rng());
++            tracing::error!(
++                "[convex-funrun] instance load failed: {e:#}; retrying in {:.1}s",
++                delay.as_secs_f32()
++            );
++            self.rt.wait(delay).await;
 +        }
 +    }
 +

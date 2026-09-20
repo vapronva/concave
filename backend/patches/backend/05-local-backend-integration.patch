@@ -363,7 +363,7 @@ index 89f88e8a0..b38d2ef3a 100644
  }
  
 diff --git a/crates/local_backend/src/main.rs b/crates/local_backend/src/main.rs
-index fbc0e6290..c1e250f9f 100644
+index fbc0e6290..7e4b21c2d 100644
 --- a/crates/local_backend/src/main.rs
 +++ b/crates/local_backend/src/main.rs
 @@ -1,5 +1,6 @@
@@ -429,12 +429,14 @@ index fbc0e6290..c1e250f9f 100644
  fn main() -> Result<(), MainError> {
      let config = LocalConfig::parse();
      if let Some(subcommand) = &config.subcommand {
-@@ -137,42 +160,91 @@ async fn run_server(runtime: ProdRuntime, config: LocalConfig) -> anyhow::Result
+@@ -137,42 +160,97 @@ async fn run_server(runtime: ProdRuntime, config: LocalConfig) -> anyhow::Result
  }
  
  async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::Result<()> {
-+    let dynamic_roles_enabled = matches!(config.role, BackendRole::Follower)
-+        || std::env::var("CONVEX_CONTROL_PLANE_TOKEN").is_ok_and(|token| !token.is_empty());
++    let control_plane_token_set =
++        std::env::var("CONVEX_CONTROL_PLANE_TOKEN").is_ok_and(|token| !token.is_empty());
++    let dynamic_roles_enabled =
++        matches!(config.role, BackendRole::Follower) || control_plane_token_set;
 +    if dynamic_roles_enabled {
 +        anyhow::ensure!(
 +            matches!(config.db, clusters::DbDriverTag::Postgres(_)),
@@ -442,6 +444,10 @@ index fbc0e6290..c1e250f9f 100644
 +             lease fencing contract"
 +        );
 +    }
++    anyhow::ensure!(
++        control_plane_token_set || config.role.is_leader(),
++        "a follower requires CONVEX_CONTROL_PLANE_TOKEN: without it nothing can promote it"
++    );
 +    if config.boot_follower_when_initialized && !dynamic_roles_enabled {
 +        tracing::warn!(
 +            "[concave] CONVEX_BOOT_FOLLOWER_WHEN_INITIALIZED is set but dynamic roles are \
@@ -541,7 +547,7 @@ index fbc0e6290..c1e250f9f 100644
          *HTTP_SERVER_TIMEOUT_DURATION,
          HttpActionRouteMapper,
      );
-@@ -191,19 +263,20 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
+@@ -191,19 +269,20 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
      // Start shutdown when we get a manual shutdown signal or with the first
      // ctrl-c.
      let mut force_exit_duration = None;
@@ -565,7 +571,7 @@ index fbc0e6290..c1e250f9f 100644
              r?;
              let _: Result<_, _> = shutdown_tx.broadcast(()).await;
          },
-@@ -245,8 +318,12 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
+@@ -245,8 +324,12 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
                  tracing::info!("Cool down expired. Shutting down");
                  break;
              }
@@ -579,7 +585,7 @@ index fbc0e6290..c1e250f9f 100644
                  r?;
                  tracing::warn!("Forcibly shutting down!");
                  break;
-@@ -256,3 +333,28 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
+@@ -256,3 +339,28 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
  
      Ok(())
  }

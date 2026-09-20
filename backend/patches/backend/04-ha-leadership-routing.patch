@@ -31,7 +31,7 @@ index 578b19dad..9f722d7dd 100644
  }
 diff --git a/crates/local_backend/src/cors.rs b/crates/local_backend/src/cors.rs
 new file mode 100644
-index 000000000..34cbd9254
+index 000000000..d2e634c3f
 --- /dev/null
 +++ b/crates/local_backend/src/cors.rs
 @@ -0,0 +1,51 @@
@@ -40,8 +40,8 @@ index 000000000..34cbd9254
 +    CorsLayer,
 +};
 +
-+fn dashboard_origins() -> Vec<http::HeaderValue> {
-+    let Ok(raw) = std::env::var("CONVEX_DASHBOARD_ORIGIN") else {
++fn allowed_origins() -> Vec<http::HeaderValue> {
++    let Ok(raw) = std::env::var("CONVEX_ALLOWED_ORIGINS") else {
 +        return Vec::new();
 +    };
 +    raw.split(',')
@@ -60,12 +60,12 @@ index 000000000..34cbd9254
 +                    .ok()
 +            },
 +            Ok(_) => {
-+                tracing::warn!("[concave] skipping invalid CONVEX_DASHBOARD_ORIGIN entry {s:?}");
++                tracing::warn!("[concave] skipping invalid CONVEX_ALLOWED_ORIGINS entry {s:?}");
 +                None
 +            },
 +            Err(e) => {
 +                tracing::warn!(
-+                    "[concave] skipping invalid CONVEX_DASHBOARD_ORIGIN entry {s:?}: {e}"
++                    "[concave] skipping invalid CONVEX_ALLOWED_ORIGINS entry {s:?}: {e}"
 +                );
 +                None
 +            },
@@ -74,10 +74,10 @@ index 000000000..34cbd9254
 +}
 +
 +pub fn restrict_origins(layer: CorsLayer) -> CorsLayer {
-+    let allowed = dashboard_origins();
++    let allowed = allowed_origins();
 +    if allowed.is_empty() {
 +        tracing::warn!(
-+            "[concave] CONVEX_DASHBOARD_ORIGIN unset; CORS responses will include no \
++            "[concave] CONVEX_ALLOWED_ORIGINS unset; CORS responses will include no \
 +             Access-Control-Allow-Origin header"
 +        );
 +        return layer.allow_origin(AllowOrigin::list(Vec::<http::HeaderValue>::new()));
@@ -88,10 +88,10 @@ index 000000000..34cbd9254
 +}
 diff --git a/crates/local_backend/src/leadership.rs b/crates/local_backend/src/leadership.rs
 new file mode 100644
-index 000000000..13d2bb0ca
+index 000000000..c21cf6807
 --- /dev/null
 +++ b/crates/local_backend/src/leadership.rs
-@@ -0,0 +1,616 @@
+@@ -0,0 +1,624 @@
 +use std::sync::Arc;
 +
 +use axum::{
@@ -398,22 +398,30 @@ index 000000000..13d2bb0ca
 +    pub lease_ts: Option<u64>,
 +    pub lease_unverified_secs: Option<u64>,
 +    pub latest_ts: u64,
++    pub tailer_healthy: Option<bool>,
 +}
 +
 +pub async fn leadership(MtState(st): MtState<LocalAppState>) -> Response {
 +    let latest_ts: Timestamp = *st.application.now_ts_for_reads();
 +    let role = st.role.snapshot();
++    let database = st.application.database();
 +    let lease_unverified_secs = if role.is_leader {
-+        st.application.database().lease_unverified_secs()
++        database.lease_unverified_secs()
 +    } else {
 +        None
 +    };
++    let tailer_healthy = database
++        .follower_tailer_client()
++        .await
++        .ok()
++        .map(|tailer| tailer.is_healthy());
 +    axum::Json(LeadershipResponse {
 +        role: role.label.to_string(),
 +        is_leader: role.is_leader,
 +        lease_ts: role.lease_ts,
 +        lease_unverified_secs,
 +        latest_ts: u64::from(latest_ts),
++        tailer_healthy,
 +    })
 +    .into_response()
 +}

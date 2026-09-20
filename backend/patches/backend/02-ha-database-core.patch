@@ -345,10 +345,10 @@ index d33417025..51665d010 100644
  
 diff --git a/crates/database/src/database/ha.rs b/crates/database/src/database/ha.rs
 new file mode 100644
-index 000000000..c154b7d58
+index 000000000..fee6d5e61
 --- /dev/null
 +++ b/crates/database/src/database/ha.rs
-@@ -0,0 +1,335 @@
+@@ -0,0 +1,336 @@
 +use common::{
 +    knobs::DOCUMENT_RETENTION_RATE_LIMIT,
 +    persistence::new_static_repeatable_recent,
@@ -582,6 +582,7 @@ index 000000000..c154b7d58
 +            leader_state.retention_manager = retention_manager as Arc<dyn RetentionValidator>;
 +            leader_state.retention_workers = Some(retention_workers);
 +            leader_state.index_cache_handle = Some(index_cache_handle);
++            leader_state.index_cache = None;
 +            old_subscriptions
 +        };
 +        old_subscriptions.shutdown();
@@ -686,10 +687,10 @@ index 000000000..c154b7d58
 +}
 diff --git a/crates/database/src/follower_tailer.rs b/crates/database/src/follower_tailer.rs
 new file mode 100644
-index 000000000..e0d634bc9
+index 000000000..a845d0129
 --- /dev/null
 +++ b/crates/database/src/follower_tailer.rs
-@@ -0,0 +1,495 @@
+@@ -0,0 +1,508 @@
 +use std::{
 +    ops::Bound,
 +    sync::Arc,
@@ -755,6 +756,7 @@ index 000000000..e0d634bc9
 +pub struct FollowerTailerClient {
 +    demand: watch::Sender<Option<RepeatableTimestamp>>,
 +    progress: watch::Receiver<Option<RepeatableTimestamp>>,
++    healthy: watch::Receiver<bool>,
 +}
 +
 +impl FollowerTailerClient {
@@ -764,6 +766,10 @@ index 000000000..e0d634bc9
 +
 +    pub fn is_ready(&self) -> bool {
 +        self.is_running() && self.progress.borrow().is_some()
++    }
++
++    pub fn is_healthy(&self) -> bool {
++        self.is_running() && *self.healthy.borrow()
 +    }
 +
 +    pub fn has_reached(&self, target: RepeatableTimestamp) -> bool {
@@ -832,6 +838,7 @@ index 000000000..e0d634bc9
 +    poll_interval: Duration,
 +    demand: watch::Receiver<Option<RepeatableTimestamp>>,
 +    progress: watch::Sender<Option<RepeatableTimestamp>>,
++    healthy: watch::Sender<bool>,
 +}
 +
 +impl<RT: Runtime> FollowerLogTailer<RT> {
@@ -846,6 +853,7 @@ index 000000000..e0d634bc9
 +        let poll_interval = *MAX_REPEATABLE_TIMESTAMP_COMMIT_DELAY / 2;
 +        let (demand_tx, demand) = watch::channel(None);
 +        let (progress, progress_rx) = watch::channel(None);
++        let (healthy, healthy_rx) = watch::channel(true);
 +        let worker = Self {
 +            runtime: runtime.clone(),
 +            snapshot_writer,
@@ -855,6 +863,7 @@ index 000000000..e0d634bc9
 +            poll_interval,
 +            demand,
 +            progress,
++            healthy,
 +        };
 +        let (promote_tx, promote_rx) = oneshot::channel();
 +        let join = runtime.spawn("follower_log_tailer", worker.go(tailed_ts, promote_rx));
@@ -862,6 +871,7 @@ index 000000000..e0d634bc9
 +            client: FollowerTailerClient {
 +                demand: demand_tx,
 +                progress: progress_rx,
++                healthy: healthy_rx,
 +            },
 +            promote_tx,
 +            join,
@@ -895,6 +905,7 @@ index 000000000..e0d634bc9
 +                                &mut e.context("FollowerLogTailer bootstrap cold reload failed"),
 +                            )
 +                            .await;
++                            self.healthy.send_replace(false);
 +                            if let Some(reply) = self.pause(delay, &mut promote_rx, false).await {
 +                                self.handle_promote(reply, tailed_ts).await;
 +                                return;
@@ -911,6 +922,7 @@ index 000000000..e0d634bc9
 +                        backoff.failures(),
 +                        delay.as_secs_f32(),
 +                    );
++                    self.healthy.send_replace(false);
 +                    if let Some(reply) = self.pause(delay, &mut promote_rx, false).await {
 +                        self.handle_promote(reply, tailed_ts).await;
 +                        return;
@@ -919,6 +931,7 @@ index 000000000..e0d634bc9
 +            }
 +        }
 +        self.progress.send_replace(Some(tailed_ts));
++        self.healthy.send_replace(true);
 +        backoff.reset();
 +        tracing::info!(
 +            "[follower-tailer] search/vector warm at {tailed_ts}; entering tail loop (poll {:?})",
@@ -978,6 +991,7 @@ index 000000000..e0d634bc9
 +                    delay
 +                },
 +            };
++            self.healthy.send_replace(backoff.failures() == 0);
 +            if let Some(reply) = self
 +                .pause(wait, &mut promote_rx, backoff.failures() == 0)
 +                .await
