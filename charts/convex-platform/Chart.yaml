@@ -4,8 +4,7 @@ type: application
 
 name: convex-platform
 
-version: 0.11.0
-appVersion: latest
+version: 0.12.0
 
 maintainers:
   - name: Vladimir Malinovskiy

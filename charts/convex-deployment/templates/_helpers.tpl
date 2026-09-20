@@ -88,7 +88,7 @@ respond @cors_preflight 204
 {{- $spec := .spec -}}
 {{- $registry := default $top.registry $spec.registry -}}
 {{- $repo := default $top.repository $spec.repository -}}
-{{- $tag := $spec.tag | default $top.tag | default $ctx.Chart.AppVersion -}}
+{{- $tag := $spec.tag | default $top.tag | required "image.tag is required" -}}
 {{- $ref := $repo -}}
 {{- if $registry -}}
 {{- $ref = printf "%s/%s" $registry $repo -}}
@@ -199,6 +199,9 @@ strategy:
 
 {{- define "convex.pgEnv" -}}
 {{- $db := .Values.db -}}
+{{- if not (has $db.sslMode (list "disable" "require")) -}}
+{{- fail (printf "db.sslMode must be disable or require, got %q" $db.sslMode) -}}
+{{- end -}}
 - name: DB_PASSWORD
   valueFrom:
     secretKeyRef:
@@ -225,9 +228,11 @@ strategy:
   value: "https://{{ required "hosts.api is required" .Values.hosts.api }}"
 - name: CONVEX_SITE_ORIGIN
   value: "https://{{ required "hosts.site is required" .Values.hosts.site }}"
-{{- with .Values.hosts.dashboard }}
-- name: CONVEX_DASHBOARD_ORIGIN
-  value: "https://{{ . }}"
+{{- $origins := .Values.backend.corsOrigins | default list }}
+{{- with .Values.hosts.dashboard }}{{ $origins = prepend $origins (printf "https://%s" .) }}{{ end }}
+{{- with $origins }}
+- name: CONVEX_ALLOWED_ORIGINS
+  value: {{ join "," . | quote }}
 {{- end }}
 {{- include "convex.controlPlaneEnv" . }}
 {{- end -}}

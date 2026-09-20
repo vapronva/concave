@@ -122,7 +122,7 @@ strategy:
 {{- $spec := .spec -}}
 {{- $registry := $ctx.Values.image.registry -}}
 {{- $repo := $spec.repository -}}
-{{- $tag := $spec.tag | default $ctx.Chart.AppVersion -}}
+{{- $tag := required "image.tag is required" $spec.tag -}}
 {{- $ref := $repo -}}
 {{- if $registry -}}
 {{- $ref = printf "%s/%s" $registry $repo -}}

@@ -99,11 +99,6 @@ spec:
             {{- end }}
           volumeMounts:
             {{- include "convex.dataVolumeMount" . | nindent 12 }}
-          startupProbe:
-            httpGet: { path: /readyz, port: health }
-            initialDelaySeconds: 5
-            periodSeconds: 10
-            failureThreshold: 20
           readinessProbe:
             httpGet: { path: /readyz, port: health }
             periodSeconds: 10

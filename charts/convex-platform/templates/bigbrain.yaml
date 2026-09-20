@@ -130,7 +130,7 @@ spec:
             {{- end }}
             {{- end }}
             {{- end }}
-            - name: INSIGHTS_RING_CAP
+            - name: BIGBRAIN_INSIGHTS_RING_CAP
               value: {{ int64 $b.insightsRingCap | quote }}
             {{- if $b.metricsApiserver.enabled }}
             - name: BIGBRAIN_METRICS_APISERVER_ENABLED

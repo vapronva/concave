@@ -74,6 +74,7 @@ controlPlane:
 
 backend:
   extraEnv: []
+  corsOrigins: []
   concurrency:
     queries: ""
     mutations: ""
