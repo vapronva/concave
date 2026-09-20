@@ -930,7 +930,7 @@ func TestConsumeStream_ConnectFailureNudgesResolve(t *testing.T) {
 	tr := &tracker{
 		host:         "api.example",
 		resolveCh:    make(chan struct{}, 1),
-		streamClient: &http.Client{Transport: newStreamTransport()},
+		streamClient: &http.Client{Transport: newControlPlaneTransport()},
 		streamIdle:   streamIdleTimeout,
 	}
 	if tr.consumeStream(t.Context(), "http://127.0.0.1:1/leader-stream") {

@@ -36,7 +36,7 @@ const (
 	streamBufferMax         = 1 << 16
 	resolveTimeout          = 3 * time.Second
 	resolveInterval         = 60 * time.Second
-	forcedResolveInterval   = 1 * time.Second
+	nudgeCoalesceInterval   = 1 * time.Second
 	fastResolveInterval     = 5 * time.Second
 	readHeaderTimeout       = 10 * time.Second
 	idleTimeout             = 120 * time.Second
@@ -494,7 +494,7 @@ func startTracker(
 		maxBodyBytes:   maxBodyBytes,
 		streamIdle:     streamIdleTimeout,
 		client:         client,
-		streamClient:   &http.Client{Transport: newStreamTransport()},
+		streamClient:   &http.Client{Transport: newControlPlaneTransport()},
 		proxyTransport: newProxyTransport(),
 		resolveCh:      make(chan struct{}, 1),
 	}
@@ -541,7 +541,7 @@ func (t *tracker) nudgeResolve() {
 		t.resolveMu.Unlock()
 		return
 	}
-	t.nextResolve = time.Now().Add(forcedResolveInterval)
+	t.nextResolve = time.Now().Add(nudgeCoalesceInterval)
 	t.resolveMu.Unlock()
 	t.wakeResolve()
 }
@@ -553,7 +553,7 @@ func (t *tracker) wakeResolve() {
 	}
 }
 
-func newStreamTransport() *http.Transport {
+func newControlPlaneTransport() *http.Transport {
 	tr := clonedDefaultTransport()
 	tr.Proxy = nil
 	tr.ResponseHeaderTimeout = resolveTimeout
@@ -565,7 +565,7 @@ func newStreamTransport() *http.Transport {
 
 func newMux(routes map[string]route, trackers []*tracker, monoHost string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		host := strings.ToLower(stripPort(r.Host))
+		host := strings.TrimSuffix(strings.ToLower(stripPort(r.Host)), ".")
 		rt, ok := routes[host]
 		if !ok && monoHost != "" && !isProbePath(r.URL.Path) {
 			rt, ok = routes[monoHost]
@@ -622,7 +622,9 @@ func main() {
 		log.Fatalf("read config %s: %v", *cfgPath, err)
 	}
 	var cfg config
-	if err = json.Unmarshal(data, &cfg); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err = dec.Decode(&cfg); err != nil {
 		log.Fatalf("parse config: %v", err)
 	}
 	if err = validateConfig(cfg, *bigbrainURL, *mono); err != nil {
@@ -660,7 +662,7 @@ func run(
 ) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	client := &http.Client{Transport: newStreamTransport()}
+	client := &http.Client{Transport: newControlPlaneTransport()}
 	routes := make(map[string]route, len(cfg.Deployments)*routesPerDeployment)
 	trackers := make([]*tracker, 0, len(cfg.Deployments))
 	var monoHost string
@@ -717,8 +719,9 @@ func run(
 type activityListener struct {
 	net.Listener
 
-	idle time.Duration
-	ctx  context.Context
+	idle    time.Duration
+	ctx     context.Context
+	killLog logThrottle
 }
 
 func (l *activityListener) Accept() (net.Conn, error) {
@@ -727,7 +730,7 @@ func (l *activityListener) Accept() (net.Conn, error) {
 		return nil, err
 	}
 	ac := newActivityConn(c)
-	go ac.watch(l.ctx, l.idle)
+	go ac.watch(l.ctx, l.idle, &l.killLog)
 	return ac, nil
 }
 
@@ -770,7 +773,7 @@ func (c *activityConn) Close() error {
 	return c.Conn.Close()
 }
 
-func (c *activityConn) watch(ctx context.Context, idle time.Duration) {
+func (c *activityConn) watch(ctx context.Context, idle time.Duration, killLog *logThrottle) {
 	tick := min(max(idle/connWatchDivisor, connWatchFloor), connWatchCeil)
 	t := time.NewTicker(tick)
 	defer t.Stop()
@@ -782,7 +785,9 @@ func (c *activityConn) watch(ctx context.Context, idle time.Duration) {
 			return
 		case <-t.C:
 			if time.Since(time.Unix(0, c.last.Load())) > idle {
-				log.Printf("usher: closing connection %s: no progress for %s", c.RemoteAddr(), idle)
+				if killLog.allow() {
+					log.Printf("usher: closing connection %s: no progress for %s", c.RemoteAddr(), idle)
+				}
 				_ = c.Close()
 				return
 			}
