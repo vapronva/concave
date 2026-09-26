@@ -22,7 +22,7 @@ spec:
     metadata:
       labels:
         {{- include "convex.componentLabels" (dict "ctx" . "component" "follower") | nindent 8 }}
-        {{- include "convex.backendDiscoveryLabels" (dict "ctx" . "role" "follower" "priority" .Values.ha.followerPriority) | nindent 8 }}
+        {{- include "convex.backendDiscoveryLabels" (dict "ctx" . "role" "follower") | nindent 8 }}
     spec:
       {{- with include "convex.imagePullSecrets" . }}{{- . | nindent 6 }}{{- end }}
       {{- with include "convex.podScheduling" .Values.ha.follower }}{{- . | nindent 6 }}{{- end }}

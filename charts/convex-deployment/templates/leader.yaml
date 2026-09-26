@@ -18,7 +18,7 @@ spec:
     metadata:
       labels:
         {{- include "convex.componentLabels" (dict "ctx" . "component" "leader") | nindent 8 }}
-        {{- include "convex.backendDiscoveryLabels" (dict "ctx" . "role" "leader" "priority" .Values.ha.leaderPriority) | nindent 8 }}
+        {{- include "convex.backendDiscoveryLabels" (dict "ctx" . "role" "leader") | nindent 8 }}
     spec:
       {{- with include "convex.imagePullSecrets" . }}{{- . | nindent 6 }}{{- end }}
       {{- with include "convex.podScheduling" .Values.ha.leader }}{{- . | nindent 6 }}{{- end }}

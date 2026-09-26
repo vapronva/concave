@@ -45,12 +45,8 @@ bigbrain:
     repository: vapronva/concave/bigbrain
     tag: ""
   insightsRingCap: 50000
-  reconcileInterval: 2s
-  promoteDebounce: 3
   failback:
     enabled: true
-    stability: 15s
-    warmthLag: 5000000000
   preferredNode: ""
   nodes: []
   nodeSelector: {}

@@ -66,8 +66,6 @@ spec:
               value: "0.0.0.0:{{ include "convex.listenPort" .Values.funrun.listen }}"
             - name: FUNRUN_HEALTH_LISTEN
               value: "0.0.0.0:{{ include "convex.listenPort" .Values.funrun.healthListen }}"
-            - name: FUNRUN_MAX_SNAPSHOT_LAG_SECS
-              value: {{ int64 .Values.funrun.maxSnapshotLagSeconds | quote }}
             {{- with .Values.funrun.drainDelaySeconds }}
             - name: CONVEX_FUNRUN_DRAIN_DELAY_SECS
               value: {{ int64 . | quote }}

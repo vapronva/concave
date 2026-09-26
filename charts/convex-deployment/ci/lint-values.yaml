@@ -44,7 +44,6 @@ ha:
 insights:
   enabled: true
   sinkUrl: http://bigbrain.convex-system.svc.cluster.local:8081/internal/usage
-  queryUrl: http://bigbrain.convex-system.svc.cluster.local:8081
 
 controlPlane:
   tokenSecretRef:

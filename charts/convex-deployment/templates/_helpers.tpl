@@ -155,20 +155,9 @@ strategy:
 {{- define "convex.backendDiscoveryLabels" -}}
 {{- $ctx := .ctx -}}
 {{- $prefix := include "convex.labelPrefix" $ctx -}}
-{{- $priority := .priority -}}
-{{- if kindIs "string" $priority -}}
-{{- if not (regexMatch "^-?[0-9]+$" $priority) -}}
-{{- fail (printf "ha.%sPriority must be an integer, got %v" .role $priority) -}}
-{{- end -}}
-{{- else if not (or (kindIs "int64" $priority) (kindIs "int" $priority) (kindIs "float64" $priority)) -}}
-{{- fail (printf "ha.%sPriority must be an integer, got %v" .role $priority) -}}
-{{- else if ne (float64 (int64 $priority)) (float64 $priority) -}}
-{{- fail (printf "ha.%sPriority must be an integer, got %v" .role $priority) -}}
-{{- end -}}
 {{ $prefix }}/component: backend
 {{ $prefix }}/instance: {{ required "instance.name is required" $ctx.Values.instance.name | quote }}
 {{ $prefix }}/role: {{ required "role is required for backend discovery labels" .role }}
-{{ $prefix }}/leader-priority: {{ int64 .priority | quote }}
 {{- end -}}
 
 {{- define "convex.componentDiscoveryLabel" -}}
@@ -340,8 +329,6 @@ seccompProfile:
     secretKeyRef:
       name: {{ include "convex.insightsTokenSecretName" . }}
       key: {{ default "usage-token" .Values.insights.tokenRef.key }}
-- name: CONVEX_INSIGHTS_QUERY_URL
-  value: {{ required "insights.queryUrl is required when insights.enabled" .Values.insights.queryUrl | quote }}
 {{- end -}}
 
 {{- define "convex.sharedTunableEnv" -}}

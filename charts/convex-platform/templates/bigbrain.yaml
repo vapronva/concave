@@ -7,7 +7,7 @@
 {{- end -}}
 {{- $bbShutdownNeed := add 10 30 5 -}}
 {{- if gt $bbShutdownNeed (int $b.terminationGracePeriodSeconds) -}}
-{{- fail (printf "bigbrain.terminationGracePeriodSeconds=%d is below the %d seconds a clean shutdown needs: 10 (http drain) + 30 (default actuation budget, BIGBRAIN_ACTUATION_TIMEOUT) + 5 (slack); raise bigbrain.terminationGracePeriodSeconds (and raise it further if you raise BIGBRAIN_ACTUATION_TIMEOUT via extraEnv)" (int $b.terminationGracePeriodSeconds) $bbShutdownNeed) -}}
+{{- fail (printf "bigbrain.terminationGracePeriodSeconds=%d is below the %d seconds a clean shutdown needs: 10 (http drain) + 30 (actuation budget) + 5 (slack); raise bigbrain.terminationGracePeriodSeconds" (int $b.terminationGracePeriodSeconds) $bbShutdownNeed) -}}
 {{- end -}}
 ---
 apiVersion: v1
@@ -103,16 +103,8 @@ spec:
               value: {{ include "convex.labelPrefix" . | quote }}
             - name: BIGBRAIN_DEPLOYMENTS
               value: {{ include "convex.bigbrainDeployments" . | quote }}
-            - name: BIGBRAIN_INTERVAL
-              value: {{ $b.reconcileInterval | quote }}
-            - name: BIGBRAIN_PROMOTE_DEBOUNCE
-              value: {{ int64 $b.promoteDebounce | quote }}
             - name: BIGBRAIN_FAILBACK_ENABLED
               value: {{ $b.failback.enabled | quote }}
-            - name: BIGBRAIN_FAILBACK_STABILITY
-              value: {{ $b.failback.stability | quote }}
-            - name: BIGBRAIN_FAILBACK_WARMTH_LAG
-              value: {{ int64 $b.failback.warmthLag | quote }}
             {{- range $i, $deployment := $deployments }}
             {{- $cp := $deployment.controlPlaneTokenSecretRef | default dict }}
             - name: BIGBRAIN_CONTROL_PLANE_TOKEN_{{ $i }}

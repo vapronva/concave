@@ -42,8 +42,6 @@ hosts:
 
 ha:
   standbyReplicas: 1
-  leaderPriority: 100
-  followerPriority: 0
   requireNodeSpread: true
   spreadTopologyKey: kubernetes.io/hostname
   pdb:
@@ -62,7 +60,6 @@ ha:
 insights:
   enabled: false
   sinkUrl: ""
-  queryUrl: ""
   tokenRef:
     name: ""
     key: usage-token
@@ -95,7 +92,6 @@ funrun:
       maxSurge: 1
   listen: :8090
   healthListen: :8091
-  maxSnapshotLagSeconds: 30
   drainDelaySeconds: ""
   terminationGracePeriodSeconds: 930
   nodes: []
