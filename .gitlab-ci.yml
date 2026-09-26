@@ -9,13 +9,19 @@ include:
   - component: $CI_SERVER_FQDN/ci/security/bundle@1
   - component: $CI_SERVER_FQDN/ci/golang/init-vet@2
     inputs:
-      working_dirs: [router/usher, router/bigbrain]
+      working_dirs:
+        - router/usher
+        - router/bigbrain
   - component: $CI_SERVER_FQDN/ci/golang/lint@2
     inputs:
-      working_dirs: [router/usher, router/bigbrain]
+      working_dirs:
+        - router/usher
+        - router/bigbrain
   - component: $CI_SERVER_FQDN/ci/golang/test@2
     inputs:
-      working_dirs: [router/usher, router/bigbrain]
+      working_dirs:
+        - router/usher
+        - router/bigbrain
   - component: $CI_SERVER_FQDN/ci/docker/build-and-scan@4
     inputs:
       name: backend
@@ -25,9 +31,6 @@ include:
       dockerfile: backend/Dockerfile.backend
       working_dir: backend
       architectures: linux/amd64
-      rules_changes:
-        - backend/**/*
-        - $CI_CONFIG_PATH
   - component: $CI_SERVER_FQDN/ci/docker/build-and-scan@4
     inputs:
       name: dashboard
@@ -37,9 +40,6 @@ include:
       dockerfile: backend/Dockerfile.dashboard
       working_dir: backend
       architectures: linux/amd64
-      rules_changes:
-        - backend/**/*
-        - $CI_CONFIG_PATH
   - component: $CI_SERVER_FQDN/ci/docker/build-and-scan@4
     inputs:
       name: usher
@@ -49,9 +49,6 @@ include:
       dockerfile: router/usher/Dockerfile
       working_dir: router/usher
       architectures: linux/amd64
-      rules_changes:
-        - router/usher/**/*
-        - $CI_CONFIG_PATH
   - component: $CI_SERVER_FQDN/ci/docker/build-and-scan@4
     inputs:
       name: bigbrain
@@ -61,9 +58,6 @@ include:
       dockerfile: router/bigbrain/Dockerfile
       working_dir: router/bigbrain
       architectures: linux/amd64
-      rules_changes:
-        - router/bigbrain/**/*
-        - $CI_CONFIG_PATH
   - component: $CI_SERVER_FQDN/ci/helm-chart/lint@1
     inputs:
       job_name: validate + lint (helm charts)
