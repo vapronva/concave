@@ -164,7 +164,7 @@ func TestServer_UsageEndpointsRequireTheDeploymentToken(t *testing.T) {
 	reg.EnsureDeployment("dev", "convex-dev")
 	post := func(deployment, auth string) int {
 		rr := httptest.NewRecorder()
-		body := `{"deployment":"` + deployment + `","events":[]}`
+		body := `{"deployment":"` + deployment + `","read_limits":{"documents":1,"bytes":1,"warning_ratio":1},"events":[]}`
 		req := httptest.NewRequest(http.MethodPost, "/internal/usage", strings.NewReader(body))
 		if auth != "" {
 			req.Header.Set("Authorization", auth)
@@ -219,6 +219,14 @@ func TestServer_UsageIngestThenQuery(t *testing.T) {
 	}
 	if ing.Ingested != 2 {
 		t.Fatalf("ingested=%d want 2", ing.Ingested)
+	}
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/internal/usage",
+		strings.NewReader(strings.Replace(ingest, `"warning_ratio":0.8`, `"warning_ratio":0`, 1)))
+	req.Header.Set("Authorization", "Bearer usage-secret")
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("out-of-range read_limits: want 400, got %d (%s)", rr.Code, rr.Body.String())
 	}
 	rr = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodGet,

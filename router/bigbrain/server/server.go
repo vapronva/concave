@@ -104,7 +104,11 @@ func (s *Server) handleUsageIngest(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnauthorized, "invalid usage token")
 		return
 	}
-	kept := s.ins.Ingest(body.Deployment, body.ReadLimits, body.Events)
+	kept, err := s.ins.Ingest(body.Deployment, body.ReadLimits, body.Events)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]int{"ingested": kept})
 }
 

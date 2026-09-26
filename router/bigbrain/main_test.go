@@ -62,22 +62,12 @@ func TestLoadDeploymentTokens_PairsTokensByIndex(t *testing.T) {
 }
 
 func TestElectionConfigFromEnv(t *testing.T) {
-	for _, k := range []string{
-		"BIGBRAIN_INTERVAL", "BIGBRAIN_PROMOTE_DEBOUNCE", "BIGBRAIN_FAILBACK_ENABLED",
-		"BIGBRAIN_FAILBACK_STABILITY", "BIGBRAIN_FAILBACK_WARMTH_LAG", "BIGBRAIN_ACTUATION_TIMEOUT",
-	} {
-		t.Setenv(k, "")
-	}
+	t.Setenv("BIGBRAIN_FAILBACK_ENABLED", "")
 	if got := electionConfigFromEnv(); got != election.DefaultConfig() {
-		t.Fatalf("unset envs must yield the election defaults, got %+v", got)
+		t.Fatalf("an unset env must yield the election defaults, got %+v", got)
 	}
-	t.Setenv("BIGBRAIN_PROMOTE_DEBOUNCE", "0")
 	t.Setenv("BIGBRAIN_FAILBACK_ENABLED", "false")
-	got := electionConfigFromEnv()
-	if got.PromoteDebounce != 0 || got.FailbackEnabled {
-		t.Fatalf("explicit zero and false must reach the config, got %+v", got)
-	}
-	if got.Interval != election.DefaultInterval || got.ActuationTimeout != election.DefaultActuationTimeout {
-		t.Fatalf("untouched knobs must keep their defaults, got %+v", got)
+	if got := electionConfigFromEnv(); got.FailbackEnabled {
+		t.Fatalf("an explicit false must reach the config, got %+v", got)
 	}
 }

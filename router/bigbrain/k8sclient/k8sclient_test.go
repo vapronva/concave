@@ -10,16 +10,13 @@ import (
 	"git.horse/vapronva/concave/router/bigbrain/k8sclient"
 )
 
-func pod(prefix, name, role, component, priority, ip string, ready bool) *corev1.Pod {
+func pod(prefix, name, role, component, ip string, ready bool) *corev1.Pod {
 	labels := map[string]string{prefix + "/instance": "acme"}
 	if role != "" {
 		labels[prefix+"/role"] = role
 	}
 	if component != "" {
 		labels[prefix+"/component"] = component
-	}
-	if priority != "" {
-		labels[prefix+"/leader-priority"] = priority
 	}
 	cond := corev1.ConditionFalse
 	if ready {
@@ -39,13 +36,13 @@ func TestDiscoverBackends_CustomPrefix(t *testing.T) {
 	t.Parallel()
 	const prefix = "example.com"
 	cs := fake.NewClientset(
-		pod(prefix, "backend-0", "leader", "backend", "100", "10.0.0.1", true),
-		pod(prefix, "backend-1", "follower", "backend", "", "10.0.0.2", false),
-		pod(prefix, "dashboard-0", "", "", "", "10.0.0.3", true),
-		pod(prefix, "funrun-0", "follower", "funrun", "", "10.0.0.4", true),
-		pod(prefix, "unlabeled-0", "follower", "", "", "10.0.0.6", true),
-		pod(prefix, "pending-0", "follower", "backend", "", "", true),
-		pod("convex", "other-0", "leader", "backend", "100", "10.0.0.5", true),
+		pod(prefix, "backend-0", "leader", "backend", "10.0.0.1", true),
+		pod(prefix, "backend-1", "follower", "backend", "10.0.0.2", false),
+		pod(prefix, "dashboard-0", "", "", "10.0.0.3", true),
+		pod(prefix, "funrun-0", "follower", "funrun", "10.0.0.4", true),
+		pod(prefix, "unlabeled-0", "follower", "", "10.0.0.6", true),
+		pod(prefix, "pending-0", "follower", "backend", "", true),
+		pod("convex", "other-0", "leader", "backend", "10.0.0.5", true),
 	)
 	c := k8sclient.NewFromInterface(cs, prefix)
 	out, err := c.DiscoverBackends(context.Background(), "acme", "acme")
@@ -65,17 +62,17 @@ func TestDiscoverBackends_CustomPrefix(t *testing.T) {
 		t.Fatalf("unexpected leader fields: %+v", out[0])
 	}
 	if out[1].Priority != 0 {
-		t.Fatalf("backend-1 has no priority label and role=follower; want Priority=0, got %+v", out[1])
+		t.Fatalf("backend-1 is a follower; want Priority=0, got %+v", out[1])
 	}
 }
 
 func TestDiscoverBackends_SkipsTerminalPods(t *testing.T) {
 	t.Parallel()
 	const prefix = "convex"
-	running := pod(prefix, "backend-0", "leader", "backend", "100", "10.0.0.1", true)
-	failed := pod(prefix, "backend-1", "follower", "backend", "", "10.0.0.2", false)
+	running := pod(prefix, "backend-0", "leader", "backend", "10.0.0.1", true)
+	failed := pod(prefix, "backend-1", "follower", "backend", "10.0.0.2", false)
 	failed.Status.Phase = corev1.PodFailed
-	succeeded := pod(prefix, "backend-2", "follower", "backend", "", "10.0.0.3", false)
+	succeeded := pod(prefix, "backend-2", "follower", "backend", "10.0.0.3", false)
 	succeeded.Status.Phase = corev1.PodSucceeded
 	cs := fake.NewClientset(running, failed, succeeded)
 	c := k8sclient.NewFromInterface(cs, prefix)

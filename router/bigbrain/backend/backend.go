@@ -38,12 +38,11 @@ func New(tokens map[string]string) *Client {
 	}
 }
 
-func (c *Client) Leadership(ctx context.Context, deployment, base string) (Leadership, error) {
+func (c *Client) Leadership(ctx context.Context, base string) (Leadership, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/instance/leadership", nil)
 	if err != nil {
 		return Leadership{}, err
 	}
-	c.setControlPlaneToken(req, deployment)
 	status, body, err := do(c.http, req)
 	if err != nil {
 		return Leadership{}, err

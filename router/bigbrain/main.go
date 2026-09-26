@@ -60,7 +60,7 @@ func run() int {
 	}
 	cfg := electionConfigFromEnv()
 	insightsRingCap := envInt("BIGBRAIN_INSIGHTS_RING_CAP", defaultInsightsRingCap)
-	if err = validateRuntimeConfig(cfg, insightsRingCap, log); err != nil {
+	if err = validateRuntimeConfig(insightsRingCap, log); err != nil {
 		return 1
 	}
 	ctrl := election.New(cfg, k8s, backend.New(controlPlaneTokens), reg, log)
@@ -110,12 +110,7 @@ func run() int {
 
 func electionConfigFromEnv() election.Config {
 	cfg := election.DefaultConfig()
-	cfg.Interval = envDuration("BIGBRAIN_INTERVAL", cfg.Interval)
-	cfg.PromoteDebounce = envInt("BIGBRAIN_PROMOTE_DEBOUNCE", cfg.PromoteDebounce)
 	cfg.FailbackEnabled = envBool("BIGBRAIN_FAILBACK_ENABLED", cfg.FailbackEnabled)
-	cfg.FailbackStability = envDuration("BIGBRAIN_FAILBACK_STABILITY", cfg.FailbackStability)
-	cfg.FailbackWarmthLagNs = envUint64("BIGBRAIN_FAILBACK_WARMTH_LAG", cfg.FailbackWarmthLagNs)
-	cfg.ActuationTimeout = envDuration("BIGBRAIN_ACTUATION_TIMEOUT", cfg.ActuationTimeout)
 	return cfg
 }
 
@@ -145,14 +140,10 @@ func buildRegistry(
 	return reg, controlPlaneTokens, usageTokens, nil
 }
 
-func validateRuntimeConfig(cfg election.Config, insightsRingCap int, log *slog.Logger) error {
+func validateRuntimeConfig(insightsRingCap int, log *slog.Logger) error {
 	if insightsRingCap <= 0 {
 		err := fmt.Errorf("insights ring cap must be > 0, got %d", insightsRingCap)
 		log.Error("bigbrain: invalid BIGBRAIN_INSIGHTS_RING_CAP", "err", err)
-		return err
-	}
-	if err := cfg.Validate(); err != nil {
-		log.Error("bigbrain: invalid election config", "err", err)
 		return err
 	}
 	return nil
@@ -328,30 +319,6 @@ func envInt(k string, d int) int {
 		return d
 	}
 	n, err := strconv.Atoi(v)
-	if err != nil {
-		badEnv(k, v, err)
-	}
-	return n
-}
-
-func envDuration(k string, d time.Duration) time.Duration {
-	v := os.Getenv(k)
-	if v == "" {
-		return d
-	}
-	dur, err := time.ParseDuration(v)
-	if err != nil {
-		badEnv(k, v, err)
-	}
-	return dur
-}
-
-func envUint64(k string, d uint64) uint64 {
-	v := os.Getenv(k)
-	if v == "" {
-		return d
-	}
-	n, err := strconv.ParseUint(v, 10, 64)
 	if err != nil {
 		badEnv(k, v, err)
 	}

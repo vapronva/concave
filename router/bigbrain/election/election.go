@@ -2,7 +2,6 @@ package election
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -49,22 +48,6 @@ func DefaultConfig() Config {
 		EmptyDiscoveryDebounce: emptyDiscoveryDebounce,
 		ActuationTimeout:       DefaultActuationTimeout,
 	}
-}
-
-func (c Config) Validate() error {
-	if c.Interval <= 0 {
-		return fmt.Errorf("interval must be > 0, got %s", c.Interval)
-	}
-	if c.PromoteDebounce < 0 {
-		return fmt.Errorf("promote-debounce must be >= 0, got %d", c.PromoteDebounce)
-	}
-	if c.FailbackStability < 0 {
-		return fmt.Errorf("failback-stability must be >= 0, got %s", c.FailbackStability)
-	}
-	if c.ActuationTimeout <= 0 {
-		return fmt.Errorf("actuation-timeout must be > 0, got %s", c.ActuationTimeout)
-	}
-	return nil
 }
 
 type Controller struct {
@@ -222,7 +205,9 @@ func (c *Controller) commitState(st *deploymentState, dec decision, emptyList bo
 	st.failback = dec.failbackState
 	if emptyList {
 		st.emptyStreak++
-		st.leaderlessStreak = 0
+		if st.emptyStreak >= c.cfg.EmptyDiscoveryDebounce {
+			st.leaderlessStreak = 0
+		}
 	} else {
 		st.emptyStreak = 0
 		switch {
@@ -251,7 +236,7 @@ func (c *Controller) pollAll(ctx context.Context, name string, pods []k8sclient.
 		wg.Go(func() {
 			pctx, cancel := context.WithTimeout(ctx, pollTimeout)
 			defer cancel()
-			l, err := c.backend.Leadership(pctx, name, pods[i].URL)
+			l, err := c.backend.Leadership(pctx, pods[i].URL)
 			if err != nil {
 				c.log.DebugContext(ctx, "election: leadership poll failed",
 					"deployment", name, "pod", pods[i].Pod, "url", pods[i].URL, "err", err)

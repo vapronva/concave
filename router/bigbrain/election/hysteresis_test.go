@@ -102,17 +102,26 @@ func TestCommitState_EmptyDiscoveryDoesNotRestartUnreachableGrace(t *testing.T) 
 	}
 }
 
-func TestCommitState_EmptyListDoesNotAdvanceStreak(t *testing.T) {
+func TestCommitState_EmptyListResetsStreakOnlyPastDebounce(t *testing.T) {
 	t.Parallel()
-	reg := registry.New()
-	reg.EnsureDeployment("dev", "convex-dev")
-	c := New(withConfig(func(c *Config) { c.PromoteDebounce = 3 }), nil, nil, reg, quietLogger())
+	const debounce = 3
+	c := New(
+		withConfig(func(c *Config) { c.EmptyDiscoveryDebounce = debounce }),
+		nil,
+		nil,
+		registry.New(),
+		quietLogger(),
+	)
 	st := c.deploymentState("dev")
-	emptyDecision := decision{liveLeaderCount: 0}
-	for range 10 {
-		if got, _, _ := c.commitState(st, emptyDecision, true, time.Now()); got != 0 {
-			t.Fatalf("empty backend list must not advance the leaderless streak, got %d", got)
+	st.leaderlessStreak = 2
+	empty := decision{liveLeaderCount: 0}
+	for tick := 1; tick < debounce; tick++ {
+		if got, _, _ := c.commitState(st, empty, true, time.Now()); got != 2 {
+			t.Fatalf("empty tick %d < debounce %d must keep the leaderless streak, got %d", tick, debounce, got)
 		}
+	}
+	if got, _, _ := c.commitState(st, empty, true, time.Now()); got != 0 {
+		t.Fatalf("a confirmed-empty discovery must reset the leaderless streak, got %d", got)
 	}
 }
 

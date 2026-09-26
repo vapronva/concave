@@ -51,10 +51,6 @@ func newEpoch() uint64 {
 	return 1
 }
 
-func (r *Registry) Epoch() uint64 {
-	return r.epoch
-}
-
 func (r *Registry) EnsureDeployment(name, ns string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

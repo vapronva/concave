@@ -153,9 +153,9 @@ func decide(obs []observation, p decideParams) decision {
 	d := decision{
 		liveLeaderCount:  len(claims),
 		hasTransitioning: anyTransitioning(obs),
-		failbackState:    retainedFailback(obs, p.failback.prior),
 	}
 	if len(claims) == 0 {
+		d.failbackState = retainedFailback(obs, p.failback.prior)
 		d.incumbentUnreachable = incumbentDiscoveredUnreachable(obs, p.incumbent)
 		if d.hasTransitioning {
 			return d
@@ -172,12 +172,10 @@ func decide(obs []observation, p decideParams) decision {
 			d.demotes = append(d.demotes, demoteTarget{pod: o.be.Pod, url: o.be.URL, leaseTS: o.status.LeaseTS})
 		}
 	}
-	if len(claims) == 1 {
-		fb, st := evaluateFailback(obs, leader, p.failback)
-		d.failbackState = st
-		if !d.hasTransitioning {
-			d.failbackTarget = fb
-		}
+	fb, st := evaluateFailback(obs, leader, p.failback)
+	d.failbackState = st
+	if len(claims) == 1 && !d.hasTransitioning {
+		d.failbackTarget = fb
 	}
 	return d
 }

@@ -39,12 +39,6 @@ func TestRegistry_SubscriberEvents(t *testing.T) {
 	t.Parallel()
 	r := registry.New()
 	r.EnsureDeployment("dev", "convex-dev")
-	if r.Epoch() == 0 {
-		t.Fatal("registry epoch must be a non-zero per-process nonce")
-	}
-	if registry.New().Epoch() == r.Epoch() {
-		t.Fatal("a fresh registry (a bigbrain restart) must carry a distinct epoch")
-	}
 	ch, cancel, ok := r.Subscribe("dev")
 	if !ok {
 		t.Fatal("subscribe failed")
@@ -61,8 +55,8 @@ func TestRegistry_SubscriberEvents(t *testing.T) {
 		if ev.Seq == 0 || ev.Seq != current.Seq {
 			t.Fatalf("event seq %d must match Leader() seq %d and be non-zero", ev.Seq, current.Seq)
 		}
-		if ev.Epoch != r.Epoch() {
-			t.Fatalf("event epoch %d must match registry epoch %d", ev.Epoch, r.Epoch())
+		if ev.Epoch == 0 {
+			t.Fatal("event epoch must be a non-zero per-process nonce")
 		}
 		first = ev.Seq
 	case <-time.After(time.Second):

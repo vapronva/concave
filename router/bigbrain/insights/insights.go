@@ -12,9 +12,6 @@ import (
 )
 
 const (
-	defaultDocumentsReadLimit  = 32000
-	defaultBytesReadLimit      = 16 * 1024 * 1024
-	defaultWarningRatio        = 0.8
 	rootComponent              = "-root-component-"
 	groupSep                   = "\x1f"
 	maxRecentPerGroup          = 50
@@ -40,8 +37,9 @@ const (
 )
 
 var (
-	ErrBadDate      = errors.New("dates must be YYYY-MM-DD")
-	ErrBadDateRange = errors.New("from must be on or before to")
+	ErrBadDate       = errors.New("dates must be YYYY-MM-DD")
+	ErrBadDateRange  = errors.New("from must be on or before to")
+	ErrBadReadLimits = errors.New("read_limits needs documents > 0, bytes > 0 and 0 < warning_ratio <= 1")
 )
 
 type Row struct {
@@ -72,14 +70,6 @@ type ReadLimits struct {
 	WarningRatio float64 `json:"warning_ratio"`
 }
 
-func DefaultReadLimits() ReadLimits {
-	return ReadLimits{
-		Documents:    defaultDocumentsReadLimit,
-		Bytes:        defaultBytesReadLimit,
-		WarningRatio: defaultWarningRatio,
-	}
-}
-
 func (l ReadLimits) valid() bool {
 	return l.Documents > 0 && l.Bytes > 0 && l.WarningRatio > 0 && l.WarningRatio <= 1
 }
@@ -106,9 +96,9 @@ func New(ringCap int) *Insights {
 
 type AnyEvent map[string]map[string]any
 
-func (i *Insights) Ingest(deployment string, limits ReadLimits, events []AnyEvent) int {
+func (i *Insights) Ingest(deployment string, limits ReadLimits, events []AnyEvent) (int, error) {
 	if !limits.valid() {
-		limits = DefaultReadLimits()
+		return 0, ErrBadReadLimits
 	}
 	rows := makeRows(events)
 	i.memMu.Lock()
@@ -122,7 +112,7 @@ func (i *Insights) Ingest(deployment string, limits ReadLimits, events []AnyEven
 	for _, r := range rows {
 		dep.push(r, i.cap)
 	}
-	return len(rows)
+	return len(rows), nil
 }
 
 func makeRows(events []AnyEvent) []Row {
@@ -152,7 +142,7 @@ func (i *Insights) rows(deployment string, fromMs, toMs int64) ([]Row, ReadLimit
 	var out []Row
 	dep := i.mem[deployment]
 	if dep == nil {
-		return nil, DefaultReadLimits()
+		return nil, ReadLimits{}
 	}
 	for n := range len(dep.rows) {
 		r := dep.rows[(dep.start+n)%len(dep.rows)]
@@ -320,6 +310,8 @@ func (d readDimension) row(udfID, comp string, grp []Row) ([]any, bool) {
 	}
 	body := map[string]any{
 		"count":        count,
+		"limit":        d.limit,
+		"threshold":    d.threshold,
 		"hourlyCounts": hourly,
 		"recentEvents": readRecent(rows),
 	}

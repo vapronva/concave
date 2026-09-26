@@ -120,9 +120,6 @@ func (c *Controller) promoteAndLog(base context.Context, name, kind string, targ
 	case http.StatusOK, http.StatusAccepted:
 		c.log.InfoContext(base, "election: "+kind+" accepted",
 			"deployment", name, "pod", target.be.Pod, "status", code)
-	case http.StatusConflict:
-		c.log.InfoContext(base, "election: "+kind+" deferred; backend is mid-transition, will retry",
-			"deployment", name, "pod", target.be.Pod, "status", code)
 	case http.StatusForbidden:
 		c.log.ErrorContext(base, "election: "+kind+" forbidden; control-plane token mismatch",
 			"deployment", name, "pod", target.be.Pod)
@@ -149,7 +146,7 @@ func (c *Controller) demoteAll(ctx context.Context, name string, st *deploymentS
 				continue
 			}
 			switch code {
-			case http.StatusOK, http.StatusAccepted:
+			case http.StatusAccepted:
 				c.log.InfoContext(base, "election: demote accepted", "deployment", name, "pod", a.pod, "status", code)
 			case http.StatusConflict:
 				c.log.InfoContext(base, "election: demote declined; backend is mid-transition or its lease changed",

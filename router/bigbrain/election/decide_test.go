@@ -445,3 +445,21 @@ func TestDecide_Failback_SplitBrainResolvesFirst(t *testing.T) {
 		t.Fatalf("a split-brain tick must keep the candidate's clock, got %+v", d.failbackState)
 	}
 }
+
+func TestDecide_Failback_SplitBrainColdCandidateResetsClock(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(1000, 0)
+	in := []observation{
+		withPriority(obs("backend-0", true, 100, 150), 0),
+		withPriority(obs("backend-1", true, 100, 50), 0),
+		withPriority(obs("primary", false, 80, -1), 100),
+	}
+	prior := failbackState{candidate: "primary", eligibleSince: now.Add(-1 * time.Hour)}
+	d := decide(in, decideParams{incumbent: "backend-0", failback: fb(now, prior)})
+	if d.failbackTarget != nil {
+		t.Fatalf("split-brain: must NOT fail back, got %q", d.failbackTarget.be.Pod)
+	}
+	if d.failbackState != (failbackState{}) {
+		t.Fatalf("a candidate cold against the surviving claimant must RESET the clock, got %+v", d.failbackState)
+	}
+}

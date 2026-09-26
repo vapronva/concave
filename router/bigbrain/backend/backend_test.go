@@ -55,7 +55,7 @@ func TestLeadership_DecodesLeaseAndNullLease(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			_, _ = io.WriteString(w, tc.body)
 		}))
-		l, err := backend.New(nil).Leadership(context.Background(), "dev", srv.URL)
+		l, err := backend.New(nil).Leadership(context.Background(), srv.URL)
 		srv.Close()
 		if err != nil {
 			t.Fatalf("Leadership: %v", err)

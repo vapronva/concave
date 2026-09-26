@@ -29,18 +29,16 @@ type Backend struct {
 }
 
 type labelKeys struct {
-	deployment     string
-	role           string
-	component      string
-	leaderPriority string
+	deployment string
+	role       string
+	component  string
 }
 
 func newLabelKeys(prefix string) labelKeys {
 	return labelKeys{
-		deployment:     prefix + "/instance",
-		role:           prefix + "/role",
-		component:      prefix + "/component",
-		leaderPriority: prefix + "/leader-priority",
+		deployment: prefix + "/instance",
+		role:       prefix + "/role",
+		component:  prefix + "/component",
 	}
 }
 
@@ -88,17 +86,14 @@ func (c *Client) DiscoverBackends(ctx context.Context, ns, name string) ([]Backe
 		out = append(out, Backend{
 			Pod:      p.Name,
 			URL:      fmt.Sprintf("http://%s", net.JoinHostPort(p.Status.PodIP, strconv.Itoa(BackendPort))),
-			Priority: priorityFor(p.Labels[c.labels.leaderPriority], role),
+			Priority: priorityFor(role),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Pod < out[j].Pod })
 	return out, nil
 }
 
-func priorityFor(label, role string) int {
-	if n, err := strconv.Atoi(label); err == nil {
-		return n
-	}
+func priorityFor(role string) int {
 	if role == "leader" {
 		return priorityLeaderDefault
 	}

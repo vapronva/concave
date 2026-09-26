@@ -10,15 +10,35 @@ import (
 	"git.horse/vapronva/concave/router/bigbrain/insights"
 )
 
+func testLimits() insights.ReadLimits {
+	return insights.ReadLimits{Documents: 32000, Bytes: 16 * 1024 * 1024, WarningRatio: 0.8}
+}
+
+func TestIngestRejectsOutOfRangeLimits(t *testing.T) {
+	t.Parallel()
+	i := insights.New(10)
+	bad := []insights.ReadLimits{
+		{Documents: 0, Bytes: 1, WarningRatio: 0.8},
+		{Documents: 1, Bytes: 0, WarningRatio: 0.8},
+		{Documents: 1, Bytes: 1, WarningRatio: 0},
+		{Documents: 1, Bytes: 1, WarningRatio: 1.5},
+	}
+	for _, limits := range bad {
+		if _, err := i.Ingest("p", limits, nil); !errors.Is(err, insights.ErrBadReadLimits) {
+			t.Fatalf("limits %+v: want ErrBadReadLimits, got %v", limits, err)
+		}
+	}
+}
+
 func TestRingBufferCapPerDeployment(t *testing.T) {
 	t.Parallel()
 	i := insights.New(3)
 	floodA := func() {
-		_ = i.Ingest("A", insights.DefaultReadLimits(), []insights.AnyEvent{
+		_, _ = i.Ingest("A", testLimits(), []insights.AnyEvent{
 			{"FunctionCall": map[string]any{"is_occ": true, "udf_id": "fa", "id": "xa"}},
 		})
 	}
-	_ = i.Ingest("B", insights.DefaultReadLimits(), []insights.AnyEvent{
+	_, _ = i.Ingest("B", testLimits(), []insights.AnyEvent{
 		{"FunctionCall": map[string]any{
 			"is_occ": true, "udf_id": "fb", "id": "xb", "request_id": "rb",
 			"component_path": "_default", "occ_table_name": "tb", "status": "retried",
@@ -50,7 +70,7 @@ func TestRingBufferCapPerDeployment(t *testing.T) {
 func TestQueryOCCFailedPermanentlyUsesExplicitSignal(t *testing.T) {
 	t.Parallel()
 	i := insights.New(100)
-	_ = i.Ingest("p", insights.DefaultReadLimits(), []insights.AnyEvent{
+	_, _ = i.Ingest("p", testLimits(), []insights.AnyEvent{
 		{"FunctionCall": map[string]any{
 			"is_occ": true, "udf_id": "f", "id": "i",
 			"component_path":         "_default",
@@ -68,7 +88,7 @@ func TestQueryOCCFailedPermanentlyUsesExplicitSignal(t *testing.T) {
 func TestIngestQueryRoundTripRowShapes(t *testing.T) {
 	t.Parallel()
 	i := insights.New(100)
-	kept := i.Ingest("p", insights.DefaultReadLimits(), []insights.AnyEvent{
+	kept, _ := i.Ingest("p", testLimits(), []insights.AnyEvent{
 		{"FunctionCall": map[string]any{"is_occ": false, "udf_id": "mod:plainFn"}},
 		{"UnknownVariant": map[string]any{"v": 1}},
 		{"FunctionCall": map[string]any{
@@ -133,7 +153,7 @@ func TestIngestQueryRoundTripRowShapes(t *testing.T) {
 func TestQueryOCCPermanenceSplitsGroups(t *testing.T) {
 	t.Parallel()
 	i := insights.New(100)
-	_ = i.Ingest("p", insights.DefaultReadLimits(), []insights.AnyEvent{
+	_, _ = i.Ingest("p", testLimits(), []insights.AnyEvent{
 		{"FunctionCall": map[string]any{
 			"is_occ": true, "udf_id": "f", "id": "a", "component_path": "_default", "occ_table_name": "t",
 		}},
@@ -163,7 +183,7 @@ func TestQueryReadDimensionsCountTheirOwnRows(t *testing.T) {
 			"table_name": "t", "bytes_read": json.Number(bytes), "documents_read": json.Number(docs),
 		}}
 	}
-	_ = i.Ingest("p", insights.DefaultReadLimits(), []insights.AnyEvent{
+	_, _ = i.Ingest("p", testLimits(), []insights.AnyEvent{
 		{"InsightReadLimit": map[string]any{
 			"udf_id": "f", "id": "a", "component_path": "_default", "calls": calls("16777216", "1"),
 		}},
@@ -184,5 +204,9 @@ func TestQueryReadDimensionsCountTheirOwnRows(t *testing.T) {
 		if body, ok := bodies[kind]; !ok || !strings.Contains(body, `"count":1`) {
 			t.Errorf("want a %s row counting only its own execution; got %v", kind, out)
 		}
+	}
+	if body := bodies["documentsReadThreshold"]; !strings.Contains(body, `"limit":32000`) ||
+		!strings.Contains(body, `"threshold":25600`) {
+		t.Errorf("a read row must carry the deployment's limit and threshold; got %s", body)
 	}
 }
