@@ -16,9 +16,9 @@ RUN echo 'Acquire::ForceIPv4 "true";' > /etc/apt/apt.conf.d/99force-ipv4 && \
       apt-get clean && \
       rm --recursive --force /var/lib/apt/lists/*
 
-ARG UV_VERSION=0.11.33
+ARG UV_VERSION=0.12.19
 
-ARG UV_SHA256=aa9fca823c03289fb6e3460b3dc864f3ea895cafaf9b99247701a67b17d1b018
+ARG UV_SHA256=23bf5552d220e0842b65c862097b2ebaeba0064b74eda5e565e77fd25969d8c8
 
 RUN <<EOF
 set -o errexit -o nounset -o xtrace
