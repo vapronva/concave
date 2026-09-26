@@ -31,7 +31,7 @@ index 13389625f..24d944134 100644
          &self,
          bootstrapped_indexes: BootstrappedSearchIndexes,
 diff --git a/crates/database/src/database.rs b/crates/database/src/database.rs
-index d33417025..51665d010 100644
+index d33417025..6cba2aa59 100644
 --- a/crates/database/src/database.rs
 +++ b/crates/database/src/database.rs
 @@ -144,6 +144,7 @@ use indexing::{
@@ -62,15 +62,15 @@ index d33417025..51665d010 100644
      search_index_bootstrap::SearchIndexBootstrapWorker,
      snapshot_manager::{
          Snapshot,
-@@ -292,6 +297,8 @@ const MAX_OVERLOADED_BACKOFF: Duration = Duration::from_secs(30);
- const INITIAL_VECTOR_BACKOFF: Duration = Duration::from_millis(150);
- const MAX_VECTOR_BACKOFF: Duration = Duration::from_millis(2500);
- // 150 * 2^5 ~= 5000 or 5 seconds total.
+@@ -285,6 +290,8 @@ pub const MAX_OVERLOADED_FAILURES: u32 = 20;
+ const INITIAL_OVERLOADED_BACKOFF: Duration = Duration::from_millis(10);
+ const MAX_OVERLOADED_BACKOFF: Duration = Duration::from_secs(30);
+ 
 +mod ha;
 +
- const MAX_VECTOR_ATTEMPTS: u32 = 5;
- 
- /// Public entry point for interacting with the database.
+ /// In memory vector changes are asynchronously backfilled on startup. Attempts
+ /// to query before backfill is finished will result in failure, so we need to
+ /// retry. Vector search is latency tolerant because it's only run in actions,
 @@ -311,9 +318,7 @@ const MAX_VECTOR_ATTEMPTS: u32 = 5;
  /// See the diagram in `database/README.md` for more details.
  #[derive(Clone)]
@@ -1200,7 +1200,7 @@ index 000000000..a845d0129
 +    }
 +}
 diff --git a/crates/database/src/lib.rs b/crates/database/src/lib.rs
-index fb81ad0a0..5b4ab57e0 100644
+index 8134252a1..61f05be16 100644
 --- a/crates/database/src/lib.rs
 +++ b/crates/database/src/lib.rs
 @@ -16,6 +16,7 @@ mod committer;
@@ -1211,7 +1211,7 @@ index fb81ad0a0..5b4ab57e0 100644
  mod metrics;
  pub mod patch;
  pub mod persistence_helpers;
-@@ -64,6 +65,7 @@ pub use execution_size::{
+@@ -65,6 +66,7 @@ pub use execution_size::{
      FunctionExecutionSize,
      TransactionLimits,
  };

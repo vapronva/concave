@@ -88,12 +88,19 @@ index 000000000..d2e634c3f
 +}
 diff --git a/crates/local_backend/src/leadership.rs b/crates/local_backend/src/leadership.rs
 new file mode 100644
-index 000000000..c21cf6807
+index 000000000..9dd28bcaa
 --- /dev/null
 +++ b/crates/local_backend/src/leadership.rs
-@@ -0,0 +1,624 @@
-+use std::sync::Arc;
+@@ -0,0 +1,676 @@
++use std::{
++    sync::{
++        Arc,
++        LazyLock,
++    },
++    time::Duration,
++};
 +
++use anyhow::Context;
 +use axum::{
 +    body::Body,
 +    extract::{
@@ -111,12 +118,13 @@ index 000000000..c21cf6807
 +    },
 +    Router,
 +};
++use clusters::DbDriverTag;
++use cmd_util::env::env_config;
 +use common::{
 +    http::extract::{
 +        FromMtState,
 +        MtState,
 +    },
-+    knobs::PROMOTION_TIMEOUT,
 +    persistence::{
 +        Persistence,
 +        PersistenceReader,
@@ -130,13 +138,19 @@ index 000000000..c21cf6807
 +};
 +use db_connection::{
 +    connect_persistence,
++    persistence_seed,
 +    ConnectPersistenceFlags,
++    PersistenceSeed,
 +};
 +use futures::{
 +    future::BoxFuture,
 +    FutureExt,
 +};
 +use http::StatusCode;
++use postgres::{
++    PostgresPersistence,
++    PostgresReaderOptions,
++};
 +use runtime::prod::ProdRuntime;
 +use serde::{
 +    Deserialize,
@@ -150,6 +164,44 @@ index 000000000..c21cf6807
 +
 +const CONTROL_PLANE_TOKEN_HEADER: &str = "X-Convex-Control-Plane-Token";
 +const FOLLOWER_GATE_HEADER: &str = "X-Concave-Follower-Gate";
++static PROMOTION_TIMEOUT: LazyLock<Duration> =
++    LazyLock::new(|| Duration::from_secs(env_config("PROMOTION_TIMEOUT_SECS", 300)));
++
++pub async fn postgres_database_initialized<RT: Runtime>(
++    db: DbDriverTag,
++    db_spec: &str,
++    require_ssl: bool,
++    deployment_name: &str,
++    runtime: RT,
++) -> anyhow::Result<bool> {
++    match persistence_seed(
++        db,
++        db_spec,
++        ConnectPersistenceFlags {
++            require_ssl,
++            allow_read_only: true,
++            skip_index_creation: false,
++        },
++        deployment_name,
++        None,
++        runtime,
++    )? {
++        PersistenceSeed::Postgres { config, options } => {
++            let pool = PostgresPersistence::create_pool(config)
++                .context("failed to create postgres pool")?;
++            let reader_options = PostgresReaderOptions {
++                version: options.version,
++                schema: options.schema,
++                instance_name: options.instance_name,
++                multitenant: options.multitenant,
++            };
++            PostgresPersistence::schema_initialized(pool, reader_options).await
++        },
++        PersistenceSeed::Sqlite { .. } | PersistenceSeed::MySql { .. } => {
++            anyhow::bail!("the boot-role probe requires a Postgres persistence backend")
++        },
++    }
++}
 +
 +pub enum RolePersistence {
 +    Leader(Arc<dyn Persistence>),

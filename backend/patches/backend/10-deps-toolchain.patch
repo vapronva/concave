@@ -6,7 +6,7 @@ index db49bb14d..df6ae3370 100644
 -22.22.2
 +24.21.0
 diff --git a/Cargo.lock b/Cargo.lock
-index b338cbca2..c1fcad571 100644
+index b338cbca2..f31b5ba78 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
 @@ -2166,7 +2166,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -63,15 +63,16 @@ index b338cbca2..c1fcad571 100644
   "prost-types",
   "rand 0.9.4",
   "reqwest",
-@@ -4085,6 +4085,7 @@ dependencies = [
+@@ -4085,6 +4085,8 @@ dependencies = [
   "anyhow",
   "async-trait",
   "async_lru",
 + "authentication",
++ "cmd_util",
   "common",
   "convex_sync_types",
   "database",
-@@ -4099,19 +4100,65 @@ dependencies = [
+@@ -4099,19 +4101,65 @@ dependencies = [
   "model",
   "moka",
   "parking_lot",
@@ -137,7 +138,7 @@ index b338cbca2..c1fcad571 100644
  [[package]]
  name = "funty"
  version = "2.0.0"
-@@ -4451,9 +4498,9 @@ dependencies = [
+@@ -4451,9 +4499,9 @@ dependencies = [
  
  [[package]]
  name = "h2"
@@ -149,7 +150,7 @@ index b338cbca2..c1fcad571 100644
  dependencies = [
   "atomic-waker",
   "bytes",
-@@ -5717,7 +5764,7 @@ dependencies = [
+@@ -5717,7 +5765,7 @@ dependencies = [
   "pretty_assertions",
   "proptest",
   "proptest-derive",
@@ -158,17 +159,18 @@ index b338cbca2..c1fcad571 100644
   "rand 0.9.4",
   "rsa",
   "runtime",
-@@ -6017,7 +6064,9 @@ dependencies = [
+@@ -6017,7 +6065,10 @@ dependencies = [
   "moka",
   "node_executor",
   "parking_lot",
 + "pb",
++ "postgres",
   "proptest",
 + "prost 0.14.4",
   "reqwest",
   "roles",
   "runtime",
-@@ -6027,6 +6076,7 @@ dependencies = [
+@@ -6027,6 +6078,7 @@ dependencies = [
   "serde_json",
   "serde_with",
   "shape_inference",
@@ -176,7 +178,7 @@ index b338cbca2..c1fcad571 100644
   "storage",
   "streaming_export",
   "sync",
-@@ -7336,7 +7386,7 @@ dependencies = [
+@@ -7336,7 +7388,7 @@ dependencies = [
   "pb_build",
   "pb_extras",
   "proptest",
@@ -185,7 +187,7 @@ index b338cbca2..c1fcad571 100644
   "prost-reflect",
   "prost-types",
   "tonic",
-@@ -7348,7 +7398,7 @@ dependencies = [
+@@ -7348,7 +7400,7 @@ dependencies = [
  name = "pb_build"
  version = "0.1.0"
  dependencies = [
@@ -194,7 +196,7 @@ index b338cbca2..c1fcad571 100644
   "tonic-prost-build",
  ]
  
-@@ -7358,7 +7408,7 @@ version = "0.1.0"
+@@ -7358,7 +7410,7 @@ version = "0.1.0"
  dependencies = [
   "pb",
   "pb_build",
@@ -203,7 +205,7 @@ index b338cbca2..c1fcad571 100644
   "prost-reflect",
  ]
  
-@@ -7941,19 +7991,19 @@ dependencies = [
+@@ -7941,19 +7993,19 @@ dependencies = [
  
  [[package]]
  name = "prost"
@@ -228,7 +230,7 @@ index b338cbca2..c1fcad571 100644
  dependencies = [
   "heck",
   "itertools 0.14.0",
-@@ -7961,7 +8011,7 @@ dependencies = [
+@@ -7961,7 +8013,7 @@ dependencies = [
   "multimap",
   "petgraph 0.8.3",
   "prettyplease",
@@ -237,7 +239,7 @@ index b338cbca2..c1fcad571 100644
   "prost-types",
   "pulldown-cmark",
   "pulldown-cmark-to-cmark",
-@@ -7985,9 +8035,9 @@ dependencies = [
+@@ -7985,9 +8037,9 @@ dependencies = [
  
  [[package]]
  name = "prost-derive"
@@ -249,7 +251,7 @@ index b338cbca2..c1fcad571 100644
  dependencies = [
   "anyhow",
   "itertools 0.14.0",
-@@ -8004,17 +8054,17 @@ checksum = "b89455ef41ed200cafc47c76c552ee7792370ac420497e551f16123a9135f76e"
+@@ -8004,17 +8056,17 @@ checksum = "b89455ef41ed200cafc47c76c552ee7792370ac420497e551f16123a9135f76e"
  dependencies = [
   "logos",
   "miette",
@@ -271,7 +273,7 @@ index b338cbca2..c1fcad571 100644
  ]
  
  [[package]]
-@@ -8120,7 +8170,7 @@ dependencies = [
+@@ -8120,7 +8172,7 @@ dependencies = [
   "quinn-udp",
   "rustc-hash 2.1.1",
   "rustls",
@@ -280,7 +282,7 @@ index b338cbca2..c1fcad571 100644
   "thiserror 2.0.20",
   "tokio",
   "tracing",
-@@ -8159,9 +8209,9 @@ dependencies = [
+@@ -8159,9 +8211,9 @@ dependencies = [
   "cfg_aliases",
   "libc",
   "once_cell",
@@ -292,7 +294,7 @@ index b338cbca2..c1fcad571 100644
  ]
  
  [[package]]
-@@ -8656,9 +8706,9 @@ dependencies = [
+@@ -8656,9 +8708,9 @@ dependencies = [
  
  [[package]]
  name = "rtrb"
@@ -304,7 +306,7 @@ index b338cbca2..c1fcad571 100644
  
  [[package]]
  name = "runtime"
-@@ -8735,7 +8785,7 @@ dependencies = [
+@@ -8735,7 +8787,7 @@ dependencies = [
   "errno",
   "libc",
   "linux-raw-sys 0.4.15",
@@ -313,7 +315,7 @@ index b338cbca2..c1fcad571 100644
  ]
  
  [[package]]
-@@ -8748,7 +8798,7 @@ dependencies = [
+@@ -8748,7 +8800,7 @@ dependencies = [
   "errno",
   "libc",
   "linux-raw-sys 0.12.1",
@@ -322,7 +324,7 @@ index b338cbca2..c1fcad571 100644
  ]
  
  [[package]]
-@@ -8829,7 +8879,7 @@ dependencies = [
+@@ -8829,7 +8881,7 @@ dependencies = [
   "security-framework 3.7.0",
   "security-framework-sys",
   "webpki-root-certs",
@@ -331,7 +333,7 @@ index b338cbca2..c1fcad571 100644
  ]
  
  [[package]]
-@@ -10020,7 +10070,7 @@ dependencies = [
+@@ -10020,7 +10072,7 @@ dependencies = [
   "fastrace",
   "keybroker",
   "pb_data_sync",
@@ -340,7 +342,7 @@ index b338cbca2..c1fcad571 100644
   "table_iteration",
   "tracing",
   "usage_tracking",
-@@ -10438,7 +10488,7 @@ dependencies = [
+@@ -10438,7 +10490,7 @@ dependencies = [
   "getrandom 0.4.2",
   "once_cell",
   "rustix 1.1.4",
@@ -349,7 +351,7 @@ index b338cbca2..c1fcad571 100644
  ]
  
  [[package]]
-@@ -10929,9 +10979,9 @@ dependencies = [
+@@ -10929,9 +10981,9 @@ dependencies = [
  
  [[package]]
  name = "tonic"
@@ -361,7 +363,7 @@ index b338cbca2..c1fcad571 100644
  dependencies = [
   "async-trait",
   "axum",
-@@ -10961,9 +11011,9 @@ dependencies = [
+@@ -10961,9 +11013,9 @@ dependencies = [
  
  [[package]]
  name = "tonic-build"
@@ -373,7 +375,7 @@ index b338cbca2..c1fcad571 100644
  dependencies = [
   "prettyplease",
   "proc-macro2",
-@@ -10977,7 +11027,7 @@ version = "0.14.5"
+@@ -10977,7 +11029,7 @@ version = "0.14.5"
  source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "f4ff0636fef47afb3ec02818f5bceb4377b8abb9d6a386aeade18bd6212f8eb7"
  dependencies = [
@@ -382,7 +384,7 @@ index b338cbca2..c1fcad571 100644
   "tokio",
   "tokio-stream",
   "tonic",
-@@ -10998,20 +11048,20 @@ dependencies = [
+@@ -10998,20 +11050,20 @@ dependencies = [
  
  [[package]]
  name = "tonic-prost"
@@ -409,19 +411,20 @@ index b338cbca2..c1fcad571 100644
   "prettyplease",
   "proc-macro2",
 diff --git a/crates/local_backend/Cargo.toml b/crates/local_backend/Cargo.toml
-index 1f9454d70..7f5398f90 100644
+index 1f9454d70..d5733b904 100644
 --- a/crates/local_backend/Cargo.toml
 +++ b/crates/local_backend/Cargo.toml
-@@ -81,6 +81,8 @@ model = { workspace = true }
+@@ -81,6 +81,9 @@ model = { workspace = true }
  moka = { workspace = true }
  node_executor = { workspace = true }
  parking_lot = { workspace = true }
 +pb = { workspace = true }
++postgres = { workspace = true }
 +prost = { workspace = true }
  reqwest = { workspace = true }
  roles = { workspace = true }
  runtime = { workspace = true }
-@@ -117,6 +119,7 @@ vergen = { workspace = true, features = ["git", "gitcl"] }
+@@ -117,6 +120,7 @@ vergen = { workspace = true, features = ["git", "gitcl"] }
  
  [dev-dependencies]
  application = { workspace = true, features = ["testing"] }
@@ -430,12 +433,12 @@ index 1f9454d70..7f5398f90 100644
  clusters = { workspace = true, features = ["testing"] }
  common = { workspace = true, features = ["testing"] }
 diff --git a/rust-toolchain b/rust-toolchain
-index 1ba2c04ca..67961579e 100644
+index 1ba2c04ca..0b6ca7cf3 100644
 --- a/rust-toolchain
 +++ b/rust-toolchain
 @@ -1,3 +1,4 @@
  [toolchain]
 -channel = "nightly-2026-06-28"
-+channel = "nightly-2026-09-20"
++channel = "nightly-2026-09-26"
  targets = ["wasm32-wasip1"]
 +components = ["rustfmt"]

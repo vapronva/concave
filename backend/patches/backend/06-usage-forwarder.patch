@@ -1,5 +1,5 @@
 diff --git a/crates/events/src/usage.rs b/crates/events/src/usage.rs
-index fcea2dc03..aaa5cac18 100644
+index 688d5fa56..9e2a4228e 100644
 --- a/crates/events/src/usage.rs
 +++ b/crates/events/src/usage.rs
 @@ -13,6 +13,8 @@ pub enum UdfType {
@@ -20,7 +20,7 @@ index fcea2dc03..aaa5cac18 100644
  }
  
  #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-@@ -142,6 +146,8 @@ pub enum UsageEvent {
+@@ -157,6 +161,8 @@ pub enum UsageEvent {
          egress: u64,
      },
      InsightReadLimit {
@@ -29,7 +29,7 @@ index fcea2dc03..aaa5cac18 100644
          id: String,
          request_id: String,
          udf_id: String,
-@@ -282,4 +288,4 @@ impl UsageEventLogger for NoOpUsageEventLogger {
+@@ -297,4 +303,4 @@ impl UsageEventLogger for NoOpUsageEventLogger {
      async fn shutdown(&self) -> anyhow::Result<()> {
          Ok(())
      }
@@ -38,10 +38,10 @@ index fcea2dc03..aaa5cac18 100644
 +}
 diff --git a/crates/local_backend/src/usage_forwarder.rs b/crates/local_backend/src/usage_forwarder.rs
 new file mode 100644
-index 000000000..899ae2d84
+index 000000000..e05275c5e
 --- /dev/null
 +++ b/crates/local_backend/src/usage_forwarder.rs
-@@ -0,0 +1,423 @@
+@@ -0,0 +1,424 @@
 +use std::sync::{
 +    atomic::{
 +        AtomicBool,
@@ -338,14 +338,15 @@ index 000000000..899ae2d84
 +
 +impl InsightsProxy {
 +    pub fn from_env() -> anyhow::Result<Option<Self>> {
-+        let Some(base_url) = std::env::var("CONVEX_INSIGHTS_QUERY_URL")
++        let Some(base_url) = std::env::var("CONVEX_USAGE_SINK_URL")
 +            .ok()
 +            .filter(|u| !u.is_empty())
 +        else {
 +            return Ok(None);
 +        };
 +        Ok(Some(Self {
-+            base_url: reqwest::Url::parse(&base_url)?,
++            base_url: reqwest::Url::parse(&base_url)
++                .context("CONVEX_USAGE_SINK_URL is not a URL")?,
 +            token: usage_sink_token(),
 +            client: Client::builder()
 +                .timeout(Duration::from_secs(15))
@@ -466,7 +467,7 @@ index 000000000..899ae2d84
 +    }
 +}
 diff --git a/crates/usage_tracking/src/lib.rs b/crates/usage_tracking/src/lib.rs
-index 3bbf40c91..0ba25f03f 100644
+index fa0fff765..443996791 100644
 --- a/crates/usage_tracking/src/lib.rs
 +++ b/crates/usage_tracking/src/lib.rs
 @@ -5,7 +5,11 @@ use std::{
@@ -538,7 +539,7 @@ index 3bbf40c91..0ba25f03f 100644
              },
          });
  
-@@ -444,6 +469,7 @@ impl UsageCounter {
+@@ -457,6 +482,7 @@ impl UsageCounter {
                  }
  
                  usage_metrics.push(UsageEvent::InsightReadLimit {

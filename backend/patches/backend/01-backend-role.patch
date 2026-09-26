@@ -17,7 +17,7 @@ index 000000000..09c8ff88c
 +    }
 +}
 diff --git a/crates/common/src/types/mod.rs b/crates/common/src/types/mod.rs
-index ff1585405..6f5b77f89 100644
+index 7798e3727..2d4bbc9b9 100644
 --- a/crates/common/src/types/mod.rs
 +++ b/crates/common/src/types/mod.rs
 @@ -19,6 +19,7 @@ mod admin_key;

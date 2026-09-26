@@ -30,12 +30,13 @@ index 6c018be51..0b891fcc1 100644
        {children}
 diff --git a/npm-packages/dashboard-common/src/features/health/components/ChartForInsight.tsx b/npm-packages/dashboard-common/src/features/health/components/ChartForInsight.tsx
 new file mode 100644
-index 000000000..40c4a0d4c
+index 000000000..418c5fd01
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/health/components/ChartForInsight.tsx
-@@ -0,0 +1,277 @@
+@@ -0,0 +1,275 @@
 +import {
 +  useInsightsPeriod,
++  HourlyCount,
 +  Insight,
 +} from "@common/features/health/lib/insights";
 +import { formatBytes, formatNumberCompact } from "@common/lib/format";
@@ -54,7 +55,6 @@ index 000000000..40c4a0d4c
 +import { LoadingTransition } from "@ui/Loading";
 +import { DeploymentTimes } from "@common/features/health/components/DeploymentTimes";
 +import { useDeploymentAuditLogs } from "@common/lib/useDeploymentAuditLog";
-+import { documentsReadLimit, megabytesReadLimit } from "./ProblemForInsight";
 +
 +export function ChartForInsight({ insight }: { insight: Insight }) {
 +  switch (insight.kind) {
@@ -82,16 +82,16 @@ index 000000000..40c4a0d4c
 +  }
 +}
 +
-+function InsightsLineChart<T extends Record<string, any>>({
++function InsightsLineChart({
 +  data,
 +  name,
 +  dataKey,
 +  max,
 +  formatY = formatNumberCompact,
 +}: {
-+  data?: T[];
++  data?: HourlyCount[];
 +  name: string;
-+  dataKey: keyof T extends string | number ? keyof T : never;
++  dataKey: "count";
 +  max?: number;
 +  formatY?: (value: number) => string;
 +}) {
@@ -99,18 +99,16 @@ index 000000000..40c4a0d4c
 +  const auditLogs = useDeploymentAuditLogs(Date.parse(from), {
 +    actions: ["push_config", "push_config_with_components"],
 +  });
-+  const deploysByHour = auditLogs?.map(
-+    (log) => {
-+      const creationDate = new Date(log._creationTime);
-+      const hour = `${creationDate.getUTCFullYear()}-${String(
-+        creationDate.getUTCMonth() + 1,
-+      ).padStart(2, "0")}-${String(creationDate.getUTCDate()).padStart(
-+        2,
-+        "0",
-+      )} ${String(creationDate.getUTCHours()).padStart(2, "0")}:00:00`;
-+      return { hour, timestamp: log._creationTime };
-+    },
-+  );
++  const deploysByHour = auditLogs?.map((log) => {
++    const creationDate = new Date(log._creationTime);
++    const hour = `${creationDate.getUTCFullYear()}-${String(
++      creationDate.getUTCMonth() + 1,
++    ).padStart(2, "0")}-${String(creationDate.getUTCDate()).padStart(
++      2,
++      "0",
++    )} ${String(creationDate.getUTCHours()).padStart(2, "0")}:00:00`;
++    return { hour, timestamp: log._creationTime };
++  });
 +  const midnightTicks = (data ?? [])
 +    .filter((d) => new Date(toNumericUTCWithHour(d.hour)).getUTCHours() === 0)
 +    .map((d) => d.hour);
@@ -231,7 +229,7 @@ index 000000000..40c4a0d4c
 +    <InsightsLineChart
 +      data={insight.details.hourlyCounts}
 +      dataKey="count"
-+      name={`function calls reading more than ${formatBytes(megabytesReadLimit * 1024 * 1024 * 0.8)}`}
++      name={`function calls reading more than ${formatBytes(insight.details.threshold)}`}
 +    />
 +  );
 +}
@@ -247,7 +245,7 @@ index 000000000..40c4a0d4c
 +    <InsightsLineChart
 +      data={insight.details.hourlyCounts}
 +      dataKey="count"
-+      name={`function calls reading more than ${formatNumberCompact(documentsReadLimit * 0.8)} documents`}
++      name={`function calls reading more than ${formatNumberCompact(insight.details.threshold)} documents`}
 +    />
 +  );
 +}
@@ -312,7 +310,7 @@ index 000000000..40c4a0d4c
 +  }
 +};
 diff --git a/npm-packages/dashboard-common/src/features/health/components/DeploymentSummary.tsx b/npm-packages/dashboard-common/src/features/health/components/DeploymentSummary.tsx
-index 1cdaae3b8..6fc81f416 100644
+index 1cdaae3b8..b51b755d3 100644
 --- a/npm-packages/dashboard-common/src/features/health/components/DeploymentSummary.tsx
 +++ b/npm-packages/dashboard-common/src/features/health/components/DeploymentSummary.tsx
 @@ -203,6 +203,9 @@ export function DeploymentSummary({
@@ -321,213 +319,32 @@ index 1cdaae3b8..6fc81f416 100644
    const showUrlPanel = deployment.kind === "cloud" && canViewData;
 +  const showPort = deployment.kind === "local" && deployment.port > 0;
 +  const showDetailsRow =
-+    deployment.kind === "cloud" || showPort || !!lastPushEvent;
++    deployment.kind === "cloud" || showPort || Boolean(lastPushEvent);
    const mainPanelRounding = showUrlPanel
      ? "rounded-l-lg rounded-tr-lg rounded-bl-none lg:flex-1 lg:rounded-tr-none lg:rounded-bl-lg"
      : "rounded-lg";
-@@ -243,107 +246,111 @@ export function DeploymentSummary({
+@@ -243,9 +246,19 @@ export function DeploymentSummary({
            </div>
  
            {/* Row 2: Region/Port + Class + Version */}
 -          <div className="flex flex-wrap items-center gap-6">
--            {/* Region + Class stay together when wrapping */}
++          <div
++            className={
++              showDetailsRow ? "flex flex-wrap items-center gap-6" : "hidden"
++            }
++          >
+             {/* Region + Class stay together when wrapping */}
 -            <div className="flex items-center gap-6">
--              {/* Region (cloud) or Port (local) */}
--              {deployment.kind === "cloud" && (
--                <div className="flex items-center gap-2">
--                  <Tooltip tip="Deployment region">
--                    <GlobeIcon
--                      className="size-4 shrink-0 text-content-secondary"
--                      aria-label="Region"
--                    />
--                  </Tooltip>
--                  <div className="text-sm text-content-primary">
--                    {regionDisplayName}
--                  </div>
--                </div>
--              )}
--              {deployment.kind === "local" && (
--                <div className="flex items-center gap-2">
--                  <Tooltip tip="Local port">
--                    <CodeIcon
--                      className="size-4 shrink-0 text-content-secondary"
--                      aria-label="Port"
--                    />
--                  </Tooltip>
--                  <div className="text-sm text-content-primary">
--                    Port {deployment.port}
--                  </div>
-+          {showDetailsRow && (
-+            <div className="flex flex-wrap items-center gap-6">
-+              {/* Region + Class stay together when wrapping */}
-+              {(deployment.kind === "cloud" || showPort) && (
-+                <div className="flex items-center gap-6">
-+                  {/* Region (cloud) or Port (local) */}
-+                  {deployment.kind === "cloud" && (
-+                    <div className="flex items-center gap-2">
-+                      <Tooltip tip="Deployment region">
-+                        <GlobeIcon
-+                          className="size-4 shrink-0 text-content-secondary"
-+                          aria-label="Region"
-+                        />
-+                      </Tooltip>
-+                      <div className="text-sm text-content-primary">
-+                        {regionDisplayName}
-+                      </div>
-+                    </div>
-+                  )}
-+                  {showPort && (
-+                    <div className="flex items-center gap-2">
-+                      <Tooltip tip="Local port">
-+                        <CodeIcon
-+                          className="size-4 shrink-0 text-content-secondary"
-+                          aria-label="Port"
-+                        />
-+                      </Tooltip>
-+                      <div className="text-sm text-content-primary">
-+                        Port {deployment.port}
-+                      </div>
-+                    </div>
-+                  )}
-+
-+                  {/* Deployment Class (cloud only) */}
-+                  {deployment.kind === "cloud" && (
-+                    <div className="flex items-center gap-2">
-+                      <Tooltip
-+                        tip={
-+                          <span className="flex items-center gap-1">
-+                            Deployment class
-+                            <Link
-+                              href="https://docs.convex.dev/production/state/limits"
-+                              target="_blank"
-+                              rel="noopener noreferrer"
-+                            >
-+                              <QuestionMarkCircledIcon className="size-3.5" />
-+                            </Link>
-+                          </span>
-+                        }
-+                      >
-+                        <DimensionsIcon
-+                          className="size-4 shrink-0 text-content-secondary"
-+                          aria-label="Deployment class"
-+                        />
-+                      </Tooltip>
-+                      <div className="text-sm text-content-primary">
-+                        {deployment.class.toUpperCase()}
-+                      </div>
-+                    </div>
-+                  )}
-                 </div>
-               )}
- 
--              {/* Deployment Class (cloud only) */}
--              {deployment.kind === "cloud" && (
-+              {/* Convex Version */}
-+              {lastPushEvent && (
++            <div
++              className={
++                deployment.kind === "cloud" || showPort
++                  ? "flex items-center gap-6"
++                  : "hidden"
++              }
++            >
+               {/* Region (cloud) or Port (local) */}
+               {deployment.kind === "cloud" && (
                  <div className="flex items-center gap-2">
--                  <Tooltip
--                    tip={
--                      <span className="flex items-center gap-1">
--                        Deployment class
--                        <Link
--                          href="https://docs.convex.dev/production/state/limits"
--                          target="_blank"
--                          rel="noopener noreferrer"
--                        >
--                          <QuestionMarkCircledIcon className="size-3.5" />
--                        </Link>
--                      </span>
--                    }
--                  >
--                    <DimensionsIcon
--                      className="size-4 shrink-0 text-content-secondary"
--                      aria-label="Deployment class"
-+                  <Tooltip tip="Convex package version">
-+                    <PackageVersionIcon
-+                      className="text-content-secondary"
-+                      aria-label="Convex package version"
-                     />
-                   </Tooltip>
--                  <div className="text-sm text-content-primary">
--                    {deployment.class.toUpperCase()}
-+                  <div className="flex items-center">
-+                    <span className="text-sm text-content-primary">
-+                      Convex {serverVersion}
-+                    </span>
-+                    {hasUpdate && (
-+                      <Button
-+                        tip={`A ${
-+                          serverVersion && latestVersion
-+                            ? latestVersion.split(".")[0] !==
-+                              serverVersion.split(".")[0]
-+                              ? "major"
-+                              : latestVersion.split(".")[1] !==
-+                                  serverVersion.split(".")[1]
-+                                ? "minor"
-+                                : "patch"
-+                            : ""
-+                        } update is available for Convex (${serverVersion} → ${latestVersion})`}
-+                        size="xs"
-+                        inline
-+                        aria-label="Convex NPM Package Upgrade Available"
-+                        href="https://github.com/get-convex/convex-js/blob/main/CHANGELOG.md#changelog"
-+                        target="_blank"
-+                        // eslint-disable-next-line no-restricted-syntax -- manual Link-Button hybrid implementation
-+                        className="h-5 text-content-link"
-+                      >
-+                        <div>({latestVersion} available)</div>
-+                      </Button>
-+                    )}
-                   </div>
-                 </div>
-               )}
-             </div>
--
--            {/* Convex Version */}
--            {lastPushEvent && (
--              <div className="flex items-center gap-2">
--                <Tooltip tip="Convex package version">
--                  <PackageVersionIcon
--                    className="text-content-secondary"
--                    aria-label="Convex package version"
--                  />
--                </Tooltip>
--                <div className="flex items-center">
--                  <span className="text-sm text-content-primary">
--                    Convex {serverVersion}
--                  </span>
--                  {hasUpdate && (
--                    <Button
--                      tip={`A ${
--                        serverVersion && latestVersion
--                          ? latestVersion.split(".")[0] !==
--                            serverVersion.split(".")[0]
--                            ? "major"
--                            : latestVersion.split(".")[1] !==
--                                serverVersion.split(".")[1]
--                              ? "minor"
--                              : "patch"
--                          : ""
--                      } update is available for Convex (${serverVersion} → ${latestVersion})`}
--                      size="xs"
--                      inline
--                      aria-label="Convex NPM Package Upgrade Available"
--                      href="https://github.com/get-convex/convex-js/blob/main/CHANGELOG.md#changelog"
--                      target="_blank"
--                      // eslint-disable-next-line no-restricted-syntax -- manual Link-Button hybrid implementation
--                      className="h-5 text-content-link"
--                    >
--                      <div>({latestVersion} available)</div>
--                    </Button>
--                  )}
--                </div>
--              </div>
--            )}
--          </div>
-+          )}
- 
-           {/* Row 3: Last Deployed + Last Backup */}
-           <div className="flex flex-wrap items-center gap-6 gap-y-4">
 diff --git a/npm-packages/dashboard-common/src/features/health/components/EventsForInsight.tsx b/npm-packages/dashboard-common/src/features/health/components/EventsForInsight.tsx
 new file mode 100644
 index 000000000..ef3c06896
@@ -1234,10 +1051,10 @@ index 000000000..ef3c06896
 +}
 diff --git a/npm-packages/dashboard-common/src/features/health/components/HealthWithInsights.tsx b/npm-packages/dashboard-common/src/features/health/components/HealthWithInsights.tsx
 new file mode 100644
-index 000000000..cdfb0dfcf
+index 000000000..03b86aabd
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/health/components/HealthWithInsights.tsx
-@@ -0,0 +1,294 @@
+@@ -0,0 +1,292 @@
 +import React, {
 +  useState,
 +  useCallback,
@@ -1341,7 +1158,7 @@ index 000000000..cdfb0dfcf
 +            icon={<ChevronLeftIcon className="size-5" />}
 +            tip="Back to Health"
 +            onClick={() =>
-+              void push(insightsViewUrl(query), undefined, { shallow: true })
++              void push(insightsViewUrl(), undefined, { shallow: true })
 +            }
 +            size="xs"
 +            variant="neutral"
@@ -1350,7 +1167,7 @@ index 000000000..cdfb0dfcf
 +          />
 +        )}
 +        <h3 className="flex items-center gap-2 py-2">
-+          <MaybeLink href={page === "home" ? null : insightsViewUrl(query)}>
++          <MaybeLink href={page === "home" ? null : insightsViewUrl()}>
 +            Health
 +          </MaybeLink>{" "}
 +          {page.startsWith("insight") && (
@@ -1359,9 +1176,7 @@ index 000000000..cdfb0dfcf
 +              <span className="animate-fadeInFromLoading">
 +                <MaybeLink
 +                  href={
-+                    page === "insights"
-+                      ? null
-+                      : insightsViewUrl(query, "insights")
++                    page === "insights" ? null : insightsViewUrl("insights")
 +                  }
 +                >
 +                  Insights
@@ -1501,12 +1316,12 @@ index 000000000..cdfb0dfcf
 +}
 +
 +function PageWrapper({ children }: { children: React.ReactNode }) {
-+  const { query, push } = useRouter();
++  const { push } = useRouter();
 +  const onViewAll = useCallback(() => {
-+    void push(insightsViewUrl(query, "insights"), undefined, {
++    void push(insightsViewUrl("insights"), undefined, {
 +      shallow: true,
 +    });
-+  }, [query, push]);
++  }, [push]);
 +  const { page } = useContext(InsightsContext) || {};
 +  return (
 +    <div
@@ -1534,10 +1349,10 @@ index 000000000..cdfb0dfcf
 +}
 diff --git a/npm-packages/dashboard-common/src/features/health/components/InsightsSummary.tsx b/npm-packages/dashboard-common/src/features/health/components/InsightsSummary.tsx
 new file mode 100644
-index 000000000..806705b15
+index 000000000..12e644d62
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/health/components/InsightsSummary.tsx
-@@ -0,0 +1,111 @@
+@@ -0,0 +1,109 @@
 +import {
 +  getInsightPageIdentifier,
 +  Insight,
@@ -1551,14 +1366,12 @@ index 000000000..806705b15
 +} from "@radix-ui/react-icons";
 +import { InsightsSummaryListItem } from "./InsightsSummaryListItem";
 +
-+export type InsightsSummaryData = Insight;
-+
 +export function InsightsSummary({
 +  insights,
 +  notConfigured = false,
 +  errored = false,
 +}: {
-+  insights: InsightsSummaryData[] | undefined;
++  insights: Insight[] | undefined;
 +  notConfigured?: boolean;
 +  errored?: boolean;
 +}) {
@@ -1719,10 +1532,10 @@ index 000000000..fbb76b742
 +}
 diff --git a/npm-packages/dashboard-common/src/features/health/components/InsightsSummaryListItem.tsx b/npm-packages/dashboard-common/src/features/health/components/InsightsSummaryListItem.tsx
 new file mode 100644
-index 000000000..98e118c25
+index 000000000..0df0808e5
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/health/components/InsightsSummaryListItem.tsx
-@@ -0,0 +1,82 @@
+@@ -0,0 +1,84 @@
 +import {
 +  Insight,
 +  getInsightPageIdentifier,
@@ -1739,18 +1552,20 @@ index 000000000..98e118c25
 +import { useRouter } from "next/router";
 +import { SparklineForInsight } from "./SparklineForInsight";
 +import { ProblemForInsight } from "./ProblemForInsight";
-+import { useLogDeploymentEvent } from "@common/lib/deploymentApi";
++import { useContext } from "react";
++import { DeploymentInfoContext } from "@common/lib/deploymentContext";
 +
 +export function InsightsSummaryListItem({ insight }: { insight: Insight }) {
++  const { useLogDeploymentEvent } = useContext(DeploymentInfoContext);
 +  const log = useLogDeploymentEvent();
-+  const { query, push } = useRouter();
++  const { push } = useRouter();
 +  return (
 +    <Button
 +      className="flex w-full min-w-fit animate-fadeInFromLoading items-center gap-2 border-b p-2 text-xs last:border-b-0 hover:bg-background-tertiary"
 +      variant="unstyled"
 +      onClick={() => {
 +        void push(
-+          insightsViewUrl(query, getInsightPageIdentifier(insight)),
++          insightsViewUrl(getInsightPageIdentifier(insight)),
 +          undefined,
 +          { shallow: true },
 +        );
@@ -1807,17 +1622,17 @@ index 000000000..98e118c25
 +};
 diff --git a/npm-packages/dashboard-common/src/features/health/components/ProblemForInsight.tsx b/npm-packages/dashboard-common/src/features/health/components/ProblemForInsight.tsx
 new file mode 100644
-index 000000000..62f51cdd1
+index 000000000..886e236ff
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/health/components/ProblemForInsight.tsx
-@@ -0,0 +1,247 @@
+@@ -0,0 +1,252 @@
 +import {
 +  InfoCircledIcon,
 +  QuestionMarkCircledIcon,
 +} from "@radix-ui/react-icons";
 +import { Insight } from "@common/features/health/lib/insights";
 +import { Button } from "@ui/Button";
-+import { formatNumberCompact } from "@common/lib/format";
++import { formatBytes, formatNumberCompact } from "@common/lib/format";
 +import { Link } from "@ui/Link";
 +
 +export function ProblemForInsight({
@@ -1954,7 +1769,11 @@ index 000000000..62f51cdd1
 +}) {
 +  return (
 +    <div className="flex flex-col items-start gap-1">
-+      <ReadLimitProblem explain={explain} kind="bytes" />
++      <ReadLimitProblem
++        explain={explain}
++        kind="bytes"
++        limit={insight.details.limit}
++      />
 +      {!explain && (
 +        <span className="text-xs text-content-secondary">
 +          {formatNumberCompact(insight.details.count)} function call
@@ -1965,19 +1784,17 @@ index 000000000..62f51cdd1
 +  );
 +}
 +
-+export const documentsReadLimit = 32000;
-+export const megabytesReadLimit = 16;
-+
-+const bytesLimitString = `${megabytesReadLimit} MB`;
-+const documentsLimitString = documentsReadLimit.toLocaleString();
-+
 +function ReadLimitProblem({
 +  kind,
 +  explain,
++  limit,
 +}: {
 +  kind: "bytes" | "documents";
 +  explain: boolean;
++  limit: number;
 +}) {
++  const limitString =
++    kind === "bytes" ? formatBytes(limit) : limit.toLocaleString();
 +  return (
 +    <div className="flex flex-col">
 +      <span className="flex items-center gap-1">
@@ -1985,7 +1802,7 @@ index 000000000..62f51cdd1
 +        {!explain && (
 +          <Button
 +            href="https://stack.convex.dev/queries-that-scale"
-+            tip={`This function has been approaching or exceeding the Convex limit on ${kind} read. When a function exceeds the limit of ${kind === "bytes" ? bytesLimitString : documentsLimitString}, it will fail.`}
++            tip={`This function has been approaching or exceeding the Convex limit on ${kind} read. When a function exceeds the limit of ${limitString}, it will fail.`}
 +            tipSide="right"
 +            variant="unstyled"
 +            target="_blank"
@@ -2008,8 +1825,7 @@ index 000000000..62f51cdd1
 +                href="https://docs.convex.dev/production/state/limits#transactions"
 +                target="_blank"
 +              >
-+                limit of{" "}
-+                {kind === "bytes" ? bytesLimitString : documentsLimitString}
++                limit of {limitString}
 +              </Link>
 +              , it will fail.
 +            </p>
@@ -2048,7 +1864,11 @@ index 000000000..62f51cdd1
 +}) {
 +  return (
 +    <div className="flex flex-col items-start gap-1">
-+      <ReadLimitProblem explain={explain} kind="documents" />
++      <ReadLimitProblem
++        explain={explain}
++        kind="documents"
++        limit={insight.details.limit}
++      />
 +      {!explain && (
 +        <span className="text-xs text-content-secondary">
 +          {formatNumberCompact(insight.details.count)} function call
@@ -2238,11 +2058,10 @@ index 000000000..4005b536b
 +}
 diff --git a/npm-packages/dashboard-common/src/features/health/lib/insights.ts b/npm-packages/dashboard-common/src/features/health/lib/insights.ts
 new file mode 100644
-index 000000000..9cc07bbbd
+index 000000000..3da779d83
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/health/lib/insights.ts
-@@ -0,0 +1,218 @@
-+import { ParsedUrlQuery } from "querystring";
+@@ -0,0 +1,206 @@
 +import { UrlObject } from "url";
 +import {
 +  rootComponentPath,
@@ -2262,7 +2081,7 @@ index 000000000..9cc07bbbd
 +  };
 +}
 +
-+type HourlyCount = {
++export type HourlyCount = {
 +  hour: string;
 +  count: number;
 +};
@@ -2302,6 +2121,8 @@ index 000000000..9cc07bbbd
 +        | "documentsReadThreshold";
 +      details: {
 +        count: number;
++        limit: number;
++        threshold: number;
 +        hourlyCounts: HourlyCount[];
 +        recentEvents: BytesReadRecentEvent[];
 +      };
@@ -2334,9 +2155,7 @@ index 000000000..9cc07bbbd
 +    const day = String(currentDate.getUTCDate()).padStart(2, "0");
 +    const hour = String(currentDate.getUTCHours()).padStart(2, "0");
 +    const formattedHour = `${year}-${month}-${day} ${hour}:00:00`;
-+    const isoHour = currentDate.toISOString().slice(0, 13);
-+    const count =
-+      hourToCountMap.get(isoHour) || hourToCountMap.get(formattedHour) || 0;
++    const count = hourToCountMap.get(formattedHour) ?? 0;
 +    result.push({
 +      hour: formattedHour,
 +      count,
@@ -2446,23 +2265,12 @@ index 000000000..9cc07bbbd
 +  return `insight:${insight.kind}:${insight.componentPath}:${insight.functionId}`;
 +}
 +
-+export function insightsViewUrl(
-+  query: ParsedUrlQuery,
-+  view?: string,
-+): UrlObject {
-+  return {
-+    pathname: "/",
-+    query: {
-+      ...(view ? { view } : {}),
-+      ...(query.lowInsightsThreshold
-+        ? { lowInsightsThreshold: query.lowInsightsThreshold }
-+        : {}),
-+    },
-+  };
++export function insightsViewUrl(view?: string): UrlObject {
++  return { pathname: "/", query: view ? { view } : {} };
 +}
 diff --git a/npm-packages/dashboard-common/src/features/health/lib/usage.ts b/npm-packages/dashboard-common/src/features/health/lib/usage.ts
 new file mode 100644
-index 000000000..1925cbfe1
+index 000000000..8c425293d
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/health/lib/usage.ts
 @@ -0,0 +1,45 @@
@@ -2472,7 +2280,7 @@ index 000000000..1925cbfe1
 +
 +export type DateRange = { from: string; to: string };
 +
-+export const USAGE_REFRESH_INTERVAL_MS =
++const USAGE_REFRESH_INTERVAL_MS =
 +  getURLConfigInt("usage_refresh_secs", 60 * 10) * 1000;
 +export const rootComponentPath = "-root-component-";
 +
@@ -2513,19 +2321,16 @@ index 000000000..1925cbfe1
 +}
 diff --git a/npm-packages/dashboard-common/src/features/settings/components/backups/SnapshotExport.tsx b/npm-packages/dashboard-common/src/features/settings/components/backups/SnapshotExport.tsx
 new file mode 100644
-index 000000000..67ff59ca6
+index 000000000..ae7cb5ee7
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/settings/components/backups/SnapshotExport.tsx
-@@ -0,0 +1,134 @@
+@@ -0,0 +1,131 @@
 +import { DownloadIcon } from "@radix-ui/react-icons";
 +import { Button } from "@ui/Button";
 +import { Spinner } from "@ui/Spinner";
 +import { Callout } from "@ui/Callout";
 +import { Sheet } from "@ui/Sheet";
-+import {
-+  useGetZipExport,
-+  useRequestZipExport,
-+} from "@common/lib/deploymentApi";
++import { useGetZipExport, useRequestZipExport } from "@common/lib/snapshotApi";
 +import { Fragment, useContext } from "react";
 +import { useQuery } from "convex/react";
 +import udfs from "@common/udfs";
@@ -2653,7 +2458,7 @@ index 000000000..67ff59ca6
 +}
 diff --git a/npm-packages/dashboard-common/src/features/settings/components/backups/SnapshotImport.tsx b/npm-packages/dashboard-common/src/features/settings/components/backups/SnapshotImport.tsx
 new file mode 100644
-index 000000000..f780b9250
+index 000000000..9381c3948
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/settings/components/backups/SnapshotImport.tsx
 @@ -0,0 +1,430 @@
@@ -2681,7 +2486,7 @@ index 000000000..f780b9250
 +  useCancelImport,
 +  useConfirmImport,
 +  useUploadSnapshotImport,
-+} from "@common/lib/deploymentApi";
++} from "@common/lib/snapshotApi";
 +import {
 +  Disclosure,
 +  DisclosureButton,
@@ -2881,7 +2686,7 @@ index 000000000..f780b9250
 +  }
 +}
 +
-+export function ImportSummary({
++function ImportSummary({
 +  snapshotImportCheckpoints,
 +}: {
 +  snapshotImportCheckpoints:
@@ -2965,7 +2770,7 @@ index 000000000..f780b9250
 +  );
 +}
 +
-+export function ImportState({
++function ImportState({
 +  snapshotImport,
 +}: {
 +  snapshotImport: Doc<"_snapshot_imports">;
@@ -3108,46 +2913,10 @@ index 000000000..1476c354a
 +  );
 +}
 diff --git a/npm-packages/dashboard-common/src/layouts/SettingsSidebar.tsx b/npm-packages/dashboard-common/src/layouts/SettingsSidebar.tsx
-index 28ae40fc5..01524ff9a 100644
+index 28ae40fc5..2d5875595 100644
 --- a/npm-packages/dashboard-common/src/layouts/SettingsSidebar.tsx
 +++ b/npm-packages/dashboard-common/src/layouts/SettingsSidebar.tsx
-@@ -61,8 +61,6 @@ export function SettingsSidebar({
-       >
-         {/* On larger screens, this is a sidebar and not a popover menu. */}
-         {allowedPages.map((page) => {
--          const showInCloudDashboard =
--            page === "backups" && isCloudDeploymentInSelfHostedDashboard;
-           const isUnavailableForSelfHosted =
-             (page === "backups" || page === "custom-domains") &&
-             isSelfHostedDeployment;
-@@ -72,11 +70,7 @@ export function SettingsSidebar({
- 
-           return (
-             <SidebarLink
--              href={
--                showInCloudDashboard
--                  ? `https://dashboard.convex.dev/d/${deploymentName}/settings/${page}`
--                  : `${deploymentsURI}/settings/${page === "general" ? "" : page}`
--              }
-+              href={`${deploymentsURI}/settings/${page === "general" ? "" : page}`}
-               Icon={DEPLOYMENT_SETTINGS_PAGE_ICONS[page]}
-               isActive={page === selectedPage}
-               key={page}
-@@ -88,12 +82,8 @@ export function SettingsSidebar({
-                     ? `The ${DEPLOYMENT_SETTINGS_PAGES_AND_NAMES[page]} feature is not currently available in self-hosted deployments.`
-                     : undefined
-               }
--              target={showInCloudDashboard ? "_blank" : undefined}
-             >
--              <div className="flex items-center justify-between gap-2">
--                {DEPLOYMENT_SETTINGS_PAGES_AND_NAMES[page]}
--                {showInCloudDashboard && <ExternalLinkIcon />}
--              </div>
-+              {DEPLOYMENT_SETTINGS_PAGES_AND_NAMES[page]}
-             </SidebarLink>
-           );
-         })}
-@@ -159,6 +149,7 @@ export function SettingsSidebar({
+@@ -159,6 +159,7 @@ export function SettingsSidebar({
  
  function useAllowedPages() {
    const { nents } = useNents();
@@ -3155,7 +2924,7 @@ index 28ae40fc5..01524ff9a 100644
  
    let pages = DEPLOYMENT_SETTINGS_PAGES;
  
-@@ -166,7 +157,9 @@ function useAllowedPages() {
+@@ -166,7 +167,9 @@ function useAllowedPages() {
      pages = pages.filter((d) => d !== "components");
    }
  
@@ -3166,49 +2935,17 @@ index 28ae40fc5..01524ff9a 100644
  
    return pages;
  }
-diff --git a/npm-packages/dashboard-common/src/lib/deploymentApi.ts b/npm-packages/dashboard-common/src/lib/deploymentApi.ts
-index 3d3625939..2745fd837 100644
---- a/npm-packages/dashboard-common/src/lib/deploymentApi.ts
-+++ b/npm-packages/dashboard-common/src/lib/deploymentApi.ts
-@@ -1,14 +1,15 @@
--import { useContext, useMemo } from "react";
-+import { useCallback, useContext, useMemo } from "react";
- import { Shape, shapeSchema } from "shapes";
- import useSWR, { BareFetcher, Middleware } from "swr";
- import { z } from "zod";
+diff --git a/npm-packages/dashboard-common/src/lib/snapshotApi.ts b/npm-packages/dashboard-common/src/lib/snapshotApi.ts
+new file mode 100644
+index 000000000..91c9a63ec
+--- /dev/null
++++ b/npm-packages/dashboard-common/src/lib/snapshotApi.ts
+@@ -0,0 +1,175 @@
++import { useCallback, useContext } from "react";
 +import { Id } from "system-udfs/convex/_generated/dataModel";
- import { useNents } from "@common/lib/useNents";
- import {
-   ConnectedDeploymentContext,
-   DeploymentInfoContext,
- } from "@common/lib/deploymentContext";
- import { deploymentFetch } from "@common/lib/fetching";
--import { isUserTableName } from "@common/lib/utils";
-+import { isUserTableName, toast } from "@common/lib/utils";
- import { displayName } from "@common/lib/functions/generateFileTree";
- 
- export function useDeploymentUrl(): string {
-@@ -64,7 +65,6 @@ export function useTableShapes(): {
-   return {
-     tables: useMemo(() => {
-       if (!data) return undefined;
--
-       const shapes = shapes2ResponseSchema.parse(data);
-       return new Map(
-         Object.entries(shapes)
-@@ -76,8 +76,6 @@ export function useTableShapes(): {
-   };
- }
- 
--// componentId: undefined means use the current selected component.
--// componentId: null means use the root component.
- export function useFunctionUrl(udfPath: string, componentId?: string | null) {
-   const { deploymentsURI } = useContext(DeploymentInfoContext);
- 
-@@ -102,3 +100,178 @@ export const deploymentAuthMiddleware: Middleware =
- 
-     return useSWRNext(swrKey, fetcher, config);
-   };
++import { useAdminKey, useDeploymentUrl } from "@common/lib/deploymentApi";
++import { DeploymentInfoContext } from "@common/lib/deploymentContext";
++import { toast } from "@common/lib/utils";
 +
 +async function deploymentResponseError(res: Response) {
 +  const text = await res.text();
@@ -3378,11 +3115,6 @@ index 3d3625939..2745fd837 100644
 +    },
 +    [checkedFetch],
 +  );
-+}
-+
-+export function useLogDeploymentEvent() {
-+  const { useLogDeploymentEvent: hook } = useContext(DeploymentInfoContext);
-+  return hook();
 +}
 diff --git a/npm-packages/dashboard-self-hosted/src/pages/index.tsx b/npm-packages/dashboard-self-hosted/src/pages/index.tsx
 index cd4843ab6..9f510a67a 100644

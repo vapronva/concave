@@ -1,50 +1,3 @@
-diff --git a/crates/db_connection/src/lib.rs b/crates/db_connection/src/lib.rs
-index fc2a1bc8b..b7f223842 100644
---- a/crates/db_connection/src/lib.rs
-+++ b/crates/db_connection/src/lib.rs
-@@ -233,6 +233,42 @@ pub async fn connect_persistence_reader<RT: Runtime>(
-     }
- }
- 
-+pub async fn postgres_database_initialized<RT: Runtime>(
-+    db: DbDriverTag,
-+    db_spec: &str,
-+    require_ssl: bool,
-+    deployment_name: &str,
-+    runtime: RT,
-+) -> anyhow::Result<bool> {
-+    match persistence_seed(
-+        db,
-+        db_spec,
-+        ConnectPersistenceFlags {
-+            require_ssl,
-+            allow_read_only: true,
-+            skip_index_creation: false,
-+        },
-+        deployment_name,
-+        None,
-+        runtime,
-+    )? {
-+        PersistenceSeed::Postgres { config, options } => {
-+            let pool = PostgresPersistence::create_pool(config)
-+                .context("failed to create postgres pool")?;
-+            let reader_options = PostgresReaderOptions {
-+                version: options.version,
-+                schema: options.schema,
-+                instance_name: options.instance_name,
-+                multitenant: options.multitenant,
-+            };
-+            PostgresPersistence::schema_initialized(pool, reader_options).await
-+        },
-+        PersistenceSeed::Sqlite { .. } | PersistenceSeed::MySql { .. } => {
-+            anyhow::bail!("the boot-role probe requires a Postgres persistence backend")
-+        },
-+    }
-+}
-+
- pub async fn set_read_only<RT: Runtime>(
-     db: DbDriverTag,
-     db_spec: &str,
 diff --git a/crates/local_backend/src/authentication.rs b/crates/local_backend/src/authentication.rs
 index dfe80d124..0b1f0aa5e 100644
 --- a/crates/local_backend/src/authentication.rs
@@ -363,7 +316,7 @@ index 89f88e8a0..b38d2ef3a 100644
  }
  
 diff --git a/crates/local_backend/src/main.rs b/crates/local_backend/src/main.rs
-index fbc0e6290..7e4b21c2d 100644
+index 93bad254f..ca8bb4c9c 100644
 --- a/crates/local_backend/src/main.rs
 +++ b/crates/local_backend/src/main.rs
 @@ -1,5 +1,6 @@
@@ -373,30 +326,29 @@ index fbc0e6290..7e4b21c2d 100644
  use clap::Parser;
  use cmd_util::env::{
      config_service,
-@@ -12,11 +13,16 @@ use common::{
-     runtime::Runtime,
+@@ -13,6 +14,7 @@ use common::{
      sentry::set_sentry_tags,
      shutdown::ShutdownSignal,
--    types::MemberId,
-+    types::{
+     types::{
 +        BackendRole,
-+        MemberId,
-+    },
-     version::SERVER_VERSION_STR,
+         DeploymentId,
+         MemberId,
+     },
+@@ -20,6 +22,7 @@ use common::{
  };
  use db_connection::{
      connect_persistence,
 +    connect_persistence_reader,
-+    postgres_database_initialized,
      ConnectPersistenceFlags,
  };
  use futures::{
-@@ -37,11 +43,13 @@ use local_backend::{
+@@ -40,11 +43,14 @@ use local_backend::{
          LocalConfig,
          Subcommand,
      },
 +    leadership::{
 +        follower_router,
++        postgres_database_initialized,
 +        RolePersistence,
 +    },
      make_app,
@@ -407,7 +359,7 @@ index fbc0e6290..7e4b21c2d 100644
  };
  use runtime::prod::ProdRuntime;
  use tokio::{
-@@ -51,6 +59,21 @@ use tokio::{
+@@ -54,6 +60,21 @@ use tokio::{
      sync::oneshot,
  };
  
@@ -429,7 +381,7 @@ index fbc0e6290..7e4b21c2d 100644
  fn main() -> Result<(), MainError> {
      let config = LocalConfig::parse();
      if let Some(subcommand) = &config.subcommand {
-@@ -137,42 +160,97 @@ async fn run_server(runtime: ProdRuntime, config: LocalConfig) -> anyhow::Result
+@@ -140,42 +161,100 @@ async fn run_server(runtime: ProdRuntime, config: LocalConfig) -> anyhow::Result
  }
  
  async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::Result<()> {
@@ -484,16 +436,19 @@ index fbc0e6290..7e4b21c2d 100644
 -            skip_index_creation: false,
 -        },
 -        &config.name(),
--        // No control plane hands a self-hosted backend a deployment ID; a
--        // layout that keys on one rejects the connection.
--        None,
+-        // No control plane hands a self-hosted backend an ID, so derive a
+-        // stable one from its name.
+-        Some(DeploymentId::stable_from_name(&config.name())),
 -        runtime.clone(),
 -        preempt_signal.clone(),
 -    )
 -    .await?;
 -    let st = make_app(
++    // No control plane hands a self-hosted backend an ID, so derive a
++    // stable one from its name.
++    let deployment_id = Some(DeploymentId::stable_from_name(&config.name()));
 +    let persistence = if config.role.is_leader() && !boot_as_follower {
-+        leader_persistence(&config, &runtime, &preempt_signal).await?
++        leader_persistence(&config, deployment_id, &runtime, &preempt_signal).await?
 +    } else {
 +        RolePersistence::Follower(
 +            connect_persistence_reader(
@@ -502,7 +457,7 @@ index fbc0e6290..7e4b21c2d 100644
 +                !config.do_not_require_ssl,
 +                false,
 +                &config.name(),
-+                None,
++                deployment_id,
 +                runtime.clone(),
 +            )
 +            .await?,
@@ -528,7 +483,7 @@ index fbc0e6290..7e4b21c2d 100644
 +            make_app(
 +                runtime.clone(),
 +                config.clone(),
-+                leader_persistence(&config, &runtime, &preempt_signal).await?,
++                leader_persistence(&config, deployment_id, &runtime, &preempt_signal).await?,
 +                shutdown_rx.clone(),
 +                preempt_signal.clone(),
 +            )
@@ -547,7 +502,7 @@ index fbc0e6290..7e4b21c2d 100644
          *HTTP_SERVER_TIMEOUT_DURATION,
          HttpActionRouteMapper,
      );
-@@ -191,19 +269,20 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
+@@ -194,19 +273,20 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
      // Start shutdown when we get a manual shutdown signal or with the first
      // ctrl-c.
      let mut force_exit_duration = None;
@@ -571,7 +526,7 @@ index fbc0e6290..7e4b21c2d 100644
              r?;
              let _: Result<_, _> = shutdown_tx.broadcast(()).await;
          },
-@@ -245,8 +324,12 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
+@@ -248,8 +328,12 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
                  tracing::info!("Cool down expired. Shutting down");
                  break;
              }
@@ -585,13 +540,14 @@ index fbc0e6290..7e4b21c2d 100644
                  r?;
                  tracing::warn!("Forcibly shutting down!");
                  break;
-@@ -256,3 +339,28 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
+@@ -259,3 +343,27 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
  
      Ok(())
  }
 +
 +async fn leader_persistence(
 +    config: &LocalConfig,
++    deployment_id: Option<DeploymentId>,
 +    runtime: &ProdRuntime,
 +    preempt_signal: &ShutdownSignal,
 +) -> anyhow::Result<RolePersistence> {
@@ -605,9 +561,7 @@ index fbc0e6290..7e4b21c2d 100644
 +                skip_index_creation: false,
 +            },
 +            &config.name(),
-+            // No control plane hands a self-hosted backend a deployment ID; a
-+            // layout that keys on one rejects the connection.
-+            None,
++            deployment_id,
 +            runtime.clone(),
 +            preempt_signal.clone(),
 +        )
@@ -615,25 +569,10 @@ index fbc0e6290..7e4b21c2d 100644
 +    ))
 +}
 diff --git a/crates/local_backend/src/node_action_callbacks.rs b/crates/local_backend/src/node_action_callbacks.rs
-index 8ca7e1a1b..303e342bd 100644
+index 8ca7e1a1b..5cb3b1ca4 100644
 --- a/crates/local_backend/src/node_action_callbacks.rs
 +++ b/crates/local_backend/src/node_action_callbacks.rs
-@@ -10,10 +10,14 @@ use axum::{
-     RequestPartsExt,
- };
- use common::{
-+    bootstrap_model::components::handles::FunctionHandle,
-     components::{
-+        CanonicalizedComponentFunctionPath,
-         ComponentFunctionPath,
-         ComponentId,
-+        ComponentPath,
-         PublicFunctionPath,
-+        SerializedComponentFunctionPath,
-     },
-     execution_context::{
-         ClientIp,
-@@ -34,6 +38,11 @@ use common::{
+@@ -34,6 +34,11 @@ use common::{
          },
          ExtractClientVersion,
          HttpResponseError,
@@ -645,20 +584,20 @@ index 8ca7e1a1b..303e342bd 100644
      },
      knobs::V8_ACTION_USER_TIMEOUT,
      runtime::UnixTimestamp,
-@@ -54,7 +63,11 @@ use errors::ErrorMetadata;
- use fastrace::future::FutureExt;
- use http::HeaderMap;
- use keybroker::Identity;
--use model::session_requests::types::SessionRequestIdentifier;
-+use model::{
-+    file_storage::types::FileStorageEntry,
-+    session_requests::types::SessionRequestIdentifier,
+@@ -90,10 +95,20 @@ use crate::{
+     LocalAppState,
+ };
+ 
++mod funrun;
++
++use funrun::callback_function_path;
++pub use funrun::{
++    lookup_function_handle,
++    storage_get_file_entry,
++    storage_store_file_entry,
 +};
-+use prost::Message;
- use serde::{
-     Deserialize,
-     Serialize,
-@@ -94,6 +107,7 @@ use crate::{
++
+ #[derive(Deserialize, Debug)]
  #[serde(rename_all = "camelCase")]
  pub struct NodeCallbackUdfPostRequest {
      pub path: Option<String>,
@@ -666,11 +605,237 @@ index 8ca7e1a1b..303e342bd 100644
      pub reference: Option<String>,
      pub function_handle: Option<String>,
      pub args: UdfArgsJson,
-@@ -167,6 +181,38 @@ impl TryFrom<MutationIdentifierJson> for SessionRequestIdentifier {
-     }
+@@ -182,16 +197,16 @@ pub async fn internal_query_post(
+     ExtractExecutionContext(context): ExtractExecutionContext,
+     Json(req): Json<NodeCallbackUdfPostRequest>,
+ ) -> Result<impl IntoResponse, HttpResponseError> {
+-    let path = st
+-        .application
+-        .canonicalized_function_path(
+-            identity.clone(),
+-            component_id,
+-            req.path,
+-            req.reference,
+-            req.function_handle,
+-        )
+-        .await?;
++    let path = callback_function_path(
++        &st,
++        identity.clone(),
++        component_id,
++        req.component_path,
++        req.path,
++        req.reference,
++        req.function_handle,
++    )
++    .await?;
+     let udf_return = st
+         .application
+         .read_only_udf(
+@@ -241,16 +256,16 @@ pub async fn internal_mutation_post(
+         .mutation_identifier
+         .map(SessionRequestIdentifier::try_from)
+         .transpose()?;
+-    let path = st
+-        .application
+-        .canonicalized_function_path(
+-            identity.clone(),
+-            component_id,
+-            req.path,
+-            req.reference,
+-            req.function_handle,
+-        )
+-        .await?;
++    let path = callback_function_path(
++        &st,
++        identity.clone(),
++        component_id,
++        req.component_path,
++        req.path,
++        req.reference,
++        req.function_handle,
++    )
++    .await?;
+     let udf_result = st
+         .application
+         .mutation_udf(
+@@ -300,16 +315,16 @@ pub async fn internal_action_post(
+     ExtractExecutionContext(context): ExtractExecutionContext,
+     Json(req): Json<NodeCallbackUdfPostRequest>,
+ ) -> Result<impl IntoResponse, HttpResponseError> {
+-    let path = st
+-        .application
+-        .canonicalized_function_path(
+-            identity.clone(),
+-            component_id,
+-            req.path,
+-            req.reference,
+-            req.function_handle,
+-        )
+-        .await?;
++    let path = callback_function_path(
++        &st,
++        identity.clone(),
++        component_id,
++        req.component_path,
++        req.path,
++        req.reference,
++        req.function_handle,
++    )
++    .await?;
+     let udf_result = st
+         .application
+         .action_udf(
+@@ -348,6 +363,7 @@ pub struct ScheduleJobRequest {
+     reference: Option<String>,
+     function_handle: Option<String>,
+     udf_path: Option<String>,
++    component_path: Option<String>,
+     udf_args: UdfArgsJson,
+     scheduled_ts: f64,
+ }
+@@ -371,19 +387,17 @@ pub async fn schedule_job(
+         ErrorMetadata::bad_request("InvalidTimestamp", "Requested scheduled_ts is invalid")
+     })?;
+     // User might have entered an invalid path, so this is a developer error.
+-    let path = st
+-        .application
+-        .canonicalized_function_path(
+-            identity.clone(),
+-            component_id,
+-            req.udf_path,
+-            req.reference,
+-            req.function_handle,
+-        )
+-        .await
+-        .map_err(|e| {
+-            anyhow::anyhow!(ErrorMetadata::bad_request("InvalidUdfPath", e.to_string()))
+-        })?;
++    let path = callback_function_path(
++        &st,
++        identity.clone(),
++        component_id,
++        req.component_path,
++        req.udf_path,
++        req.reference,
++        req.function_handle,
++    )
++    .await
++    .map_err(|e| anyhow::anyhow!(ErrorMetadata::bad_request("InvalidUdfPath", e.to_string())))?;
+     let udf_args = req.udf_args.into_serialized_args()?;
+     let job_id = st
+         .application
+@@ -431,6 +445,7 @@ pub async fn cancel_developer_job(
+ #[serde(rename_all = "camelCase")]
+ pub struct CreateFunctionHandleRequest {
+     udf_path: Option<String>,
++    component_path: Option<String>,
+     reference: Option<String>,
  }
  
-+async fn callback_function_path(
+@@ -448,19 +463,17 @@ pub async fn create_function_handle(
+     }: ExtractActionIdentity,
+     Json(req): Json<CreateFunctionHandleRequest>,
+ ) -> Result<impl IntoResponse, HttpResponseError> {
+-    let path = st
+-        .application
+-        .canonicalized_function_path(
+-            identity.clone(),
+-            component_id,
+-            req.udf_path,
+-            req.reference,
+-            None,
+-        )
+-        .await
+-        .map_err(|e| {
+-            anyhow::anyhow!(ErrorMetadata::bad_request("InvalidUdfPath", e.to_string()))
+-        })?;
++    let path = callback_function_path(
++        &st,
++        identity.clone(),
++        component_id,
++        req.component_path,
++        req.udf_path,
++        req.reference,
++        None,
++    )
++    .await
++    .map_err(|e| anyhow::anyhow!(ErrorMetadata::bad_request("InvalidUdfPath", e.to_string())))?;
+     let handle = st
+         .application
+         .runner()
+@@ -635,14 +648,12 @@ pub async fn audit_log(
+     .into())
+ }
+ 
+-pub static CONVEX_ACTIONS_CALLBACK_TOKEN: &str = "Convex-Action-Callback-Token";
+-
+ async fn check_actions_token(
+     st: &LocalAppState,
+     headers: &HeaderMap,
+ ) -> anyhow::Result<(SystemTime, ComponentId)> {
+     let value = headers
+-        .get(CONVEX_ACTIONS_CALLBACK_TOKEN)
++        .get(CONVEX_ACTIONS_CALLBACK_TOKEN_HEADER)
+         .context("Missing callback token - is the call from actions?")?;
+ 
+     let token = value
+@@ -734,7 +745,7 @@ impl<S: Sync> FromRequestParts<S> for ExtractActionName {
+     ) -> Result<Self, Self::Rejection> {
+         let action_name = parts
+             .headers
+-            .get("Convex-Action-Function-Name")
++            .get(CONVEX_ACTION_FUNCTION_NAME_HEADER)
+             .map(|value| value.to_str())
+             .transpose()
+             .context("Convex-Action-Function-Name must be a string")?
+@@ -755,7 +766,7 @@ impl<T: Sync> FromRequestParts<T> for ExtractExecutionContext {
+     ) -> Result<Self, Self::Rejection> {
+         let request_id: RequestId = parts
+             .headers
+-            .get("Convex-Request-Id")
++            .get(CONVEX_REQUEST_ID_HEADER)
+             .map(|v| v.to_str())
+             .transpose()
+             .context("Request id must be a string")?
+@@ -765,7 +776,7 @@ impl<T: Sync> FromRequestParts<T> for ExtractExecutionContext {
+             .unwrap_or(RequestId::new());
+         let execution_id: ExecutionId = parts
+             .headers
+-            .get("Convex-Execution-Id")
++            .get(CONVEX_EXECUTION_ID_HEADER)
+             .map(|v| v.to_str())
+             .transpose()
+             .context("Execution id must be a string")?
+@@ -774,7 +785,7 @@ impl<T: Sync> FromRequestParts<T> for ExtractExecutionContext {
+             // For backwards compatibility
+             .unwrap_or(ExecutionId::new());
+ 
+-        let is_root: bool = match parts.headers.get("Convex-Root-Request") {
++        let is_root: bool = match parts.headers.get(CONVEX_ROOT_REQUEST_HEADER) {
+             Some(v) => v.to_str().context("Convex-Root-Request must be a string")? == "true",
+             None => false,
+         };
+diff --git a/crates/local_backend/src/node_action_callbacks/funrun.rs b/crates/local_backend/src/node_action_callbacks/funrun.rs
+new file mode 100644
+index 000000000..223644238
+--- /dev/null
++++ b/crates/local_backend/src/node_action_callbacks/funrun.rs
+@@ -0,0 +1,133 @@
++use common::{
++    bootstrap_model::components::handles::FunctionHandle,
++    components::{
++        CanonicalizedComponentFunctionPath,
++        ComponentPath,
++        SerializedComponentFunctionPath,
++    },
++};
++use model::file_storage::types::FileStorageEntry;
++use prost::Message;
++
++use super::*;
++
++pub(super) async fn callback_function_path(
 +    st: &LocalAppState,
 +    identity: Identity,
 +    component_id: ComponentId,
@@ -702,172 +867,6 @@ index 8ca7e1a1b..303e342bd 100644
 +    })
 +}
 +
- /// This is like `public_query_post`, except it allows calling internal
- /// functions as well. This should not be used for any publicly accessible
- /// endpoints, and should only be used to support Convex functions calling into
-@@ -182,16 +228,16 @@ pub async fn internal_query_post(
-     ExtractExecutionContext(context): ExtractExecutionContext,
-     Json(req): Json<NodeCallbackUdfPostRequest>,
- ) -> Result<impl IntoResponse, HttpResponseError> {
--    let path = st
--        .application
--        .canonicalized_function_path(
--            identity.clone(),
--            component_id,
--            req.path,
--            req.reference,
--            req.function_handle,
--        )
--        .await?;
-+    let path = callback_function_path(
-+        &st,
-+        identity.clone(),
-+        component_id,
-+        req.component_path,
-+        req.path,
-+        req.reference,
-+        req.function_handle,
-+    )
-+    .await?;
-     let udf_return = st
-         .application
-         .read_only_udf(
-@@ -241,16 +287,16 @@ pub async fn internal_mutation_post(
-         .mutation_identifier
-         .map(SessionRequestIdentifier::try_from)
-         .transpose()?;
--    let path = st
--        .application
--        .canonicalized_function_path(
--            identity.clone(),
--            component_id,
--            req.path,
--            req.reference,
--            req.function_handle,
--        )
--        .await?;
-+    let path = callback_function_path(
-+        &st,
-+        identity.clone(),
-+        component_id,
-+        req.component_path,
-+        req.path,
-+        req.reference,
-+        req.function_handle,
-+    )
-+    .await?;
-     let udf_result = st
-         .application
-         .mutation_udf(
-@@ -300,16 +346,16 @@ pub async fn internal_action_post(
-     ExtractExecutionContext(context): ExtractExecutionContext,
-     Json(req): Json<NodeCallbackUdfPostRequest>,
- ) -> Result<impl IntoResponse, HttpResponseError> {
--    let path = st
--        .application
--        .canonicalized_function_path(
--            identity.clone(),
--            component_id,
--            req.path,
--            req.reference,
--            req.function_handle,
--        )
--        .await?;
-+    let path = callback_function_path(
-+        &st,
-+        identity.clone(),
-+        component_id,
-+        req.component_path,
-+        req.path,
-+        req.reference,
-+        req.function_handle,
-+    )
-+    .await?;
-     let udf_result = st
-         .application
-         .action_udf(
-@@ -348,6 +394,7 @@ pub struct ScheduleJobRequest {
-     reference: Option<String>,
-     function_handle: Option<String>,
-     udf_path: Option<String>,
-+    component_path: Option<String>,
-     udf_args: UdfArgsJson,
-     scheduled_ts: f64,
- }
-@@ -371,19 +418,17 @@ pub async fn schedule_job(
-         ErrorMetadata::bad_request("InvalidTimestamp", "Requested scheduled_ts is invalid")
-     })?;
-     // User might have entered an invalid path, so this is a developer error.
--    let path = st
--        .application
--        .canonicalized_function_path(
--            identity.clone(),
--            component_id,
--            req.udf_path,
--            req.reference,
--            req.function_handle,
--        )
--        .await
--        .map_err(|e| {
--            anyhow::anyhow!(ErrorMetadata::bad_request("InvalidUdfPath", e.to_string()))
--        })?;
-+    let path = callback_function_path(
-+        &st,
-+        identity.clone(),
-+        component_id,
-+        req.component_path,
-+        req.udf_path,
-+        req.reference,
-+        req.function_handle,
-+    )
-+    .await
-+    .map_err(|e| anyhow::anyhow!(ErrorMetadata::bad_request("InvalidUdfPath", e.to_string())))?;
-     let udf_args = req.udf_args.into_serialized_args()?;
-     let job_id = st
-         .application
-@@ -431,6 +476,7 @@ pub async fn cancel_developer_job(
- #[serde(rename_all = "camelCase")]
- pub struct CreateFunctionHandleRequest {
-     udf_path: Option<String>,
-+    component_path: Option<String>,
-     reference: Option<String>,
- }
- 
-@@ -448,19 +494,17 @@ pub async fn create_function_handle(
-     }: ExtractActionIdentity,
-     Json(req): Json<CreateFunctionHandleRequest>,
- ) -> Result<impl IntoResponse, HttpResponseError> {
--    let path = st
--        .application
--        .canonicalized_function_path(
--            identity.clone(),
--            component_id,
--            req.udf_path,
--            req.reference,
--            None,
--        )
--        .await
--        .map_err(|e| {
--            anyhow::anyhow!(ErrorMetadata::bad_request("InvalidUdfPath", e.to_string()))
--        })?;
-+    let path = callback_function_path(
-+        &st,
-+        identity.clone(),
-+        component_id,
-+        req.component_path,
-+        req.udf_path,
-+        req.reference,
-+        None,
-+    )
-+    .await
-+    .map_err(|e| anyhow::anyhow!(ErrorMetadata::bad_request("InvalidUdfPath", e.to_string())))?;
-     let handle = st
-         .application
-         .runner()
-@@ -618,6 +662,95 @@ pub async fn storage_delete(
-     Ok(Json(json!(null)))
- }
- 
 +#[derive(Serialize, Deserialize)]
 +#[serde(rename_all = "camelCase")]
 +pub struct StorageGetFileEntryResponse {
@@ -956,62 +955,6 @@ index 8ca7e1a1b..303e342bd 100644
 +    let serialized = SerializedComponentFunctionPath::try_from(path)?;
 +    Ok(Json(serialized))
 +}
-+
- #[derive(Deserialize)]
- pub struct AuditLogParams {
-     #[allow(dead_code)]
-@@ -635,14 +768,12 @@ pub async fn audit_log(
-     .into())
- }
- 
--pub static CONVEX_ACTIONS_CALLBACK_TOKEN: &str = "Convex-Action-Callback-Token";
--
- async fn check_actions_token(
-     st: &LocalAppState,
-     headers: &HeaderMap,
- ) -> anyhow::Result<(SystemTime, ComponentId)> {
-     let value = headers
--        .get(CONVEX_ACTIONS_CALLBACK_TOKEN)
-+        .get(CONVEX_ACTIONS_CALLBACK_TOKEN_HEADER)
-         .context("Missing callback token - is the call from actions?")?;
- 
-     let token = value
-@@ -734,7 +865,7 @@ impl<S: Sync> FromRequestParts<S> for ExtractActionName {
-     ) -> Result<Self, Self::Rejection> {
-         let action_name = parts
-             .headers
--            .get("Convex-Action-Function-Name")
-+            .get(CONVEX_ACTION_FUNCTION_NAME_HEADER)
-             .map(|value| value.to_str())
-             .transpose()
-             .context("Convex-Action-Function-Name must be a string")?
-@@ -755,7 +886,7 @@ impl<T: Sync> FromRequestParts<T> for ExtractExecutionContext {
-     ) -> Result<Self, Self::Rejection> {
-         let request_id: RequestId = parts
-             .headers
--            .get("Convex-Request-Id")
-+            .get(CONVEX_REQUEST_ID_HEADER)
-             .map(|v| v.to_str())
-             .transpose()
-             .context("Request id must be a string")?
-@@ -765,7 +896,7 @@ impl<T: Sync> FromRequestParts<T> for ExtractExecutionContext {
-             .unwrap_or(RequestId::new());
-         let execution_id: ExecutionId = parts
-             .headers
--            .get("Convex-Execution-Id")
-+            .get(CONVEX_EXECUTION_ID_HEADER)
-             .map(|v| v.to_str())
-             .transpose()
-             .context("Execution id must be a string")?
-@@ -774,7 +905,7 @@ impl<T: Sync> FromRequestParts<T> for ExtractExecutionContext {
-             // For backwards compatibility
-             .unwrap_or(ExecutionId::new());
- 
--        let is_root: bool = match parts.headers.get("Convex-Root-Request") {
-+        let is_root: bool = match parts.headers.get(CONVEX_ROOT_REQUEST_HEADER) {
-             Some(v) => v.to_str().context("Convex-Root-Request must be a string")? == "true",
-             None => false,
-         };
 diff --git a/self-hosted/docker-build/read_credentials.sh b/self-hosted/docker-build/read_credentials.sh
 index f7a79d85a..081c8f173 100644
 --- a/self-hosted/docker-build/read_credentials.sh

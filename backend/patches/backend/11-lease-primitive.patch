@@ -1,8 +1,8 @@
 diff --git a/crates/common/src/persistence/mod.rs b/crates/common/src/persistence/mod.rs
-index 2f8ec1a05..f95b06db7 100644
+index 4bd999d26..65d0ce6ee 100644
 --- a/crates/common/src/persistence/mod.rs
 +++ b/crates/common/src/persistence/mod.rs
-@@ -417,6 +417,22 @@ pub trait Persistence: Sync + Send + 'static {
+@@ -438,6 +438,22 @@ pub trait Persistence: Sync + Send + 'static {
      async fn finish_loading(&self) -> anyhow::Result<()> {
          Ok(())
      }
@@ -25,7 +25,7 @@ index 2f8ec1a05..f95b06db7 100644
  }
  
  #[derive(Debug, Clone, Copy)]
-@@ -696,7 +712,6 @@ pub trait PersistenceReader: Send + Sync + 'static {
+@@ -717,7 +733,6 @@ pub trait PersistenceReader: Send + Sync + 'static {
      async fn table_size_stats(&self) -> anyhow::Result<Vec<PersistenceTableSize>> {
          Ok(vec![])
      }
@@ -33,15 +33,15 @@ index 2f8ec1a05..f95b06db7 100644
  }
  
  /// Timestamp that is repeatable because the caller is holding the lease and
-diff --git a/crates/postgres/src/lib.rs b/crates/postgres/src/lib.rs
-index 35df19ff7..c07ce57c4 100644
---- a/crates/postgres/src/lib.rs
-+++ b/crates/postgres/src/lib.rs
-@@ -469,6 +469,41 @@ impl PostgresPersistence {
-             .await?
-             .is_none())
-     }
+diff --git a/crates/postgres/src/ha.rs b/crates/postgres/src/ha.rs
+new file mode 100644
+index 000000000..c4fb2e794
+--- /dev/null
++++ b/crates/postgres/src/ha.rs
+@@ -0,0 +1,66 @@
++use super::*;
 +
++impl PostgresPersistence {
 +    pub async fn schema_initialized(
 +        pool: Arc<ConvexPgPool>,
 +        options: PostgresReaderOptions,
@@ -76,10 +76,48 @@ index 35df19ff7..c07ce57c4 100644
 +            .await?
 +            .is_some())
 +    }
- }
++}
++
++impl Lease {
++    pub(super) fn lease_ts(&self) -> i64 {
++        self.lease_ts
++    }
++
++    pub(super) async fn lease_held(&self) -> anyhow::Result<bool> {
++        let lease_ts = self.lease_ts;
++        let mut client = self
++            .pool
++            .get_connection("lease_held", &self.schema, &self.instance_name)
++            .await?;
++        let multitenant = self.multitenant;
++        let instance_name = self.instance_name.clone();
++        let row = client
++            .with_retry(async move |client| {
++                let mut params = vec![&lease_ts as &(dyn ToSql + Sync)];
++                if multitenant {
++                    params.push(&instance_name.raw as &(dyn ToSql + Sync));
++                }
++                client
++                    .query_opt(sql::advisory_lease_check(multitenant), params.as_slice())
++                    .await
++            })
++            .await?;
++        Ok(row.is_some())
++    }
++}
+diff --git a/crates/postgres/src/lib.rs b/crates/postgres/src/lib.rs
+index 35df19ff7..81c7433af 100644
+--- a/crates/postgres/src/lib.rs
++++ b/crates/postgres/src/lib.rs
+@@ -2,6 +2,7 @@
+ #![feature(proc_macro_hygiene)]
+ #![feature(type_alias_impl_trait)]
+ mod connection;
++mod ha;
+ mod metrics;
+ mod sql;
  
- #[async_trait]
-@@ -525,6 +560,18 @@ impl Persistence for PostgresPersistence {
+@@ -525,6 +526,18 @@ impl Persistence for PostgresPersistence {
          })
      }
  
@@ -98,7 +136,7 @@ index 35df19ff7..c07ce57c4 100644
      #[fastrace::trace]
      async fn write<'a>(
          &self,
-@@ -1783,27 +1830,27 @@ impl Lease {
+@@ -1783,27 +1796,27 @@ impl Lease {
              .as_nanos() as i64;
  
          tracing::info!("attempting to acquire lease");
@@ -140,39 +178,6 @@ index 35df19ff7..c07ce57c4 100644
              schema: schema.clone(),
              instance_name,
              multitenant,
-@@ -1811,6 +1858,32 @@ impl Lease {
-         })
-     }
- 
-+    fn lease_ts(&self) -> i64 {
-+        self.lease_ts
-+    }
-+
-+    async fn lease_held(&self) -> anyhow::Result<bool> {
-+        let lease_ts = self.lease_ts;
-+        let mut client = self
-+            .pool
-+            .get_connection("lease_held", &self.schema, &self.instance_name)
-+            .await?;
-+        let multitenant = self.multitenant;
-+        let instance_name = self.instance_name.clone();
-+        let row = client
-+            .with_retry(async move |client| {
-+                let mut params = vec![&lease_ts as &(dyn ToSql + Sync)];
-+                if multitenant {
-+                    params.push(&instance_name.raw as &(dyn ToSql + Sync));
-+                }
-+                client
-+                    .query_opt(sql::advisory_lease_check(multitenant), params.as_slice())
-+                    .await
-+            })
-+            .await?;
-+        Ok(row.is_some())
-+    }
-+
-     /// Execute the transaction function f atomically ensuring that the lease is
-     /// still held, otherwise return `LeaseLostError`.
-     ///
 diff --git a/crates/postgres/src/sql.rs b/crates/postgres/src/sql.rs
 index a531a8b5a..4e5940bc9 100644
 --- a/crates/postgres/src/sql.rs

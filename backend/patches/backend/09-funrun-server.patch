@@ -665,10 +665,10 @@ index 000000000..38aa09d74
 +}
 diff --git a/crates/funrun_server/src/config.rs b/crates/funrun_server/src/config.rs
 new file mode 100644
-index 000000000..b6e156299
+index 000000000..dad12bc23
 --- /dev/null
 +++ b/crates/funrun_server/src/config.rs
-@@ -0,0 +1,69 @@
+@@ -0,0 +1,66 @@
 +use std::{
 +    net::SocketAddr,
 +    time::Duration,
@@ -687,7 +687,6 @@ index 000000000..b6e156299
 +pub struct FunrunConfig {
 +    pub listen: SocketAddr,
 +    pub health_listen: SocketAddr,
-+    pub max_snapshot_lag: Duration,
 +    pub drain_delay: Duration,
 +    pub instance: FunrunInstanceConfig,
 +    pub require_ssl: bool,
@@ -703,7 +702,6 @@ index 000000000..b6e156299
 +            .unwrap_or_else(|_| "0.0.0.0:8091".to_string())
 +            .parse()
 +            .context("Invalid FUNRUN_HEALTH_LISTEN")?;
-+        let max_snapshot_lag = duration_secs_from_env("FUNRUN_MAX_SNAPSHOT_LAG_SECS", 30)?;
 +        let drain_delay = duration_secs_from_env("CONVEX_FUNRUN_DRAIN_DELAY_SECS", 8)?;
 +        let require_ssl = std::env::var_os("DO_NOT_REQUIRE_SSL").is_none();
 +        let instance_name =
@@ -715,7 +713,6 @@ index 000000000..b6e156299
 +        Ok(Self {
 +            listen,
 +            health_listen,
-+            max_snapshot_lag,
 +            drain_delay,
 +            instance: FunrunInstanceConfig {
 +                instance_name,
@@ -740,10 +737,10 @@ index 000000000..b6e156299
 +}
 diff --git a/crates/funrun_server/src/main.rs b/crates/funrun_server/src/main.rs
 new file mode 100644
-index 000000000..7539beb45
+index 000000000..7065f22b4
 --- /dev/null
 +++ b/crates/funrun_server/src/main.rs
-@@ -0,0 +1,288 @@
+@@ -0,0 +1,280 @@
 +#![recursion_limit = "256"]
 +
 +use std::sync::{
@@ -800,10 +797,6 @@ index 000000000..7539beb45
 +    );
 +    let registry = Arc::new(InstanceRegistry::new(runtime.clone(), &config)?);
 +    spawn_pod_deletion_cost_updater(&runtime, registry.clone());
-+    let service = FunrunService::new(runtime.clone(), registry.clone())?;
-+    let server = pb::funrun::funrun_server::FunrunServer::new(service)
-+        .max_decoding_message_size(*MAX_GRPC_MESSAGE_BYTES)
-+        .max_encoding_message_size(*MAX_GRPC_MESSAGE_BYTES);
 +    let mut builder = tonic::transport::Server::builder()
 +        .http2_keepalive_interval(Some(std::time::Duration::from_secs(30)))
 +        .http2_keepalive_timeout(Some(std::time::Duration::from_secs(10)));
@@ -825,29 +818,28 @@ index 000000000..7539beb45
 +        config.listen
 +    );
 +    let grpc_registry = registry.clone();
++    let grpc_runtime = runtime.clone();
 +    let grpc_shutdown = shutdown_rx.clone();
 +    let grpc = async move {
-+        tokio::select! {
-+            () = grpc_registry.warm() => {},
++        let state = tokio::select! {
++            state = grpc_registry.warm() => state,
 +            () = wait_for_shutdown(grpc_shutdown.clone()) => return Ok(()),
-+        }
++        };
 +        tracing::info!(
 +            "[convex-funrun] instance warm; listening on {}",
 +            config.listen
 +        );
++        let service = FunrunService::new(grpc_runtime, grpc_registry, state)?;
++        let server = pb::funrun::funrun_server::FunrunServer::new(service)
++            .max_decoding_message_size(*MAX_GRPC_MESSAGE_BYTES)
++            .max_encoding_message_size(*MAX_GRPC_MESSAGE_BYTES);
 +        builder
 +            .add_service(server)
 +            .serve_with_shutdown(config.listen, wait_for_shutdown(grpc_shutdown))
 +            .await
 +            .context("convex-funrun gRPC server exited")
 +    };
-+    let health = serve_health(
-+        config.health_listen,
-+        config.max_snapshot_lag,
-+        registry,
-+        shutdown_rx,
-+        shutting_down,
-+    );
++    let health = serve_health(config.health_listen, registry, shutdown_rx, shutting_down);
 +    tokio::try_join!(grpc, health)?;
 +    Ok(())
 +}
@@ -855,7 +847,6 @@ index 000000000..7539beb45
 +#[derive(Clone)]
 +struct HealthState {
 +    registry: Arc<InstanceRegistry<ProdRuntime>>,
-+    max_snapshot_lag: std::time::Duration,
 +    shutting_down: Arc<AtomicBool>,
 +}
 +
@@ -870,9 +861,9 @@ index 000000000..7539beb45
 +}
 +
 +async fn readiness(State(state): State<HealthState>) -> impl IntoResponse {
-+    let report = state.registry.health_report(state.max_snapshot_lag);
++    let report = state.registry.health_report();
 +    let draining = state.shutting_down.load(Ordering::Acquire);
-+    let status = if draining || !report.healthy || !state.registry.instance_ready() {
++    let status = if draining || !report.healthy || !report.instance.ready {
 +        StatusCode::SERVICE_UNAVAILABLE
 +    } else {
 +        StatusCode::OK
@@ -888,7 +879,6 @@ index 000000000..7539beb45
 +
 +async fn serve_health(
 +    listen: std::net::SocketAddr,
-+    max_snapshot_lag: std::time::Duration,
 +    registry: Arc<InstanceRegistry<ProdRuntime>>,
 +    shutdown_rx: watch::Receiver<bool>,
 +    shutting_down: Arc<AtomicBool>,
@@ -899,7 +889,6 @@ index 000000000..7539beb45
 +        .route("/metrics", get(metrics))
 +        .with_state(HealthState {
 +            registry,
-+            max_snapshot_lag,
 +            shutting_down,
 +        });
 +    let listener = tokio::net::TcpListener::bind(listen).await?;
@@ -1103,10 +1092,10 @@ index 000000000..7b902cd7e
 +}
 diff --git a/crates/funrun_server/src/service.rs b/crates/funrun_server/src/service.rs
 new file mode 100644
-index 000000000..29b7e24d9
+index 000000000..92c77b3f1
 --- /dev/null
 +++ b/crates/funrun_server/src/service.rs
-@@ -0,0 +1,648 @@
+@@ -0,0 +1,644 @@
 +use std::{
 +    collections::BTreeMap,
 +    pin::Pin,
@@ -1244,12 +1233,17 @@ index 000000000..29b7e24d9
 +pub struct FunrunService<RT: Runtime> {
 +    rt: RT,
 +    registry: Arc<InstanceRegistry<RT>>,
++    state: Arc<InstanceState<RT>>,
 +    fetch_client: Arc<dyn common::http::fetch::FetchClient>,
 +    callback_client: reqwest::Client,
 +}
 +
 +impl<RT: Runtime> FunrunService<RT> {
-+    pub fn new(rt: RT, registry: Arc<InstanceRegistry<RT>>) -> anyhow::Result<Self> {
++    pub fn new(
++        rt: RT,
++        registry: Arc<InstanceRegistry<RT>>,
++        state: Arc<InstanceState<RT>>,
++    ) -> anyhow::Result<Self> {
 +        let fetch_client = Arc::new(common::http::fetch::ProxiedFetchClient::new(
 +            None,
 +            "convex-funrun".to_string(),
@@ -1264,6 +1258,7 @@ index 000000000..29b7e24d9
 +        Ok(Self {
 +            rt,
 +            registry,
++            state,
 +            fetch_client,
 +            callback_client,
 +        })
@@ -1294,17 +1289,7 @@ index 000000000..29b7e24d9
 +                "funrun: missing or invalid deployment authorization",
 +            ));
 +        }
-+        self.registry
-+            .get_or_create(instance_name)
-+            .await
-+            .map_err(|e| {
-+                let e = e.context(ErrorMetadata::rejected_before_execution(
-+                    "InstanceLoadFailed",
-+                    "funrun: instance snapshot load failed",
-+                ));
-+                count_rejected_before_execution(&e);
-+                Status::from_anyhow(e)
-+            })
++        Ok(self.state.clone())
 +    }
 +
 +    async fn decode_common_run_inputs(
@@ -1757,21 +1742,24 @@ index 000000000..29b7e24d9
 +}
 diff --git a/crates/funrun_server/src/snapshot.rs b/crates/funrun_server/src/snapshot.rs
 new file mode 100644
-index 000000000..8a967292d
+index 000000000..ee60194d7
 --- /dev/null
 +++ b/crates/funrun_server/src/snapshot.rs
-@@ -0,0 +1,473 @@
+@@ -0,0 +1,409 @@
 +use std::{
-+    sync::Arc,
++    sync::{
++        Arc,
++        LazyLock,
++    },
 +    time::Duration,
 +};
 +
 +use anyhow::Context;
 +use application::create_storage;
++use cmd_util::env::env_config;
 +use common::{
 +    knobs::MAX_ISOLATE_WORKERS,
 +    persistence::{
-+        new_static_repeatable_recent,
 +        PersistenceReader,
 +        RepeatablePersistence,
 +        RetentionValidator,
@@ -1817,10 +1805,7 @@ index 000000000..8a967292d
 +    searcher::InProcessSearcher,
 +    TextIndexManager,
 +};
-+use sync_types::{
-+    backoff::Backoff,
-+    Timestamp,
-+};
++use sync_types::backoff::Backoff;
 +use tokio::sync::OnceCell;
 +
 +use crate::{
@@ -1839,6 +1824,10 @@ index 000000000..8a967292d
 +const MAX_PERCENT_PER_CLIENT: usize = 100;
 +const WARMUP_BACKOFF_INITIAL: Duration = Duration::from_secs(1);
 +const WARMUP_BACKOFF_MAX: Duration = Duration::from_secs(60);
++static FUNRUN_FOLLOWER_INDEX_CACHE_SIZE: LazyLock<u64> =
++    LazyLock::new(|| env_config("FUNRUN_FOLLOWER_INDEX_CACHE_SIZE", 64_000_000));
++static FUNRUN_SNAPSHOT_WAIT_TIMEOUT: LazyLock<Duration> =
++    LazyLock::new(|| Duration::from_secs(env_config("FUNRUN_SNAPSHOT_WAIT_TIMEOUT_SECS", 30)));
 +
 +pub struct InstanceRegistry<RT: Runtime> {
 +    rt: RT,
@@ -1847,16 +1836,7 @@ index 000000000..8a967292d
 +    shared_isolate: SharedIsolateResources<RT>,
 +    searcher: Arc<dyn search::Searcher>,
 +    state: Arc<OnceCell<Arc<InstanceState<RT>>>>,
-+    lag_sample: Arc<Mutex<Option<InstanceLagSample>>>,
 +    load_error: Mutex<Option<InstanceLoadError>>,
-+}
-+
-+#[derive(Clone)]
-+struct InstanceLagSample {
-+    warm_timestamp: Timestamp,
-+    persistence_timestamp: Option<Timestamp>,
-+    lag_seconds: Option<f64>,
-+    error: Option<String>,
 +}
 +
 +#[derive(Clone)]
@@ -1879,8 +1859,6 @@ index 000000000..8a967292d
 +        );
 +        let searcher: Arc<dyn search::Searcher> = Arc::new(InProcessSearcher::new(rt.clone())?);
 +        let state = Arc::new(OnceCell::new());
-+        let lag_sample = Arc::new(Mutex::new(None));
-+        Self::spawn_lag_sampler(rt.clone(), state.clone(), lag_sample.clone());
 +        Ok(Self {
 +            rt,
 +            require_ssl: config.require_ssl,
@@ -1888,7 +1866,6 @@ index 000000000..8a967292d
 +            shared_isolate,
 +            searcher,
 +            state,
-+            lag_sample,
 +            load_error: Mutex::new(None),
 +        })
 +    }
@@ -1922,16 +1899,12 @@ index 000000000..8a967292d
 +        Ok(&self.instance)
 +    }
 +
-+    pub async fn get_or_create(
-+        &self,
-+        instance_name: &str,
-+    ) -> anyhow::Result<Arc<InstanceState<RT>>> {
-+        let config = self.instance_config(instance_name)?;
++    async fn get_or_create(&self) -> anyhow::Result<Arc<InstanceState<RT>>> {
 +        self.state
 +            .get_or_try_init(|| async {
 +                let state = InstanceState::load(
 +                    self.rt.clone(),
-+                    config,
++                    &self.instance,
 +                    self.require_ssl,
 +                    self.shared_isolate.clone(),
 +                    self.searcher.clone(),
@@ -1948,79 +1921,34 @@ index 000000000..8a967292d
 +            .cloned()
 +    }
 +
-+    pub async fn warm(&self) {
++    pub async fn warm(&self) -> Arc<InstanceState<RT>> {
 +        let mut backoff = Backoff::new(WARMUP_BACKOFF_INITIAL, WARMUP_BACKOFF_MAX);
-+        while let Err(e) = self.get_or_create(&self.instance.instance_name).await {
-+            let delay = backoff.fail(&mut self.rt.rng());
-+            tracing::error!(
-+                "[convex-funrun] instance load failed: {e:#}; retrying in {:.1}s",
-+                delay.as_secs_f32()
-+            );
-+            self.rt.wait(delay).await;
++        loop {
++            match self.get_or_create().await {
++                Ok(state) => return state,
++                Err(e) => {
++                    let delay = backoff.fail(&mut self.rt.rng());
++                    tracing::error!(
++                        "[convex-funrun] instance load failed: {e:#}; retrying in {:.1}s",
++                        delay.as_secs_f32()
++                    );
++                    self.rt.wait(delay).await;
++                },
++            }
 +        }
 +    }
 +
-+    pub fn health_report(&self, max_lag: Duration) -> HealthReport {
-+        let sample = self.lag_sample.lock().clone();
++    pub fn health_report(&self) -> HealthReport {
 +        let load_error = self.load_error.lock().clone();
-+        let instance_healthy = self.instance_ready()
-+            && match &sample {
-+                Some(sample) => match sample.lag_seconds {
-+                    Some(lag) => lag <= max_lag.as_secs_f64(),
-+                    None => sample.error.is_none(),
-+                },
-+                None => load_error.is_none(),
-+            };
 +        HealthReport {
 +            healthy: self.healthy(),
 +            instance: InstanceHealth {
 +                name: self.instance.instance_name.clone(),
-+                healthy: instance_healthy,
-+                warm_timestamp: sample.as_ref().map(|s| s.warm_timestamp.to_string()),
-+                persistence_timestamp: sample
-+                    .as_ref()
-+                    .and_then(|s| s.persistence_timestamp.map(|ts| ts.to_string())),
-+                lag_seconds: sample.as_ref().and_then(|s| s.lag_seconds),
-+                error: sample.and_then(|s| s.error),
++                ready: self.instance_ready(),
 +                last_load_error: load_error.as_ref().map(|e| e.message.clone()),
 +                last_load_error_unix_ts: load_error.map(|e| e.unix_ts),
 +            },
 +        }
-+    }
-+
-+    fn spawn_lag_sampler(
-+        rt: RT,
-+        state: Arc<OnceCell<Arc<InstanceState<RT>>>>,
-+        lag_sample: Arc<Mutex<Option<InstanceLagSample>>>,
-+    ) {
-+        let worker_rt = rt.clone();
-+        rt.spawn_background("funrun_lag_sampler", async move {
-+            loop {
-+                if let Some(state) = state.get() {
-+                    let sample = sample_instance_lag(state).await;
-+                    *lag_sample.lock() = Some(sample);
-+                }
-+                worker_rt.wait(Duration::from_secs(2)).await;
-+            }
-+        });
-+    }
-+}
-+
-+async fn sample_instance_lag<RT: Runtime>(state: &InstanceState<RT>) -> InstanceLagSample {
-+    let warm = state.database.now_ts_for_reads();
-+    match new_static_repeatable_recent(state.reader.as_ref()).await {
-+        Ok(latest) => InstanceLagSample {
-+            warm_timestamp: *warm,
-+            persistence_timestamp: Some(*latest),
-+            lag_seconds: Some(latest.secs_since_f64(*warm).max(0.0)),
-+            error: None,
-+        },
-+        Err(e) => InstanceLagSample {
-+            warm_timestamp: *warm,
-+            persistence_timestamp: None,
-+            lag_seconds: None,
-+            error: Some(format!("{e:#}")),
-+        },
 +    }
 +}
 +
@@ -2061,7 +1989,7 @@ index 000000000..8a967292d
 +            rt.clone(),
 +            searcher.clone(),
 +            virtual_system_mapping().clone(),
-+            IndexCache::new(*common::knobs::FUNRUN_FOLLOWER_INDEX_CACHE_SIZE),
++            IndexCache::new(*FUNRUN_FOLLOWER_INDEX_CACHE_SIZE),
 +        )
 +        .await?;
 +        let retention_validator = database.retention_validator();
@@ -2151,10 +2079,7 @@ index 000000000..8a967292d
 +
 +    async fn await_tailer(&self, ts: RepeatableTimestamp) -> anyhow::Result<()> {
 +        let wait = self.tailer.wait_for(ts).fuse();
-+        let deadline = self
-+            .rt
-+            .wait(*common::knobs::FUNRUN_SNAPSHOT_WAIT_TIMEOUT)
-+            .fuse();
++        let deadline = self.rt.wait(*FUNRUN_SNAPSHOT_WAIT_TIMEOUT).fuse();
 +        futures::pin_mut!(wait, deadline);
 +        futures::select_biased! {
 +            result = wait => result.map_err(|error| error.context(
@@ -2218,11 +2143,7 @@ index 000000000..8a967292d
 +#[derive(serde::Serialize)]
 +pub struct InstanceHealth {
 +    pub name: String,
-+    pub healthy: bool,
-+    pub warm_timestamp: Option<String>,
-+    pub persistence_timestamp: Option<String>,
-+    pub lag_seconds: Option<f64>,
-+    pub error: Option<String>,
++    pub ready: bool,
 +    pub last_load_error: Option<String>,
 +    pub last_load_error_unix_ts: Option<u64>,
 +}
