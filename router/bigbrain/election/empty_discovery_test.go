@@ -16,7 +16,7 @@ import (
 
 func emptyDiscoveryController(t *testing.T, debounce int) (*Controller, *registry.Registry, *deploymentState) {
 	t.Helper()
-	k8s := k8sclient.NewFromInterface(fake.NewClientset(), "convex")
+	k8s := k8sclient.NewFromInterface(fake.NewClientset())
 	reg := registry.New()
 	reg.EnsureDeployment("dev", "convex-dev")
 	c := New(withConfig(func(c *Config) { c.EmptyDiscoveryDebounce = debounce }), k8s, nil, reg, quietLogger())
@@ -85,7 +85,7 @@ func TestReconcile_DiscoveryErrorsNeverTriggerEmptyDebounce(t *testing.T) {
 	cs.PrependReactor("list", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
 		return true, nil, errors.New("apiserver down")
 	})
-	k8s := k8sclient.NewFromInterface(cs, "convex")
+	k8s := k8sclient.NewFromInterface(cs)
 	reg := registry.New()
 	reg.EnsureDeployment("dev", "convex-dev")
 	c := New(withConfig(func(c *Config) { c.EmptyDiscoveryDebounce = debounce }), k8s, nil, reg, quietLogger())

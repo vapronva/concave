@@ -12,6 +12,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 )
@@ -59,7 +60,7 @@ func gaugesServerPort(t *testing.T) int {
 func cachedPods(prov *FunrunProvider, names ...types.NamespacedName) map[types.NamespacedName]bool {
 	out := make(map[types.NamespacedName]bool, len(names))
 	for _, name := range names {
-		_, err := prov.GetMetricByName(context.Background(), name, metricInfo(), nil)
+		_, err := prov.GetMetricByName(context.Background(), name, metricInfo(), labels.Everything())
 		out[name] = err == nil
 	}
 	return out
@@ -70,14 +71,14 @@ func TestScrapeAll_MergesAcrossNamespaces(t *testing.T) {
 	port := gaugesServerPort(t)
 	cs := fake.NewClientset(funrunPod("ns1", "funrun-a", port), funrunPod("ns2", "funrun-b", port))
 	prov := NewProvider()
-	s := NewScraper(cs, "convex", []string{"ns1", "ns2"}, prov, time.Hour, slog.New(slog.DiscardHandler))
+	s := NewScraper(cs, []string{"ns1", "ns2"}, prov, time.Hour, slog.New(slog.DiscardHandler))
 	s.scrapeAll(context.Background())
 	a := types.NamespacedName{Namespace: "ns1", Name: "funrun-a"}
 	b := types.NamespacedName{Namespace: "ns2", Name: "funrun-b"}
 	if got := cachedPods(prov, a, b); !got[a] || !got[b] {
 		t.Fatalf("both namespaces must be merged into the cache, got %v", got)
 	}
-	v, err := prov.GetMetricByName(context.Background(), a, metricInfo(), nil)
+	v, err := prov.GetMetricByName(context.Background(), a, metricInfo(), labels.Everything())
 	if err != nil {
 		t.Fatalf("GetMetricByName: %v", err)
 	}
@@ -91,7 +92,7 @@ func TestScrapeAll_ZeroTotalThreadsDropsPodFromCache(t *testing.T) {
 	port := metricsServerPort(t, "convex_funrun_isolate_busy_threads 0\nconvex_funrun_isolate_total_threads 0\n")
 	cs := fake.NewClientset(funrunPod("ns1", "funrun-cold", port))
 	prov := NewProvider()
-	s := NewScraper(cs, "convex", []string{"ns1"}, prov, time.Hour, slog.New(slog.DiscardHandler))
+	s := NewScraper(cs, []string{"ns1"}, prov, time.Hour, slog.New(slog.DiscardHandler))
 	s.scrapeAll(context.Background())
 	cold := types.NamespacedName{Namespace: "ns1", Name: "funrun-cold"}
 	if got := cachedPods(prov, cold); got[cold] {

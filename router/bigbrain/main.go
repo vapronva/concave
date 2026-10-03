@@ -48,12 +48,11 @@ func run() int {
 	log := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(log)
 	addr := env("BIGBRAIN_ADDR", defaultAddr)
-	labelPrefix := env("BIGBRAIN_LABEL_PREFIX", k8sclient.DefaultLabelPrefix)
 	reg, controlPlaneTokens, usageTokens, err := buildRegistry(env("BIGBRAIN_DEPLOYMENTS", ""), log)
 	if err != nil {
 		return 1
 	}
-	k8s, err := k8sclient.New(labelPrefix)
+	k8s, err := k8sclient.New()
 	if err != nil {
 		log.Error("bigbrain: kubernetes client unavailable", "err", err)
 		return 1
@@ -81,7 +80,7 @@ func run() int {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	metricsDone, apiserverErr := startMetricsAPIServer(ctx, stop, k8s, reg, labelPrefix, log)
+	metricsDone, apiserverErr := startMetricsAPIServer(ctx, stop, k8s, reg, log)
 	ctrlDone := runController(ctx, ctrl)
 	serveErr := make(chan error, 1)
 	go func() {
@@ -189,7 +188,6 @@ func startMetricsAPIServer(
 	stop context.CancelFunc,
 	k8s *k8sclient.Client,
 	reg *registry.Registry,
-	labelPrefix string,
 	log *slog.Logger,
 ) (<-chan struct{}, <-chan error) {
 	if !envBool("BIGBRAIN_METRICS_APISERVER_ENABLED", false) {
@@ -219,7 +217,7 @@ func startMetricsAPIServer(
 	}
 	var wg sync.WaitGroup
 	wg.Go(func() {
-		apiserver.NewScraper(k8s.Clientset(), labelPrefix, namespaces, prov, metricsScrapeInterval, log).Run(ctx)
+		apiserver.NewScraper(k8s.Clientset(), namespaces, prov, metricsScrapeInterval, log).Run(ctx)
 	})
 	apiserverErr := make(chan error, 1)
 	wg.Go(func() {

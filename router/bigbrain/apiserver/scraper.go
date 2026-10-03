@@ -39,31 +39,28 @@ const (
 )
 
 type Scraper struct {
-	cs             kubernetes.Interface
-	componentLabel string
-	namespaces     []string
-	prov           *FunrunProvider
-	interval       time.Duration
-	httpc          *http.Client
-	log            *slog.Logger
+	cs         kubernetes.Interface
+	namespaces []string
+	prov       *FunrunProvider
+	interval   time.Duration
+	httpc      *http.Client
+	log        *slog.Logger
 }
 
 func NewScraper(
 	cs kubernetes.Interface,
-	labelPrefix string,
 	namespaces []string,
 	prov *FunrunProvider,
 	interval time.Duration,
 	log *slog.Logger,
 ) *Scraper {
 	return &Scraper{
-		cs:             cs,
-		componentLabel: labelPrefix + "/component",
-		namespaces:     namespaces,
-		prov:           prov,
-		interval:       interval,
-		httpc:          &http.Client{Timeout: scrapeTimeout},
-		log:            log,
+		cs:         cs,
+		namespaces: namespaces,
+		prov:       prov,
+		interval:   interval,
+		httpc:      &http.Client{Timeout: scrapeTimeout},
+		log:        log,
 	}
 }
 
@@ -98,7 +95,7 @@ func (s *Scraper) scrapeAll(ctx context.Context) {
 }
 
 func (s *Scraper) scrapeNamespace(ctx context.Context, ns string) map[types.NamespacedName]podSample {
-	sel := fmt.Sprintf("%s=funrun", s.componentLabel)
+	sel := fmt.Sprintf("%s=funrun", k8sclient.LabelComponent)
 	lctx, cancel := context.WithTimeout(ctx, listTimeout)
 	pods, err := s.cs.CoreV1().Pods(ns).List(lctx, metav1.ListOptions{LabelSelector: sel, ResourceVersion: "0"})
 	cancel()

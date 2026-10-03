@@ -49,7 +49,10 @@ func claimedLeaders(obs []observation, grace time.Duration) []observation {
 }
 
 func isTransitioning(o observation) bool {
-	if !o.reach || o.status.IsLeader {
+	if !o.reach {
+		return o.wasTransitioning
+	}
+	if o.status.IsLeader {
 		return false
 	}
 	return o.status.LeaseTS != nil || o.status.Role == "promoting"

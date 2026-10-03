@@ -13,7 +13,12 @@ import (
 	"k8s.io/client-go/rest"
 )
 
-const DefaultLabelPrefix = "convex"
+const (
+	labelPrefix     = "convex"
+	labelDeployment = labelPrefix + "/instance"
+	labelRole       = labelPrefix + "/role"
+	LabelComponent  = labelPrefix + "/component"
+)
 
 const (
 	priorityLeaderDefault   = 100
@@ -26,41 +31,28 @@ type Backend struct {
 	Pod      string
 	URL      string
 	Priority int
-}
-
-type labelKeys struct {
-	deployment string
-	role       string
-	component  string
-}
-
-func newLabelKeys(prefix string) labelKeys {
-	return labelKeys{
-		deployment: prefix + "/instance",
-		role:       prefix + "/role",
-		component:  prefix + "/component",
-	}
+	Restarts int32
 }
 
 type Client struct {
-	cs     kubernetes.Interface
-	labels labelKeys
+	cs kubernetes.Interface
 }
 
-func New(labelPrefix string) (*Client, error) {
+func New() (*Client, error) {
 	cfg, err := rest.InClusterConfig()
 	if err != nil {
 		return nil, fmt.Errorf("in-cluster config: %w", err)
 	}
+	cfg.QPS = -1
 	cs, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("build clientset: %w", err)
 	}
-	return NewFromInterface(cs, labelPrefix), nil
+	return NewFromInterface(cs), nil
 }
 
-func NewFromInterface(cs kubernetes.Interface, labelPrefix string) *Client {
-	return &Client{cs: cs, labels: newLabelKeys(labelPrefix)}
+func NewFromInterface(cs kubernetes.Interface) *Client {
+	return &Client{cs: cs}
 }
 
 func (c *Client) Clientset() kubernetes.Interface {
@@ -68,7 +60,7 @@ func (c *Client) Clientset() kubernetes.Interface {
 }
 
 func (c *Client) DiscoverBackends(ctx context.Context, ns, name string) ([]Backend, error) {
-	sel := fmt.Sprintf("%s=%s,%s,%s=backend", c.labels.deployment, name, c.labels.role, c.labels.component)
+	sel := fmt.Sprintf("%s=%s,%s,%s=backend", labelDeployment, name, labelRole, LabelComponent)
 	list, err := c.cs.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{LabelSelector: sel})
 	if err != nil {
 		return nil, fmt.Errorf("list pods (%s in %s): %w", sel, ns, err)
@@ -82,15 +74,24 @@ func (c *Client) DiscoverBackends(ctx context.Context, ns, name string) ([]Backe
 		if p.Status.Phase == corev1.PodFailed || p.Status.Phase == corev1.PodSucceeded {
 			continue
 		}
-		role := p.Labels[c.labels.role]
+		role := p.Labels[labelRole]
 		out = append(out, Backend{
 			Pod:      p.Name,
 			URL:      fmt.Sprintf("http://%s", net.JoinHostPort(p.Status.PodIP, strconv.Itoa(BackendPort))),
 			Priority: priorityFor(role),
+			Restarts: containerRestarts(p),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Pod < out[j].Pod })
 	return out, nil
+}
+
+func containerRestarts(p *corev1.Pod) int32 {
+	var n int32
+	for _, cs := range p.Status.ContainerStatuses {
+		n += cs.RestartCount
+	}
+	return n
 }
 
 func priorityFor(role string) int {

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
@@ -76,15 +77,8 @@ func (s *Server) bearerOK(r *http.Request, deployment string) bool {
 }
 
 func (s *Server) handleUsageIngest(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, usageBodyLimit)
-	var body struct {
-		Deployment string              `json:"deployment"`
-		ReadLimits insights.ReadLimits `json:"read_limits"`
-		Events     []insights.AnyEvent `json:"events"`
-	}
-	dec := json.NewDecoder(r.Body)
-	dec.UseNumber()
-	if err := dec.Decode(&body); err != nil {
+	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, usageBodyLimit))
+	if err != nil {
 		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 			writeErr(w, http.StatusRequestEntityTooLarge, "usage body too large")
 			return
@@ -92,7 +86,18 @@ func (s *Server) handleUsageIngest(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid usage body")
 		return
 	}
-	if err := dec.Decode(new(json.RawMessage)); !errors.Is(err, io.EOF) {
+	var body struct {
+		Deployment string              `json:"deployment"`
+		ReadLimits insights.ReadLimits `json:"read_limits"`
+		Events     []insights.AnyEvent `json:"events"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if err = dec.Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid usage body")
+		return
+	}
+	if err = dec.Decode(new(json.RawMessage)); !errors.Is(err, io.EOF) {
 		writeErr(w, http.StatusBadRequest, "trailing data after usage body")
 		return
 	}

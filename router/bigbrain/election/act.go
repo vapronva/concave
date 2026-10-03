@@ -44,7 +44,7 @@ func (c *Controller) actFailback(
 		c.log.InfoContext(base, "election: failback: promoting higher-priority pod over incumbent",
 			"deployment", name, "promoting", target.be.Pod, "over", incumbent,
 			"candidatePriority", target.be.Priority, "candidateLatestTs", target.status.LatestTS)
-		c.promoteAndLog(base, name, "failback promote", target)
+		c.promoteAndLog(base, name, "failback promote", st, target)
 	})
 }
 
@@ -104,11 +104,11 @@ func (c *Controller) actLeaderless(
 		c.log.InfoContext(base, "election: promoting preferred warm standby",
 			"deployment", name, "pod", target.be.Pod,
 			"priority", target.be.Priority, "latestTs", target.status.LatestTS)
-		c.promoteAndLog(base, name, "promote", target)
+		c.promoteAndLog(base, name, "promote", st, target)
 	})
 }
 
-func (c *Controller) promoteAndLog(base context.Context, name, kind string, target observation) {
+func (c *Controller) promoteAndLog(base context.Context, name, kind string, st *deploymentState, target observation) {
 	actx, cancel := context.WithTimeout(base, c.cfg.ActuationTimeout)
 	defer cancel()
 	code, err := c.backend.Promote(actx, name, target.be.URL)
@@ -118,6 +118,7 @@ func (c *Controller) promoteAndLog(base context.Context, name, kind string, targ
 	}
 	switch code {
 	case http.StatusOK, http.StatusAccepted:
+		c.markTransitioning(st, target.be)
 		c.log.InfoContext(base, "election: "+kind+" accepted",
 			"deployment", name, "pod", target.be.Pod, "status", code)
 	case http.StatusForbidden:

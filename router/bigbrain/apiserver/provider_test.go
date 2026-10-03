@@ -28,14 +28,20 @@ func TestProviderReplaceWithEmptyClearsCache(t *testing.T) {
 	p.replace(map[types.NamespacedName]podSample{
 		pod: {labels: labels.Set{}, value: milliPercent(42), ts: time.Now()},
 	})
-	if _, err := p.GetMetricByName(context.Background(), pod, metricInfo(), nil); err != nil {
+	if _, err := p.GetMetricByName(context.Background(), pod, metricInfo(), labels.Everything()); err != nil {
 		t.Fatalf("fresh sample must be served: %v", err)
 	}
 	p.replace(map[types.NamespacedName]podSample{})
-	if _, err := p.GetMetricByName(context.Background(), pod, metricInfo(), nil); err == nil {
+	if _, err := p.GetMetricByName(context.Background(), pod, metricInfo(), labels.Everything()); err == nil {
 		t.Fatal("a fully failed scrape cycle must clear the cache, not freeze it")
 	}
-	list, err := p.GetMetricBySelector(context.Background(), "ns", labels.Everything(), metricInfo(), nil)
+	list, err := p.GetMetricBySelector(
+		context.Background(),
+		"ns",
+		labels.Everything(),
+		metricInfo(),
+		labels.Everything(),
+	)
 	if err != nil {
 		t.Fatalf("selector query: %v", err)
 	}
@@ -56,10 +62,16 @@ func TestProviderRejectsNonPodResource(t *testing.T) {
 		Namespaced:    true,
 		Metric:        MetricName,
 	}
-	if _, err := p.GetMetricByName(context.Background(), pod, info, nil); err == nil {
+	if _, err := p.GetMetricByName(context.Background(), pod, info, labels.Everything()); err == nil {
 		t.Fatal("GetMetricByName must reject non-pod resources")
 	}
-	if _, err := p.GetMetricBySelector(context.Background(), "ns", labels.Everything(), info, nil); err == nil {
+	if _, err := p.GetMetricBySelector(
+		context.Background(),
+		"ns",
+		labels.Everything(),
+		info,
+		labels.Everything(),
+	); err == nil {
 		t.Fatal("GetMetricBySelector must reject non-pod resources")
 	}
 }

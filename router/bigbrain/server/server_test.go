@@ -194,6 +194,23 @@ func TestServer_UsageEndpointsRequireTheDeploymentToken(t *testing.T) {
 	}
 }
 
+func TestServer_UsageIngestOversizedTrailingBytesIs413(t *testing.T) {
+	t.Parallel()
+	reg, h := newTestServer(t)
+	reg.EnsureDeployment("dev", "convex-dev")
+	const limit = 4 * 1024 * 1024
+	head := `{"deployment":"dev","read_limits":{"documents":1,"bytes":1,"warning_ratio":1},"events":[],"pad":"`
+	tail := `"}`
+	body := head + strings.Repeat("x", limit-len(head)-len(tail)) + tail + "\n"
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/internal/usage", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer usage-secret")
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("a value that fits with trailing bytes past the cap: want 413, got %d (%s)", rr.Code, rr.Body.String())
+	}
+}
+
 func TestServer_UsageIngestThenQuery(t *testing.T) {
 	t.Parallel()
 	reg, h := newTestServer(t)

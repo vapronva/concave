@@ -32,9 +32,9 @@ func pod(prefix, name, role, component, ip string, ready bool) *corev1.Pod {
 	}
 }
 
-func TestDiscoverBackends_CustomPrefix(t *testing.T) {
+func TestDiscoverBackends_FiltersByLabels(t *testing.T) {
 	t.Parallel()
-	const prefix = "example.com"
+	const prefix = "convex"
 	cs := fake.NewClientset(
 		pod(prefix, "backend-0", "leader", "backend", "10.0.0.1", true),
 		pod(prefix, "backend-1", "follower", "backend", "10.0.0.2", false),
@@ -42,9 +42,9 @@ func TestDiscoverBackends_CustomPrefix(t *testing.T) {
 		pod(prefix, "funrun-0", "follower", "funrun", "10.0.0.4", true),
 		pod(prefix, "unlabeled-0", "follower", "", "10.0.0.6", true),
 		pod(prefix, "pending-0", "follower", "backend", "", true),
-		pod("convex", "other-0", "leader", "backend", "10.0.0.5", true),
+		pod("example.com", "other-0", "leader", "backend", "10.0.0.5", true),
 	)
-	c := k8sclient.NewFromInterface(cs, prefix)
+	c := k8sclient.NewFromInterface(cs)
 	out, err := c.DiscoverBackends(context.Background(), "acme", "acme")
 	if err != nil {
 		t.Fatalf("DiscoverBackends: %v", err)
@@ -70,17 +70,18 @@ func TestDiscoverBackends_SkipsTerminalPods(t *testing.T) {
 	t.Parallel()
 	const prefix = "convex"
 	running := pod(prefix, "backend-0", "leader", "backend", "10.0.0.1", true)
+	running.Status.ContainerStatuses = []corev1.ContainerStatus{{RestartCount: 2}}
 	failed := pod(prefix, "backend-1", "follower", "backend", "10.0.0.2", false)
 	failed.Status.Phase = corev1.PodFailed
 	succeeded := pod(prefix, "backend-2", "follower", "backend", "10.0.0.3", false)
 	succeeded.Status.Phase = corev1.PodSucceeded
 	cs := fake.NewClientset(running, failed, succeeded)
-	c := k8sclient.NewFromInterface(cs, prefix)
+	c := k8sclient.NewFromInterface(cs)
 	out, err := c.DiscoverBackends(context.Background(), "acme", "acme")
 	if err != nil {
 		t.Fatalf("DiscoverBackends: %v", err)
 	}
-	if len(out) != 1 || out[0].Pod != "backend-0" {
-		t.Fatalf("terminal pods with a retained PodIP must be skipped, got %+v", out)
+	if len(out) != 1 || out[0].Pod != "backend-0" || out[0].Restarts != 2 {
+		t.Fatalf("terminal pods with a retained PodIP must be skipped and restarts counted, got %+v", out)
 	}
 }

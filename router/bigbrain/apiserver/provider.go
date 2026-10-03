@@ -39,10 +39,18 @@ func (p *FunrunProvider) GetMetricByName(
 	_ context.Context,
 	name types.NamespacedName,
 	info provider.CustomMetricInfo,
-	_ labels.Selector,
+	metricSelector labels.Selector,
 ) (*custom_metrics.MetricValue, error) {
 	if info.Metric != MetricName || info.GroupResource.Resource != podsResource {
 		return nil, provider.NewMetricNotFoundError(info.GroupResource, info.Metric)
+	}
+	if !matchesUnlabeledMetric(metricSelector) {
+		return nil, provider.NewMetricNotFoundForSelectorError(
+			info.GroupResource,
+			info.Metric,
+			name.Name,
+			metricSelector,
+		)
 	}
 	p.mu.RLock()
 	s, ok := p.cache[name]
@@ -59,10 +67,13 @@ func (p *FunrunProvider) GetMetricBySelector(
 	namespace string,
 	selector labels.Selector,
 	info provider.CustomMetricInfo,
-	_ labels.Selector,
+	metricSelector labels.Selector,
 ) (*custom_metrics.MetricValueList, error) {
 	if info.Metric != MetricName || info.GroupResource.Resource != podsResource {
 		return nil, provider.NewMetricNotFoundError(info.GroupResource, info.Metric)
+	}
+	if !matchesUnlabeledMetric(metricSelector) {
+		return &custom_metrics.MetricValueList{}, nil
 	}
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -85,6 +96,10 @@ func (p *FunrunProvider) ListAllMetrics() []provider.CustomMetricInfo {
 		Namespaced:    true,
 		Metric:        MetricName,
 	}}
+}
+
+func matchesUnlabeledMetric(metricSelector labels.Selector) bool {
+	return metricSelector.Matches(labels.Set{})
 }
 
 func (p *FunrunProvider) replace(fresh map[types.NamespacedName]podSample) {

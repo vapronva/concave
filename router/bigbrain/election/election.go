@@ -70,6 +70,12 @@ type deploymentState struct {
 	demoting                  bool
 	discoveryDown             bool
 	failback                  failbackState
+	transitioningSeen         map[string]transitionMemory
+}
+
+type transitionMemory struct {
+	seen     time.Time
+	restarts int32
 }
 
 func New(cfg Config, k8s *k8sclient.Client, b *backend.Client, reg *registry.Registry, log *slog.Logger) *Controller {
@@ -142,9 +148,10 @@ func (c *Controller) deploymentState(name string) *deploymentState {
 }
 
 type observation struct {
-	be     k8sclient.Backend
-	status backend.Leadership
-	reach  bool
+	be               k8sclient.Backend
+	status           backend.Leadership
+	reach            bool
+	wasTransitioning bool
 }
 
 func (c *Controller) reconcile(ctx context.Context, name string) {
@@ -167,6 +174,7 @@ func (c *Controller) reconcile(ctx context.Context, name string) {
 	}
 	obs := c.pollAll(ctx, name, pods)
 	now := time.Now()
+	c.rememberTransitions(st, obs, now)
 	dec := decide(obs, decideParams{
 		incumbent:            st.incumbentPod,
 		leaseUnverifiedGrace: c.cfg.LeaseUnverifiedGrace,
@@ -197,6 +205,41 @@ func (c *Controller) setDiscoveryDown(st *deploymentState, down bool) bool {
 	}
 	st.discoveryDown = down
 	return true
+}
+
+func (c *Controller) rememberTransitions(st *deploymentState, obs []observation, now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for pod, m := range st.transitioningSeen {
+		if now.Sub(m.seen) >= c.cfg.UnreachableLeaderGrace {
+			delete(st.transitioningSeen, pod)
+		}
+	}
+	for i := range obs {
+		o := &obs[i]
+		switch {
+		case !o.reach:
+			m, ok := st.transitioningSeen[o.be.Pod]
+			o.wasTransitioning = ok && m.restarts == o.be.Restarts
+		case isTransitioning(*o):
+			st.rememberTransition(o.be, now)
+		default:
+			delete(st.transitioningSeen, o.be.Pod)
+		}
+	}
+}
+
+func (st *deploymentState) rememberTransition(be k8sclient.Backend, now time.Time) {
+	if st.transitioningSeen == nil {
+		st.transitioningSeen = make(map[string]transitionMemory)
+	}
+	st.transitioningSeen[be.Pod] = transitionMemory{seen: now, restarts: be.Restarts}
+}
+
+func (c *Controller) markTransitioning(st *deploymentState, be k8sclient.Backend) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	st.rememberTransition(be, time.Now())
 }
 
 func (c *Controller) commitState(st *deploymentState, dec decision, emptyList bool, now time.Time) (int, int, bool) {
