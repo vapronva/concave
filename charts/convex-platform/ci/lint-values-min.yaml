@@ -3,6 +3,7 @@ deployments:
   - name: convex-ci
     namespace: convex-ci
     host: api.convex.example.com
+    siteHost: convex.example.com
 
 usher:
   image:

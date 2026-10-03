@@ -1,5 +1,4 @@
 ---
-labelPrefix: convex
 
 nameOverride: ""
 fullnameOverride: ""
@@ -33,8 +32,6 @@ usher:
   affinity: {}
   topologySpreadConstraints: []
   resources: {}
-  pdb:
-    enabled: true
 
 bigbrain:
   enabled: true

@@ -1,4 +1,7 @@
 {{- if gt (int .Values.ha.standbyReplicas) 0 }}
+{{- if not .Values.controlPlane.tokenSecretRef.name }}
+{{- fail "ha.standbyReplicas > 0 requires controlPlane.tokenSecretRef.name: a follower refuses to boot without CONVEX_CONTROL_PLANE_TOKEN" }}
+{{- end }}
 ---
 apiVersion: apps/v1
 kind: Deployment

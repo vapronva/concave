@@ -1,5 +1,4 @@
 ---
-labelPrefix: convex
 
 nameOverride: ""
 fullnameOverride: ""
@@ -44,8 +43,6 @@ ha:
   standbyReplicas: 1
   requireNodeSpread: true
   spreadTopologyKey: kubernetes.io/hostname
-  pdb:
-    enabled: true
   leader:
     nodeSelector: {}
     tolerations: []
@@ -112,7 +109,6 @@ funrun:
     queueCongestedTimeoutMs: ""
   cache:
     indexBytes: ""
-    followerIndexBytes: ""
     codeBytes: ""
     moduleBytes: ""
   podDeletionCost:

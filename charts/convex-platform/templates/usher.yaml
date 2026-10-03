@@ -12,7 +12,7 @@
 {{- end -}}
 {{- $usherDeployments := list -}}
 {{- range $deployments -}}
-{{- $usherDeployments = append $usherDeployments (dict "name" .name "host" .host "siteHost" .siteHost) -}}
+{{- $usherDeployments = append $usherDeployments (dict "name" .name "host" .host "siteHost" (required "deployments[].siteHost is required: usher serves HTTP actions only on the site host" .siteHost)) -}}
 {{- end -}}
 {{- $usherConfig := dict "deployments" $usherDeployments -}}
 ---
@@ -142,7 +142,7 @@ spec:
   ports:
     - { name: http, port: 8080, targetPort: http }
 
-{{- if and $u.pdb.enabled (gt (int $u.replicas) 1) }}
+{{- if gt (int $u.replicas) 1 }}
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget

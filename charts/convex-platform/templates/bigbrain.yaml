@@ -99,8 +99,6 @@ spec:
           env:
             - name: BIGBRAIN_ADDR
               value: {{ $b.listen | quote }}
-            - name: BIGBRAIN_LABEL_PREFIX
-              value: {{ include "convex.labelPrefix" . | quote }}
             - name: BIGBRAIN_DEPLOYMENTS
               value: {{ include "convex.bigbrainDeployments" . | quote }}
             - name: BIGBRAIN_FAILBACK_ENABLED

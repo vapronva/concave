@@ -18,6 +18,7 @@ hosts:
   site: convex.example.com
 
 ha:
+  standbyReplicas: 0
   requireNodeSpread: false
 
 funrun:

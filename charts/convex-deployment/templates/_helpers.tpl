@@ -11,7 +11,7 @@
 {{- end -}}
 
 {{- define "convex.labelPrefix" -}}
-{{- .Values.labelPrefix | default "convex" -}}
+convex
 {{- end -}}
 
 {{- define "convex.selectorLabels" -}}
@@ -44,7 +44,7 @@ app.kubernetes.io/component: {{ .component }}
 {{- define "convex.ckicName" -}}{{ include "convex.fullname" . }}-ckic{{- end -}}
 
 {{- define "convex.ckicCors" -}}
-{{- $regexp := required "ingress.ckic.cors.<host>.originRegexp is required when cors is set for a host" .originRegexp -}}
+{{- $regexp := printf "^(?:%s)$" (required "ingress.ckic.cors.<host>.originRegexp is required when cors is set for a host" .originRegexp) -}}
 @cors_origin header_regexp Origin {{ $regexp }}
 @cors_preflight {
   method OPTIONS
@@ -267,10 +267,6 @@ seccompProfile:
   env:
     - name: CONVEX_BACKEND_ROLE
       value: {{ .role }}
-    {{- if eq .role "leader" }}
-    - name: CONVEX_BOOT_FOLLOWER_WHEN_INITIALIZED
-      value: "true"
-    {{- end }}
     {{- include "convex.commonBackendEnv" $ctx | nindent 4 }}
     {{- if $ctx.Values.funrun.enabled }}
     - name: CONVEX_FUNRUN_ADDR
@@ -418,10 +414,6 @@ seccompProfile:
 {{- end }}
 {{- with .Values.funrun.cache.indexBytes }}
 - name: FUNRUN_INDEX_CACHE_SIZE
-  value: {{ int64 . | quote }}
-{{- end }}
-{{- with .Values.funrun.cache.followerIndexBytes }}
-- name: FUNRUN_FOLLOWER_INDEX_CACHE_SIZE
   value: {{ int64 . | quote }}
 {{- end }}
 {{- with .Values.funrun.cache.codeBytes }}

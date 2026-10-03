@@ -1,4 +1,3 @@
-{{- if .Values.ha.pdb.enabled }}
 {{- if ge (int .Values.ha.standbyReplicas) 2 }}
 ---
 apiVersion: policy/v1
@@ -30,5 +29,4 @@ spec:
   selector:
     matchLabels:
       {{- include "convex.componentSelectorLabels" (dict "ctx" . "component" "funrun") | nindent 6 }}
-{{- end }}
 {{- end }}

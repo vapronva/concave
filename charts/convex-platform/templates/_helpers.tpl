@@ -11,7 +11,7 @@
 {{- end -}}
 
 {{- define "convex.labelPrefix" -}}
-{{- .Values.labelPrefix | default "convex" -}}
+convex
 {{- end -}}
 
 {{- define "convex.selectorLabels" -}}
