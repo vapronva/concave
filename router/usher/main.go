@@ -282,7 +282,6 @@ func (t *tracker) currentLeader(site bool) *httputil.ReverseProxy {
 }
 
 func (t *tracker) resolveOnce(ctx context.Context) {
-	defer t.resolved.Store(true)
 	lr, err := t.queryBigbrain(ctx)
 	if err != nil {
 		if !errors.Is(ctx.Err(), context.Canceled) && t.pollGate.fail() {
@@ -294,6 +293,7 @@ func (t *tracker) resolveOnce(ctx context.Context) {
 		log.Printf("usher: %s leader poll recovered", t.host)
 	}
 	t.applyLeader(lr, true)
+	t.resolved.Store(true)
 }
 
 func (t *tracker) queryBigbrain(ctx context.Context) (leaderResponse, error) {

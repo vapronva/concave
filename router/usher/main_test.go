@@ -515,6 +515,42 @@ func siteUpstream(t *testing.T, tr *tracker) (string, string) {
 	return out.URL.Host, out.URL.Path
 }
 
+func TestResolveOnce_ReadyOnlyAfterAnAuthoritativeAnswer(t *testing.T) {
+	t.Parallel()
+	answer := func(status int, body string) *tracker {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte(body))
+		}))
+		t.Cleanup(srv.Close)
+		tr := &tracker{name: "test", bigbrainURL: srv.URL, client: &http.Client{}, proxyTransport: newProxyTransport()}
+		tr.resolveOnce(context.Background())
+		return tr
+	}
+	refused := &tracker{
+		name:           "test",
+		bigbrainURL:    "http://127.0.0.1:1",
+		client:         &http.Client{},
+		proxyTransport: newProxyTransport(),
+	}
+	refused.resolveOnce(context.Background())
+	if refused.resolved.Load() {
+		t.Fatal("a refused poll must not latch readiness")
+	}
+	if answer(http.StatusTooEarly, `{"error":"not yet published"}`).resolved.Load() {
+		t.Fatal("a 425 must not latch readiness")
+	}
+	if answer(http.StatusServiceUnavailable, `{"error":"boom"}`).resolved.Load() {
+		t.Fatal("a 503 without an epoch must not latch readiness")
+	}
+	if !answer(http.StatusServiceUnavailable, `{"name":"test","seq":3,"epoch":42}`).resolved.Load() {
+		t.Fatal("an authoritative leaderless answer must latch readiness")
+	}
+	if !answer(http.StatusOK, `{"name":"test","leaderUrl":"http://10.0.0.5:3210","seq":1,"epoch":1}`).resolved.Load() {
+		t.Fatal("a leader answer must latch readiness")
+	}
+}
+
 func TestResolveOnce_ClearsLeaderOnAuthoritativeNoLeader(t *testing.T) {
 	t.Parallel()
 	t.Run("status_503_clears", func(t *testing.T) {
