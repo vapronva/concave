@@ -35,10 +35,12 @@ index 4bd999d26..65d0ce6ee 100644
  /// Timestamp that is repeatable because the caller is holding the lease and
 diff --git a/crates/postgres/src/ha.rs b/crates/postgres/src/ha.rs
 new file mode 100644
-index 000000000..c4fb2e794
+index 000000000..d42fdd901
 --- /dev/null
 +++ b/crates/postgres/src/ha.rs
-@@ -0,0 +1,66 @@
+@@ -0,0 +1,82 @@
++use common::errors::database_operational_error;
++
 +use super::*;
 +
 +impl PostgresPersistence {
@@ -84,6 +86,20 @@ index 000000000..c4fb2e794
 +    }
 +
 +    pub(super) async fn lease_held(&self) -> anyhow::Result<bool> {
++        self.probe_lease_row().await.map_err(|e| {
++            let unreachable = e.downcast_ref::<tokio_postgres::Error>().is_some_and(|pg| {
++                pg.code()
++                    .is_none_or(|c| matches!(c.code().get(..2), Some("53" | "57")))
++            });
++            if unreachable {
++                database_operational_error(e)
++            } else {
++                e
++            }
++        })
++    }
++
++    async fn probe_lease_row(&self) -> anyhow::Result<bool> {
 +        let lease_ts = self.lease_ts;
 +        let mut client = self
 +            .pool

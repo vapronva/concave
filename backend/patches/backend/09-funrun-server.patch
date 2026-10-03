@@ -57,10 +57,10 @@ index 000000000..c0f0f8f7a
 +workspace = true
 diff --git a/crates/funrun_server/src/callbacks.rs b/crates/funrun_server/src/callbacks.rs
 new file mode 100644
-index 000000000..38aa09d74
+index 000000000..193f468af
 --- /dev/null
 +++ b/crates/funrun_server/src/callbacks.rs
-@@ -0,0 +1,602 @@
+@@ -0,0 +1,606 @@
 +use anyhow::Context;
 +use async_trait::async_trait;
 +use common::{
@@ -71,7 +71,10 @@ index 000000000..38aa09d74
 +        ComponentPath,
 +        SerializedComponentFunctionPath,
 +    },
-+    execution_context::ExecutionContext,
++    execution_context::{
++        ExecutionContext,
++        RequestId,
++    },
 +    http::{
 +        CONVEX_ACTIONS_CALLBACK_TOKEN_HEADER,
 +        CONVEX_ACTION_FUNCTION_NAME_HEADER,
@@ -360,6 +363,7 @@ index 000000000..38aa09d74
 +        &self,
 +        _identity: Identity,
 +        _caller: AttributedCaller,
++        _request_id: RequestId,
 +    ) -> anyhow::Result<String> {
 +        anyhow::bail!(errors::ErrorMetadata::bad_request(
 +            "AiGatewayUnavailable",
@@ -1742,10 +1746,10 @@ index 000000000..92c77b3f1
 +}
 diff --git a/crates/funrun_server/src/snapshot.rs b/crates/funrun_server/src/snapshot.rs
 new file mode 100644
-index 000000000..ee60194d7
+index 000000000..c3bbc802b
 --- /dev/null
 +++ b/crates/funrun_server/src/snapshot.rs
-@@ -0,0 +1,409 @@
+@@ -0,0 +1,405 @@
 +use std::{
 +    sync::{
 +        Arc,
@@ -1788,7 +1792,6 @@ index 000000000..ee60194d7
 +};
 +use futures::FutureExt;
 +use indexing::{
-+    index_cache::IndexCache,
 +    index_reader::IndexReader,
 +    index_registry::IndexRegistry,
 +};
@@ -1824,8 +1827,6 @@ index 000000000..ee60194d7
 +const MAX_PERCENT_PER_CLIENT: usize = 100;
 +const WARMUP_BACKOFF_INITIAL: Duration = Duration::from_secs(1);
 +const WARMUP_BACKOFF_MAX: Duration = Duration::from_secs(60);
-+static FUNRUN_FOLLOWER_INDEX_CACHE_SIZE: LazyLock<u64> =
-+    LazyLock::new(|| env_config("FUNRUN_FOLLOWER_INDEX_CACHE_SIZE", 64_000_000));
 +static FUNRUN_SNAPSHOT_WAIT_TIMEOUT: LazyLock<Duration> =
 +    LazyLock::new(|| Duration::from_secs(env_config("FUNRUN_SNAPSHOT_WAIT_TIMEOUT_SECS", 30)));
 +
@@ -1989,7 +1990,6 @@ index 000000000..ee60194d7
 +            rt.clone(),
 +            searcher.clone(),
 +            virtual_system_mapping().clone(),
-+            IndexCache::new(*FUNRUN_FOLLOWER_INDEX_CACHE_SIZE),
 +        )
 +        .await?;
 +        let retention_validator = database.retention_validator();

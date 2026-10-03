@@ -1,8 +1,8 @@
 diff --git a/crates/database/src/committer.rs b/crates/database/src/committer.rs
-index 13389625f..24d944134 100644
+index 046e526bc..c16d2130a 100644
 --- a/crates/database/src/committer.rs
 +++ b/crates/database/src/committer.rs
-@@ -302,6 +302,7 @@ impl<RT: Runtime> Committer<RT> {
+@@ -306,6 +306,7 @@ impl<RT: Runtime> Committer<RT> {
          virtual_system_mapping: VirtualSystemMapping,
          index_cache_handle: IndexCacheHandle,
          deployment_name: String,
@@ -10,7 +10,7 @@ index 13389625f..24d944134 100644
      ) -> CommitterClient {
          let persistence_reader = persistence.reader();
          let conflict_checker = PendingWrites::new();
-@@ -347,7 +348,7 @@ impl<RT: Runtime> Committer<RT> {
+@@ -351,7 +352,7 @@ impl<RT: Runtime> Committer<RT> {
              persistence_reader,
              retention_validator,
              snapshot_reader,
@@ -19,7 +19,7 @@ index 13389625f..24d944134 100644
          }
      }
  
-@@ -1463,10 +1464,6 @@ pub struct CommitterClient {
+@@ -1485,10 +1486,6 @@ pub struct CommitterClient {
  }
  
  impl CommitterClient {
@@ -31,18 +31,10 @@ index 13389625f..24d944134 100644
          &self,
          bootstrapped_indexes: BootstrappedSearchIndexes,
 diff --git a/crates/database/src/database.rs b/crates/database/src/database.rs
-index d33417025..6cba2aa59 100644
+index 9a9e3571d..a60640ef1 100644
 --- a/crates/database/src/database.rs
 +++ b/crates/database/src/database.rs
-@@ -144,6 +144,7 @@ use indexing::{
-         NoInMemoryIndexes,
-     },
-     index_cache::{
-+        IndexCache,
-         IndexCacheHandle,
-         IndexCacheHandleBuilder,
-     },
-@@ -204,6 +205,7 @@ use crate::{
+@@ -204,6 +204,7 @@ use crate::{
          bootstrap_system_tables,
          DEFAULT_BOOTSTRAP_TABLE_NUMBERS,
      },
@@ -50,7 +42,7 @@ index d33417025..6cba2aa59 100644
      metrics::{
          self,
          load_indexes_into_memory_timer,
-@@ -215,7 +217,10 @@ use crate::{
+@@ -215,7 +216,10 @@ use crate::{
          LeaderRetentionWorkers,
      },
      schema_registry::SchemaRegistry,
@@ -62,7 +54,7 @@ index d33417025..6cba2aa59 100644
      search_index_bootstrap::SearchIndexBootstrapWorker,
      snapshot_manager::{
          Snapshot,
-@@ -285,6 +290,8 @@ pub const MAX_OVERLOADED_FAILURES: u32 = 20;
+@@ -286,6 +290,8 @@ pub const MAX_OVERLOADED_FAILURES: u32 = 20;
  const INITIAL_OVERLOADED_BACKOFF: Duration = Duration::from_millis(10);
  const MAX_OVERLOADED_BACKOFF: Duration = Duration::from_secs(30);
  
@@ -71,7 +63,7 @@ index d33417025..6cba2aa59 100644
  /// In memory vector changes are asynchronously backfilled on startup. Attempts
  /// to query before backfill is finished will result in failure, so we need to
  /// retry. Vector search is latency tolerant because it's only run in actions,
-@@ -311,9 +318,7 @@ const MAX_VECTOR_ATTEMPTS: u32 = 5;
+@@ -312,9 +318,7 @@ const MAX_VECTOR_ATTEMPTS: u32 = 5;
  /// See the diagram in `database/README.md` for more details.
  #[derive(Clone)]
  pub struct Database<RT: Runtime> {
@@ -82,7 +74,7 @@ index d33417025..6cba2aa59 100644
      snapshot_manager: Reader<SnapshotManager>,
      /// Table shapes maintained asynchronously by the `TableSummaryWorker`,
      /// `None` until the worker has published for the first time.
-@@ -321,11 +326,8 @@ pub struct Database<RT: Runtime> {
+@@ -322,11 +326,8 @@ pub struct Database<RT: Runtime> {
      pub(crate) runtime: RT,
      reader: Arc<dyn PersistenceReader>,
      write_commits_since_load: Arc<AtomicUsize>,
@@ -90,11 +82,11 @@ index d33417025..6cba2aa59 100644
 -    retention_workers: LeaderRetentionWorkers,
      pub searcher: Arc<dyn Searcher>,
      pub search_storage: Arc<OnceLock<Arc<dyn Storage>>>,
--    index_cache_handle: Option<IndexCacheHandle>,
+-    index_cache_handle: IndexCacheHandle,
      virtual_system_mapping: VirtualSystemMapping,
      pub bootstrap_metadata: BootstrapMetadata,
      invalidation_callback: InvalidationMetricCallback,
-@@ -336,6 +338,20 @@ pub struct Database<RT: Runtime> {
+@@ -337,6 +338,19 @@ pub struct Database<RT: Runtime> {
      component_paths_snapshot_cache: AsyncLru<RT, Timestamp, BTreeMap<ComponentId, ComponentPath>>,
      list_snapshot_table_iterator_cache:
          Arc<tokio::sync::Mutex<Option<ListSnapshotTableIteratorCacheEntry<RT>>>>,
@@ -111,11 +103,10 @@ index d33417025..6cba2aa59 100644
 +    retention_manager: Arc<dyn RetentionValidator>,
 +    retention_workers: Option<LeaderRetentionWorkers>,
 +    index_cache_handle: Option<IndexCacheHandle>,
-+    index_cache: Option<IndexCache>,
  }
  
  struct ListSnapshotTableIteratorCacheEntry<RT: Runtime> {
-@@ -1111,6 +1127,7 @@ impl<RT: Runtime> Database<RT> {
+@@ -1112,6 +1126,7 @@ impl<RT: Runtime> Database<RT> {
          let invalidation_callback = InvalidationMetricCallback::new();
          let subscriptions =
              SubscriptionsWorker::start(log_owner, runtime.clone(), invalidation_callback.clone());
@@ -123,7 +114,7 @@ index d33417025..6cba2aa59 100644
          let committer = Committer::start(
              log_writer,
              snapshot_writer,
-@@ -1121,6 +1138,7 @@ impl<RT: Runtime> Database<RT> {
+@@ -1122,6 +1137,7 @@ impl<RT: Runtime> Database<RT> {
              virtual_system_mapping.clone(),
              index_cache_handle.clone(),
              deployment_name,
@@ -131,7 +122,7 @@ index d33417025..6cba2aa59 100644
          );
          let table_mapping_snapshot_cache =
              AsyncLru::new(runtime.clone(), 20, 2, 200, "table_mapping_snapshot");
-@@ -1130,19 +1148,22 @@ impl<RT: Runtime> Database<RT> {
+@@ -1131,19 +1147,21 @@ impl<RT: Runtime> Database<RT> {
              AsyncLru::new(runtime.clone(), 20, 2, 200, "component_paths_snapshot");
          let list_snapshot_table_iterator_cache = Arc::new(tokio::sync::Mutex::new(None));
          let database = Self {
@@ -144,7 +135,6 @@ index d33417025..6cba2aa59 100644
 +                retention_manager: retention_manager as Arc<dyn RetentionValidator>,
 +                retention_workers: Some(retention_workers),
 +                index_cache_handle: Some(index_cache_handle),
-+                index_cache: None,
 +            })),
              runtime,
 -            log: log_reader,
@@ -156,11 +146,11 @@ index d33417025..6cba2aa59 100644
              write_commits_since_load: Arc::new(AtomicUsize::new(0)),
              searcher,
              search_storage: Arc::new(OnceLock::new()),
--            index_cache_handle: Some(index_cache_handle),
+-            index_cache_handle,
              virtual_system_mapping,
              bootstrap_metadata,
              invalidation_callback,
-@@ -1150,6 +1171,10 @@ impl<RT: Runtime> Database<RT> {
+@@ -1151,6 +1169,10 @@ impl<RT: Runtime> Database<RT> {
              by_id_indexes_snapshot_cache,
              component_paths_snapshot_cache,
              list_snapshot_table_iterator_cache,
@@ -171,7 +161,7 @@ index d33417025..6cba2aa59 100644
          };
  
          Ok(database)
-@@ -1221,45 +1246,64 @@ impl<RT: Runtime> Database<RT> {
+@@ -1222,43 +1244,64 @@ impl<RT: Runtime> Database<RT> {
          Ok(Some(Arc::new(snapshot.into())))
      }
  
@@ -216,7 +206,8 @@ index d33417025..6cba2aa59 100644
      pub async fn shutdown(&self) -> anyhow::Result<()> {
 -        self.committer.shutdown();
 -        self.subscriptions.shutdown();
--        if let Some(handle) = &self.index_cache_handle {
+-        self.index_cache_handle.remove_deployment();
+-        self.retention_workers.shutdown().await?;
 +        drop(self.lease_watch_handle.lock().take());
 +        let (committer, subscriptions, retention_workers) = {
 +            let leader_state = self.leader_state.read();
@@ -231,9 +222,8 @@ index d33417025..6cba2aa59 100644
 +        }
 +        subscriptions.shutdown();
 +        if let Some(handle) = self.index_cache_handle() {
-             handle.remove_deployment();
-         }
--        self.retention_workers.shutdown().await?;
++            handle.remove_deployment();
++        }
 +        if let Some(retention_workers) = &retention_workers {
 +            retention_workers.shutdown().await?;
 +        }
@@ -250,16 +240,26 @@ index d33417025..6cba2aa59 100644
      }
  
      /// Load the set of documents and tombstones in the given table between
-@@ -1763,7 +1807,7 @@ impl<RT: Runtime> Database<RT> {
+@@ -1779,14 +1822,12 @@ impl<RT: Runtime> Database<RT> {
+                 self.index_ref_at(snapshot.as_ref(), index.id())?
              };
              let mut reader = Arc::new(persistence_snapshot) as Arc<dyn IndexReader>;
-             if let Some(snapshot) = snapshot
--                && let Some(handle) = self.index_cache_handle.clone()
+-            if let Some(snapshot) = snapshot {
++            if let Some(snapshot) = snapshot
 +                && let Some(handle) = self.index_cache_handle()
-             {
++            {
                  // TODO: it is probably OK to still use the index cache even if
                  // we don't have an index_registry at the same timestamp.
-@@ -2027,11 +2071,11 @@ impl<RT: Runtime> Database<RT> {
+-                reader = Arc::new(
+-                    self.index_cache_handle
+-                        .clone()
+-                        .caching_index_reader(reader, snapshot.index_registry),
+-                );
++                reader = Arc::new(handle.caching_index_reader(reader, snapshot.index_registry));
+             }
+             let index_page = reader
+                 .index_page(index, tablet_id, interval, order, max_size)
+@@ -2046,11 +2087,11 @@ impl<RT: Runtime> Database<RT> {
                      RepeatablePersistence::new(
                          self.reader.clone(),
                          repeatable_ts,
@@ -268,21 +268,21 @@ index d33417025..6cba2aa59 100644
                      )
                      .read_snapshot(repeatable_ts)?,
                  ),
--                self.index_cache_handle.clone(),
+-                Some(self.index_cache_handle.clone()),
 +                self.index_cache_handle(),
                  index_cache,
              ),
              Arc::new(TextIndexManagerSnapshot::new(
-@@ -2096,7 +2140,7 @@ impl<RT: Runtime> Database<RT> {
+@@ -2115,7 +2156,7 @@ impl<RT: Runtime> Database<RT> {
              snapshot,
              table_summaries: None,
              persistence_snapshot: repeatable_persistence.read_snapshot(ts)?,
--            index_cache_handle: self.index_cache_handle.clone(),
+-            index_cache_handle: Some(self.index_cache_handle.clone()),
 +            index_cache_handle: self.index_cache_handle(),
              persistence_reader: self.reader.clone(),
              retention_validator: self.retention_validator(),
          })
-@@ -2118,7 +2162,7 @@ impl<RT: Runtime> Database<RT> {
+@@ -2137,7 +2178,7 @@ impl<RT: Runtime> Database<RT> {
          task::consume_budget().await;
          let readonly = transaction.is_readonly();
          let result = self
@@ -291,7 +291,7 @@ index d33417025..6cba2aa59 100644
              .commit(transaction, write_source.into())
              .await?;
          if !readonly {
-@@ -2132,7 +2176,7 @@ impl<RT: Runtime> Database<RT> {
+@@ -2151,7 +2192,7 @@ impl<RT: Runtime> Database<RT> {
          &self,
          tables: BTreeSet<TableName>,
      ) -> anyhow::Result<()> {
@@ -300,7 +300,7 @@ index d33417025..6cba2aa59 100644
      }
  
      pub fn write_commits_since_load(&self) -> usize {
-@@ -2143,14 +2187,16 @@ impl<RT: Runtime> Database<RT> {
+@@ -2162,14 +2203,16 @@ impl<RT: Runtime> Database<RT> {
      /// N.B. Only use this function for user subscriptions. System subscriptions
      /// should use `subscribe_and_wait_for_invalidation`.
      pub async fn subscribe(&self, token: Token) -> anyhow::Result<Subscription> {
@@ -319,7 +319,7 @@ index d33417025..6cba2aa59 100644
          let invalid_ts = subscription.wait_for_invalidation().await;
          let current_ts = self.now_ts_for_reads();
          metrics::log_subscription_invalidation_lag(invalid_ts, *current_ts);
-@@ -2604,11 +2650,11 @@ impl<RT: Runtime> Database<RT> {
+@@ -2623,11 +2666,11 @@ impl<RT: Runtime> Database<RT> {
          ts: Timestamp,
      ) -> anyhow::Result<Result<Token, Option<Timestamp>>> {
          let _timer = metrics::refresh_token_timer();
@@ -334,7 +334,7 @@ index d33417025..6cba2aa59 100644
      }
  
      pub fn memory_consistency_check(&self) -> anyhow::Result<()> {
-@@ -2761,7 +2807,7 @@ impl<RT: Runtime> Database<RT> {
+@@ -2780,7 +2823,7 @@ impl<RT: Runtime> Database<RT> {
          &self,
          search_type: SearchType,
      ) -> SearchFlusherWakeSubscriber {
@@ -345,16 +345,20 @@ index d33417025..6cba2aa59 100644
  
 diff --git a/crates/database/src/database/ha.rs b/crates/database/src/database/ha.rs
 new file mode 100644
-index 000000000..fee6d5e61
+index 000000000..d73e3cba0
 --- /dev/null
 +++ b/crates/database/src/database/ha.rs
-@@ -0,0 +1,336 @@
+@@ -0,0 +1,320 @@
 +use common::{
-+    knobs::DOCUMENT_RETENTION_RATE_LIMIT,
++    knobs::{
++        DOCUMENT_RETENTION_RATE_LIMIT,
++        INDEX_CACHE_SIZE,
++    },
 +    persistence::new_static_repeatable_recent,
 +    runtime::new_rate_limiter,
 +};
 +use governor::Quota;
++use indexing::index_cache::IndexCache;
 +
 +use super::*;
 +use crate::{
@@ -394,7 +398,6 @@ index 000000000..fee6d5e61
 +        runtime: RT,
 +        searcher: Arc<dyn Searcher>,
 +        virtual_system_mapping: VirtualSystemMapping,
-+        index_cache: IndexCache,
 +    ) -> anyhow::Result<Self> {
 +        let _load_database_timer = metrics::load_database_timer();
 +        let retention_manager: Arc<dyn RetentionValidator> =
@@ -427,10 +430,6 @@ index 000000000..fee6d5e61
 +        );
 +        let follower_tailer_handle = Arc::new(tokio::sync::Mutex::new(Some(follower_tailer)));
 +        let (log_owner, log_reader, _log_writer) = new_write_log(*ts);
-+        let index_cache_handle = index_cache.new_handle().build(
-+            bootstrap_metadata.index_tablet_id,
-+            Arc::new(log_reader.clone()),
-+        );
 +        let invalidation_callback = InvalidationMetricCallback::new();
 +        let subscriptions =
 +            SubscriptionsWorker::start(log_owner, runtime.clone(), invalidation_callback.clone());
@@ -448,8 +447,7 @@ index 000000000..fee6d5e61
 +                log: log_reader.clone(),
 +                retention_manager,
 +                retention_workers: None,
-+                index_cache_handle: Some(index_cache_handle),
-+                index_cache: Some(index_cache),
++                index_cache_handle: None,
 +            })),
 +            runtime,
 +            snapshot_manager: snapshot_reader,
@@ -536,23 +534,10 @@ index 000000000..fee6d5e61
 +            )
 +            .await?;
 +        let (log_owner, log_reader, log_writer) = new_write_log(*idle_ts);
-+        let index_cache_handle = {
-+            let leader_state = self.leader_state.read();
-+            leader_state
-+                .index_cache_handle
-+                .as_ref()
-+                .context("become_leader requires an index cache handle")?
-+                .remove_deployment();
-+            leader_state
-+                .index_cache
-+                .as_ref()
-+                .context("become_leader requires the follower's index cache")?
-+                .new_handle()
-+                .build(
-+                    self.bootstrap_metadata.index_tablet_id,
-+                    Arc::new(log_reader.clone()),
-+                )
-+        };
++        let index_cache_handle = IndexCache::new(*INDEX_CACHE_SIZE).new_handle().build(
++            self.bootstrap_metadata.index_tablet_id,
++            Arc::new(log_reader.clone()),
++        );
 +        let subscriptions = SubscriptionsWorker::start(
 +            log_owner,
 +            self.runtime.clone(),
@@ -582,7 +567,6 @@ index 000000000..fee6d5e61
 +            leader_state.retention_manager = retention_manager as Arc<dyn RetentionValidator>;
 +            leader_state.retention_workers = Some(retention_workers);
 +            leader_state.index_cache_handle = Some(index_cache_handle);
-+            leader_state.index_cache = None;
 +            old_subscriptions
 +        };
 +        old_subscriptions.shutdown();
@@ -687,10 +671,10 @@ index 000000000..fee6d5e61
 +}
 diff --git a/crates/database/src/follower_tailer.rs b/crates/database/src/follower_tailer.rs
 new file mode 100644
-index 000000000..a845d0129
+index 000000000..30c57e699
 --- /dev/null
 +++ b/crates/database/src/follower_tailer.rs
-@@ -0,0 +1,508 @@
+@@ -0,0 +1,507 @@
 +use std::{
 +    ops::Bound,
 +    sync::Arc,
@@ -739,6 +723,7 @@ index 000000000..a845d0129
 +    persistence_helpers::stream_transactions,
 +    search_index_bootstrap::bootstrap_search_indexes,
 +    snapshot_manager::SnapshotManager,
++    write_throughput_limiter::WriteVolume,
 +    DatabaseSnapshot,
 +};
 +
@@ -1155,12 +1140,10 @@ index 000000000..a845d0129
 +        if ts <= *latest_ts {
 +            return Ok(());
 +        }
-+        let mut write_bytes: u64 = 0;
 +        for rp in txn.revision_pairs {
 +            let tablet_id = rp.id.table();
 +            let table_number = new_snapshot.table_mapping().tablet_number(tablet_id)?;
 +            let id = rp.id.to_resolved(table_number);
-+            write_bytes += rp.document().map_or(0, |d| d.size() as u64);
 +            let update = DocumentUpdateWithPrevTs {
 +                id,
 +                old_document: rp
@@ -1172,7 +1155,7 @@ index 000000000..a845d0129
 +            new_snapshot.update(&update, ts)?;
 +        }
 +        let mut snapshot_manager = self.snapshot_writer.write();
-+        snapshot_manager.push(ts, new_snapshot, write_bytes);
++        snapshot_manager.push(ts, new_snapshot, WriteVolume::default());
 +        Ok(())
 +    }
 +
@@ -1200,20 +1183,20 @@ index 000000000..a845d0129
 +    }
 +}
 diff --git a/crates/database/src/lib.rs b/crates/database/src/lib.rs
-index 8134252a1..61f05be16 100644
+index 04d47e8b9..41bf8bfc5 100644
 --- a/crates/database/src/lib.rs
 +++ b/crates/database/src/lib.rs
-@@ -16,6 +16,7 @@ mod committer;
- mod database;
+@@ -17,6 +17,7 @@ mod database;
  mod database_index_workers;
  mod execution_size;
+ mod file_uploads;
 +mod follower_tailer;
  mod metrics;
  pub mod patch;
  pub mod persistence_helpers;
-@@ -65,6 +66,7 @@ pub use execution_size::{
-     FunctionExecutionSize,
-     TransactionLimits,
+@@ -71,6 +72,7 @@ pub use file_uploads::{
+     PendingFileUpload,
+     UploadedFileUpload,
  };
 +pub use follower_tailer::FollowerTailerClient;
  pub use indexing::database_index_snapshot::{

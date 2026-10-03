@@ -68,10 +68,10 @@ index 463fe0ce2..559be05da 100644
  /// convenience) from allowing browsers to make these requests.
  pub fn platform_api_cors() -> CorsLayer {
 diff --git a/crates/common/src/knobs.rs b/crates/common/src/knobs.rs
-index 95ab7ec31..0bf520f59 100644
+index e9a7df57c..e22d66048 100644
 --- a/crates/common/src/knobs.rs
 +++ b/crates/common/src/knobs.rs
-@@ -1021,6 +1021,11 @@ pub static ISOLATE_QUEUE_CONGESTED_TIMEOUT: LazyLock<Duration> =
+@@ -1005,6 +1005,11 @@ pub static ISOLATE_QUEUE_CONGESTED_TIMEOUT: LazyLock<Duration> =
  pub static MAX_ISOLATE_WORKERS: LazyLock<usize> =
      LazyLock::new(|| env_config("MAX_ISOLATE_WORKERS", 300));
  
@@ -83,22 +83,6 @@ index 95ab7ec31..0bf520f59 100644
  /// The size of the pending commits in the committer queue. This is a FIFO
  /// queue, so if the queue is too large, we run into a risk of all requests
  /// waiting too long and no requests going through during overload. The size of
-@@ -1389,10 +1394,12 @@ pub static FUNRUN_FETCH_CLIENT_CACHE_SIZE: LazyLock<usize> =
- pub static FUNRUN_CLIENT_MAX_REQUESTS_PER_UPSTREAM: LazyLock<usize> =
-     LazyLock::new(|| env_config("FUNRUN_CLIENT_MAX_REQUESTS_PER_UPSTREAM", 15));
- 
--/// The maximum number of retries a Funrun client will perform. The client only
--/// retries overloaded errors.
-+/// Max retries per funrun call; total attempts = retries + 1. Queries and
-+/// mutations retry on transport errors, attempt timeout, and
-+/// rejected-before-execution; actions only on rejected-before-execution; HTTP
-+/// actions never. Never retries after a response part has been received.
- pub static FUNRUN_CLIENT_MAX_RETRIES: LazyLock<usize> =
--    LazyLock::new(|| env_config("FUNRUN_CLIENT_MAX_RETRIES", 4));
-+    LazyLock::new(|| env_config("FUNRUN_CLIENT_MAX_RETRIES", 2));
- 
- /// Value between 1 and 100 representing the percent of a the shared scheduler's
- /// worker pool that a single client can use.
 diff --git a/crates/function_runner/Cargo.toml b/crates/function_runner/Cargo.toml
 index 5bc866196..3c9a6076e 100644
 --- a/crates/function_runner/Cargo.toml
@@ -420,10 +404,10 @@ index 000000000..52edcd226
 +}
 diff --git a/crates/function_runner/src/remote.rs b/crates/function_runner/src/remote.rs
 new file mode 100644
-index 000000000..dbdcc4d89
+index 000000000..647c862e1
 --- /dev/null
 +++ b/crates/function_runner/src/remote.rs
-@@ -0,0 +1,885 @@
+@@ -0,0 +1,887 @@
 +use std::{
 +    collections::{
 +        BTreeMap,
@@ -543,6 +527,8 @@ index 000000000..dbdcc4d89
 +    LazyLock::new(|| Duration::from_secs(env_config("FUNRUN_LB_REFRESH_INTERVAL_SECONDS", 10)));
 +static FUNRUN_RESPONSE_TIMEOUT: LazyLock<Duration> =
 +    LazyLock::new(|| Duration::from_secs(env_config("FUNRUN_RESPONSE_TIMEOUT_SECS", 600)));
++static FUNRUN_CLIENT_MAX_RETRIES: LazyLock<u32> =
++    LazyLock::new(|| env_config("FUNRUN_CLIENT_MAX_RETRIES", 2));
 +static FUNRUN_EMPTY_ENDPOINTS_FAIL_FAST: LazyLock<Duration> =
 +    LazyLock::new(|| Duration::from_secs(env_config("FUNRUN_EMPTY_ENDPOINTS_FAIL_FAST_SECS", 30)));
 +pub static MAX_GRPC_MESSAGE_BYTES: LazyLock<usize> = LazyLock::new(|| {
@@ -894,7 +880,7 @@ index 000000000..dbdcc4d89
 +            in_memory_index_last_modified,
 +            context,
 +        )?;
-+        let max_attempts = (*common::knobs::FUNRUN_CLIENT_MAX_RETRIES as u32).saturating_add(1);
++        let max_attempts = FUNRUN_CLIENT_MAX_RETRIES.saturating_add(1);
 +        let has_deadline = matches!(udf_type, UdfType::Query | UdfType::Mutation);
 +        let mut attempt: u32 = 0;
 +        let result = 'attempts: loop {
@@ -1441,7 +1427,7 @@ index 000000000..edc493393
 +    }
 +}
 diff --git a/crates/isolate/src/client.rs b/crates/isolate/src/client.rs
-index 37b6a7a7d..5330da783 100644
+index 66d4cda34..6093989f4 100644
 --- a/crates/isolate/src/client.rs
 +++ b/crates/isolate/src/client.rs
 @@ -9,6 +9,7 @@ use std::{
@@ -1797,11 +1783,11 @@ index 42f33efca..00e020949 100644
      operations::{
          bad_admin_key_error,
 diff --git a/crates/search/src/query.rs b/crates/search/src/query.rs
-index df1037052..414d9628c 100644
+index 209ba1f94..e76033c5e 100644
 --- a/crates/search/src/query.rs
 +++ b/crates/search/src/query.rs
-@@ -56,6 +56,8 @@ use crate::{
-     EditDistance,
+@@ -45,6 +45,8 @@ use crate::{
+     metrics,
  };
  
 +pub mod funrun_proto;
@@ -1809,7 +1795,7 @@ index df1037052..414d9628c 100644
  /// A search query compiled against a particular `SearchIndexSchema`.
  #[derive(Debug, Clone)]
  pub struct CompiledQuery {
-@@ -603,12 +605,8 @@ impl TextQueryTermRead {
+@@ -265,12 +267,8 @@ impl TextQueryTermRead {
  // code.
  #[derive(Debug, Clone, PartialEq, Eq)]
  pub enum TextQueryTerm {

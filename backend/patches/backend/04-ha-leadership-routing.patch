@@ -1,5 +1,5 @@
 diff --git a/crates/local_backend/src/config.rs b/crates/local_backend/src/config.rs
-index 578b19dad..9f722d7dd 100644
+index 578b19dad..730d70d96 100644
 --- a/crates/local_backend/src/config.rs
 +++ b/crates/local_backend/src/config.rs
 @@ -10,6 +10,7 @@ use clap::{
@@ -10,20 +10,17 @@ index 578b19dad..9f722d7dd 100644
      ConvexOrigin,
      ConvexSite,
  };
-@@ -34,6 +35,12 @@ pub struct LocalConfig {
+@@ -34,6 +35,9 @@ pub struct LocalConfig {
      #[clap(short, long, value_enum, default_value_t = DbDriverTag::Sqlite)]
      pub db: DbDriverTag,
  
 +    #[clap(long, value_enum, default_value_t = BackendRole::Leader, env = "CONVEX_BACKEND_ROLE")]
 +    pub role: BackendRole,
 +
-+    #[clap(long, env = "CONVEX_BOOT_FOLLOWER_WHEN_INITIALIZED", value_parser = clap::builder::BoolishValueParser::new())]
-+    pub boot_follower_when_initialized: bool,
-+
      /// Host interface to bind to
      #[clap(short, long, default_value = "0.0.0.0")]
      pub interface: ::std::net::Ipv4Addr,
-@@ -259,5 +266,4 @@ impl LocalConfig {
+@@ -259,5 +263,4 @@ impl LocalConfig {
              }
          }
      }
