@@ -1,9 +1,9 @@
 diff --git a/crates/pb/protos/funrun.proto b/crates/pb/protos/funrun.proto
 new file mode 100644
-index 000000000..93e7fe12b
+index 000000000..3b7ea78d4
 --- /dev/null
 +++ b/crates/pb/protos/funrun.proto
-@@ -0,0 +1,152 @@
+@@ -0,0 +1,158 @@
 +syntax = "proto3";
 +
 +package funrun;
@@ -108,6 +108,12 @@ index 000000000..93e7fe12b
 +  FunctionReads reads = 2;
 +  repeated common.PendingDocumentUpdate writes = 3;
 +  repeated RowsReadByTablet rows_read_by_tablet = 4;
++  repeated UploadedFile uploaded_files = 5;
++}
++
++message UploadedFile {
++  common.ResolvedDocumentId id = 1;
++  uint64 size = 2;
 +}
 +
 +message FunctionReads {
@@ -157,7 +163,7 @@ index 000000000..93e7fe12b
 +  uint64 rows_read = 2;
 +}
 diff --git a/crates/pb/src/error_metadata.rs b/crates/pb/src/error_metadata.rs
-index 156289c91..e8e28344a 100644
+index 156289c91..88f1f64f9 100644
 --- a/crates/pb/src/error_metadata.rs
 +++ b/crates/pb/src/error_metadata.rs
 @@ -155,11 +155,23 @@ fn has_connection_reset_source(status: &tonic::Status) -> bool {
@@ -228,7 +234,7 @@ index 156289c91..e8e28344a 100644
      fn context<C>(self, context: C) -> anyhow::Error
      where
          C: Display + Send + Sync + 'static,
-@@ -218,3 +231,47 @@ impl ErrorMetadataStatusExt for tonic::Status {
+@@ -218,3 +231,46 @@ impl ErrorMetadataStatusExt for tonic::Status {
          self.into_anyhow().context(context)
      }
  }
@@ -237,7 +243,6 @@ index 156289c91..e8e28344a 100644
 +mod tests {
 +    use errors::{
 +        ErrorMetadata,
-+        OccInfo,
 +        INTERNAL_SERVER_ERROR,
 +        INTERNAL_SERVER_ERROR_MSG,
 +    };

@@ -11,7 +11,7 @@ index bbdcaec82..9db9f167f 100644
      module_paths::CanonicalizedComponentModulePath,
      reference::Reference,
 diff --git a/crates/common/src/http/mod.rs b/crates/common/src/http/mod.rs
-index 463fe0ce2..559be05da 100644
+index 463fe0ce2..40814392a 100644
 --- a/crates/common/src/http/mod.rs
 +++ b/crates/common/src/http/mod.rs
 @@ -212,8 +212,7 @@ impl From<HttpRequest> for HttpRequestStream {
@@ -32,7 +32,7 @@ index 463fe0ce2..559be05da 100644
  }
  
  /// Serves an HTTP server using the given service.
-@@ -1015,6 +1013,10 @@ where
+@@ -1015,6 +1013,11 @@ where
  
  #[allow(clippy::declare_interior_mutable_const)]
  pub const CONVEX_REQUEST_ID_HEADER: HeaderName = HeaderName::from_static("convex-request-id");
@@ -40,10 +40,11 @@ index 463fe0ce2..559be05da 100644
 +pub const CONVEX_EXECUTION_ID_HEADER: &str = "Convex-Execution-Id";
 +pub const CONVEX_ROOT_REQUEST_HEADER: &str = "Convex-Root-Request";
 +pub const CONVEX_ACTION_FUNCTION_NAME_HEADER: &str = "Convex-Action-Function-Name";
++pub const CONVEX_DEFERRED_AUTH_ERROR_HEADER: &str = "Convex-Deferred-Auth-Error";
  
  pub struct ExtractRequestId(pub RequestId);
  
-@@ -1330,23 +1332,6 @@ impl<T: fmt::Display> fmt::Display for LogOptFmt<T> {
+@@ -1330,23 +1333,6 @@ impl<T: fmt::Display> fmt::Display for LogOptFmt<T> {
      }
  }
  
@@ -67,22 +68,6 @@ index 463fe0ce2..559be05da 100644
  /// Platform APIs dont' accept cookies so there's minimal risk (and plenty of
  /// convenience) from allowing browsers to make these requests.
  pub fn platform_api_cors() -> CorsLayer {
-diff --git a/crates/common/src/knobs.rs b/crates/common/src/knobs.rs
-index e9a7df57c..e22d66048 100644
---- a/crates/common/src/knobs.rs
-+++ b/crates/common/src/knobs.rs
-@@ -1005,6 +1005,11 @@ pub static ISOLATE_QUEUE_CONGESTED_TIMEOUT: LazyLock<Duration> =
- pub static MAX_ISOLATE_WORKERS: LazyLock<usize> =
-     LazyLock::new(|| env_config("MAX_ISOLATE_WORKERS", 300));
- 
-+/// Number of isolate worker threads (with their V8 isolates) to spawn eagerly
-+/// at startup, clamped to MAX_ISOLATE_WORKERS. 0 = create lazily on demand.
-+pub static ISOLATE_PRELOAD_WORKERS: LazyLock<usize> =
-+    LazyLock::new(|| env_config("ISOLATE_PRELOAD_WORKERS", 0));
-+
- /// The size of the pending commits in the committer queue. This is a FIFO
- /// queue, so if the queue is too large, we run into a risk of all requests
- /// waiting too long and no requests going through during overload. The size of
 diff --git a/crates/function_runner/Cargo.toml b/crates/function_runner/Cargo.toml
 index 5bc866196..3c9a6076e 100644
 --- a/crates/function_runner/Cargo.toml
@@ -117,10 +102,10 @@ index 5bc866196..3c9a6076e 100644
  usage_tracking = { workspace = true }
  value = { workspace = true }
 diff --git a/crates/function_runner/src/lib.rs b/crates/function_runner/src/lib.rs
-index 27ec38f32..fd51481a0 100644
+index 5c1665f6f..c94be5c4b 100644
 --- a/crates/function_runner/src/lib.rs
 +++ b/crates/function_runner/src/lib.rs
-@@ -78,6 +78,8 @@ mod in_memory_indexes;
+@@ -81,6 +81,8 @@ mod in_memory_indexes;
  pub mod in_process_function_runner;
  mod metrics;
  mod module_cache;
@@ -129,59 +114,12 @@ index 27ec38f32..fd51481a0 100644
  pub mod server;
  
  #[async_trait]
-diff --git a/crates/function_runner/src/metrics.rs b/crates/function_runner/src/metrics.rs
-index 64a4c9068..998b61d70 100644
---- a/crates/function_runner/src/metrics.rs
-+++ b/crates/function_runner/src/metrics.rs
-@@ -1,3 +1,4 @@
-+use common::types::UdfType;
- use fastrace::{
-     local::LocalSpan,
-     Event,
-@@ -12,7 +13,9 @@ use metrics::{
-     register_convex_histogram,
-     MetricLabel,
-     StaticMetricLabel,
-+    StatusTimer,
-     Timer,
-+    STATUS_LABEL,
- };
- use prometheus::{
-     VMHistogram,
-@@ -109,3 +112,27 @@ register_convex_gauge!(
- pub fn record_code_cache_size(size: u64) {
-     log_gauge(&CODE_CACHE_SIZE_BYTES_TOTAL, size as f64);
- }
-+
-+register_convex_histogram!(
-+    FUNRUN_CLIENT_RPC_SECONDS,
-+    "Client-observed duration of a funrun RunFunction RPC attempt",
-+    &[STATUS_LABEL[0], "udf_type"]
-+);
-+pub fn funrun_client_rpc_timer(udf_type: UdfType) -> StatusTimer {
-+    let mut timer = StatusTimer::new(&FUNRUN_CLIENT_RPC_SECONDS);
-+    timer.add_label(udf_type.metric_label());
-+    timer
-+}
-+
-+register_convex_counter!(
-+    FUNRUN_CLIENT_RETRY_TOTAL,
-+    "Funrun client RPC attempt retries, by reason",
-+    &["reason"]
-+);
-+pub fn log_funrun_client_retry(reason: &'static str) {
-+    log_counter_with_labels(
-+        &FUNRUN_CLIENT_RETRY_TOTAL,
-+        1,
-+        vec![StaticMetricLabel::new_const("reason", reason)],
-+    );
-+}
 diff --git a/crates/function_runner/src/proto.rs b/crates/function_runner/src/proto.rs
 new file mode 100644
-index 000000000..52edcd226
+index 000000000..47def6fd1
 --- /dev/null
 +++ b/crates/function_runner/src/proto.rs
-@@ -0,0 +1,220 @@
+@@ -0,0 +1,264 @@
 +use std::{
 +    collections::BTreeMap,
 +    str::FromStr,
@@ -190,6 +128,7 @@ index 000000000..52edcd226
 +use anyhow::Context;
 +use common::{
 +    bootstrap_model::index::database_index::IndexedFields,
++    http::normalize_header_map,
 +    interval::IntervalSet,
 +    types::TabletIndexName,
 +};
@@ -199,14 +138,17 @@ index 000000000..52edcd226
 +        TransactionReadSize,
 +    },
 +    ReadSet,
++    UploadedFileUpload,
 +};
 +use search::{
 +    query::funrun_proto::QueryReadsProto,
 +    QueryReads as SearchQueryReads,
 +};
 +use sync_types::Timestamp;
++use udf::HttpActionRequestHead;
 +use value::{
 +    FieldPath,
++    ResolvedDocumentId,
 +    TabletId,
 +};
 +
@@ -215,6 +157,22 @@ index 000000000..52edcd226
 +    FunctionReads,
 +    FunctionWrites,
 +};
++
++pub fn http_action_request_head_proto(
++    HttpActionRequestHead {
++        headers,
++        url,
++        method,
++    }: HttpActionRequestHead,
++) -> pb::common::HttpActionRequestHead {
++    pb::common::HttpActionRequestHead {
++        http_headers: normalize_header_map(headers)
++            .map(pb::common::HttpHeader::from)
++            .collect(),
++        url: url.to_string(),
++        method: method.to_string(),
++    }
++}
 +
 +impl From<FunctionReads> for pb::funrun::FunctionReads {
 +    fn from(
@@ -345,6 +303,7 @@ index 000000000..52edcd226
 +            reads,
 +            writes,
 +            rows_read_by_tablet,
++            uploaded_files,
 +        }: FunctionFinalTransaction,
 +    ) -> anyhow::Result<Self> {
 +        let writes = writes
@@ -359,11 +318,19 @@ index 000000000..52edcd226
 +                rows_read,
 +            })
 +            .collect();
++        let uploaded_files = uploaded_files
++            .into_iter()
++            .map(|(id, upload)| pb::funrun::UploadedFile {
++                id: Some(id.into()),
++                size: upload.size as u64,
++            })
++            .collect();
 +        Ok(pb::funrun::FunctionFinalTransaction {
 +            begin_timestamp: begin_timestamp.into(),
 +            reads: Some(reads.into()),
 +            writes,
 +            rows_read_by_tablet,
++            uploaded_files,
 +        })
 +    }
 +}
@@ -377,8 +344,22 @@ index 000000000..52edcd226
 +            reads,
 +            writes,
 +            rows_read_by_tablet,
++            uploaded_files,
 +        }: pb::funrun::FunctionFinalTransaction,
 +    ) -> anyhow::Result<Self> {
++        let uploaded_files = uploaded_files
++            .into_iter()
++            .map(|pb::funrun::UploadedFile { id, size }| {
++                let id: ResolvedDocumentId =
++                    id.context("Missing id in UploadedFile")?.try_into()?;
++                anyhow::Ok((
++                    id,
++                    UploadedFileUpload {
++                        size: size as usize,
++                    },
++                ))
++            })
++            .collect::<anyhow::Result<BTreeMap<_, _>>>()?;
 +        let writes = writes
 +            .into_iter()
 +            .map(common::document::PendingDocumentUpdate::try_from)
@@ -399,15 +380,16 @@ index 000000000..52edcd226
 +                .try_into()?,
 +            writes: FunctionWrites { updates: writes },
 +            rows_read_by_tablet,
++            uploaded_files,
 +        })
 +    }
 +}
 diff --git a/crates/function_runner/src/remote.rs b/crates/function_runner/src/remote.rs
 new file mode 100644
-index 000000000..647c862e1
+index 000000000..2eb6187a0
 --- /dev/null
 +++ b/crates/function_runner/src/remote.rs
-@@ -0,0 +1,887 @@
+@@ -0,0 +1,926 @@
 +use std::{
 +    collections::{
 +        BTreeMap,
@@ -421,6 +403,7 @@ index 000000000..647c862e1
 +    time::{
 +        Duration,
 +        Instant,
++        SystemTime,
 +    },
 +};
 +
@@ -450,6 +433,7 @@ index 000000000..647c862e1
 +        DeploymentMetadata,
 +        IndexId,
 +        RepeatableTimestamp,
++        UdfRuntime,
 +        UdfType,
 +    },
 +};
@@ -465,6 +449,14 @@ index 000000000..647c862e1
 +    Identity,
 +    KeyBroker,
 +    FUNRUN_AUTH_METADATA_KEY,
++};
++use metrics::{
++    log_counter_with_labels,
++    register_convex_counter,
++    register_convex_histogram,
++    StaticMetricLabel,
++    StatusTimer,
++    STATUS_LABEL,
 +};
 +use model::{
 +    components::auth::propagate_component_auth,
@@ -507,10 +499,7 @@ index 000000000..647c862e1
 +use value::identifier::Identifier;
 +
 +use crate::{
-+    metrics::{
-+        funrun_client_rpc_timer,
-+        log_funrun_client_retry,
-+    },
++    proto::http_action_request_head_proto,
 +    server::{
 +        funrun_isolate_worker,
 +        DeploymentStorage,
@@ -531,14 +520,40 @@ index 000000000..647c862e1
 +    LazyLock::new(|| env_config("FUNRUN_CLIENT_MAX_RETRIES", 2));
 +static FUNRUN_EMPTY_ENDPOINTS_FAIL_FAST: LazyLock<Duration> =
 +    LazyLock::new(|| Duration::from_secs(env_config("FUNRUN_EMPTY_ENDPOINTS_FAIL_FAST_SECS", 30)));
-+pub static MAX_GRPC_MESSAGE_BYTES: LazyLock<usize> = LazyLock::new(|| {
-+    let writes = 2
-+        * (*common::knobs::TRANSACTION_MAX_USER_WRITE_SIZE_BYTES
-+            + *common::knobs::TRANSACTION_MAX_SYSTEM_WRITE_SIZE_BYTES);
-+    let result = (*common::knobs::SYSTEM_FUNCTION_MAX_RESULT_SIZE)
-+        .max(*common::knobs::FUNCTION_MAX_RESULT_SIZE);
-+    (writes + result + udf::HTTP_ACTION_BODY_LIMIT) + (4 << 20)
-+});
++register_convex_histogram!(
++    FUNRUN_CLIENT_RPC_SECONDS,
++    "Client-observed duration of a funrun RunFunction RPC attempt",
++    &[STATUS_LABEL[0], "udf_type"]
++);
++fn funrun_client_rpc_timer(udf_type: UdfType) -> StatusTimer {
++    let mut timer = StatusTimer::new(&FUNRUN_CLIENT_RPC_SECONDS);
++    timer.add_label(udf_type.metric_label());
++    timer
++}
++
++register_convex_counter!(
++    FUNRUN_CLIENT_RETRY_TOTAL,
++    "Funrun client RPC attempt retries, by reason",
++    &["reason"]
++);
++fn log_funrun_client_retry(reason: &'static str) {
++    log_counter_with_labels(
++        &FUNRUN_CLIENT_RETRY_TOTAL,
++        1,
++        vec![StaticMetricLabel::new_const("reason", reason)],
++    );
++}
++
++fn callback_token_issued_at(identity: &Identity) -> SystemTime {
++    let now = SystemTime::now();
++    match identity {
++        Identity::User(user) => user
++            .expiration
++            .checked_sub(Duration::from_secs(1))
++            .map_or(now, |last_valid| now.min(last_valid)),
++        _ => now,
++    }
++}
 +
 +fn parse_funrun_target(addr: &str) -> anyhow::Result<(String, u16)> {
 +    anyhow::ensure!(
@@ -605,6 +620,7 @@ index 000000000..647c862e1
 +                                && tx.send(Change::Insert(*addr, endpoint)).await.is_ok()
 +                            {
 +                                next.insert(*addr);
++                                empty_since.send_if_modified(|since| since.take().is_some());
 +                            }
 +                        }
 +                        for addr in current.difference(&unique) {
@@ -743,8 +759,7 @@ index 000000000..647c862e1
 +        parts_received: &mut bool,
 +    ) -> Result<pb::funrun::RunFunctionResult, RunFunctionAttemptError> {
 +        let mut client = pb::funrun::funrun_client::FunrunClient::new(self.channel.clone())
-+            .max_decoding_message_size(*MAX_GRPC_MESSAGE_BYTES)
-+            .max_encoding_message_size(*MAX_GRPC_MESSAGE_BYTES);
++            .max_decoding_message_size(usize::MAX);
 +        let mut stream = timeout(*FUNRUN_RESPONSE_TIMEOUT, client.run_function(req))
 +            .await
 +            .map_err(|_| RunFunctionAttemptError::TimedOut)?
@@ -806,7 +821,9 @@ index 000000000..647c862e1
 +            .map(|m| m.path_and_args.path().component)
 +            .unwrap_or(common::components::ComponentId::Root);
 +        let auth_header = token_to_authorization_header(identity.clone().into())?;
-+        let callback_token = self.key_broker.issue_action_token(component);
++        let callback_token = self
++            .key_broker
++            .issue_action_token_at(component, callback_token_issued_at(&identity));
 +        let existing_writes = existing_writes
 +            .updates
 +            .into_iter()
@@ -997,74 +1014,77 @@ index 000000000..647c862e1
 +        let inert_identity: InertIdentity =
 +            propagate_component_auth(&identity, component, component.is_root()).into();
 +        let auth_header = token_to_authorization_header(identity.clone().into())?;
-+        let callback_token = self.key_broker.issue_action_token(component);
-+        self.wait_for_endpoints().await?;
-+        let http_request_body = match http_request.body {
-+            Some(mut body) => {
-+                let mut buf = Vec::new();
-+                while let Some(chunk) = body.next().await {
-+                    let chunk = chunk?;
-+                    if buf.len().saturating_add(chunk.len()) > udf::HTTP_ACTION_BODY_LIMIT {
-+                        anyhow::bail!(ErrorMetadata::bad_request(
-+                            "HttpActionRequestTooLarge",
-+                            format!(
-+                                "HTTP action request body exceeds the {} byte limit",
-+                                udf::HTTP_ACTION_BODY_LIMIT
-+                            ),
-+                        ));
++        let callback_token = self
++            .key_broker
++            .issue_action_token_at(component, callback_token_issued_at(&identity));
++        let http_request_head = http_action_request_head_proto(request_head.clone());
++        let http_body = http_request.body;
++        let dispatch = async move {
++            self.wait_for_endpoints().await?;
++            let http_request_body = match http_body {
++                Some(mut body) => {
++                    let mut buf = Vec::new();
++                    while let Some(chunk) = body.next().await {
++                        buf.extend_from_slice(&chunk?);
 +                    }
-+                    buf.extend_from_slice(&chunk);
-+                }
-+                Some(buf)
++                    Some(buf)
++                },
++                None => None,
++            };
++            let existing_writes = existing_writes
++                .updates
++                .into_iter()
++                .map(pb::common::PendingDocumentUpdate::try_from)
++                .collect::<anyhow::Result<Vec<_>>>()?;
++            let request = pb::funrun::RunHttpActionRequest {
++                instance_name: self.deployment.name.clone(),
++                identity: Some(identity.try_into()?),
++                ts: Some(ts.into()),
++                existing_writes,
++                default_system_env_vars: default_system_env_vars
++                    .into_iter()
++                    .map(|(name, value)| pb::funrun::EnvVar {
++                        name: name.to_string(),
++                        value: String::from(value),
++                    })
++                    .collect(),
++                in_memory_index_last_modified: in_memory_index_last_modified
++                    .into_iter()
++                    .map(|(index_id, ts)| pb::funrun::IndexLastModified {
++                        index_id: String::from(index_id),
++                        last_modified_ts: ts.into(),
++                    })
++                    .collect(),
++                context: Some(context.into()),
++                backend_callback_url: Some(self.convex_origin.to_string()),
++                callback_transport_url: self.callback_transport_url.clone(),
++                callback_token: Some(callback_token),
++                auth_header,
++                http_module_path: Some(http_module_path.try_into()?),
++                routed_path: routed_path.0,
++                http_request_head: Some(http_request_head),
++                http_request_body,
++            };
++            let mut client = pb::funrun::funrun_client::FunrunClient::new(self.channel.clone())
++                .max_decoding_message_size(usize::MAX);
++            timeout(
++                *FUNRUN_RESPONSE_TIMEOUT,
++                client.run_http_action(self.authenticated_request(request)?),
++            )
++            .await
++            .context("funrun RunHttpAction response headers timed out")?
++            .map_err(|status| status.into_anyhow())
++            .context("funrun RunHttpAction failed")
++            .map(|response| response.into_inner())
++        }
++        .fuse();
++        futures::pin_mut!(dispatch);
++        let mut stream = select_biased! {
++            _ = http_response_streamer.sender.closed().fuse() => {
++                anyhow::bail!(ErrorMetadata::client_disconnect());
 +            },
-+            None => None,
++            stream = dispatch => stream?,
 +        };
-+        let existing_writes = existing_writes
-+            .updates
-+            .into_iter()
-+            .map(pb::common::PendingDocumentUpdate::try_from)
-+            .collect::<anyhow::Result<Vec<_>>>()?;
-+        let request = pb::funrun::RunHttpActionRequest {
-+            instance_name: self.deployment.name.clone(),
-+            identity: Some(identity.try_into()?),
-+            ts: Some(ts.into()),
-+            existing_writes,
-+            default_system_env_vars: default_system_env_vars
-+                .into_iter()
-+                .map(|(name, value)| pb::funrun::EnvVar {
-+                    name: name.to_string(),
-+                    value: String::from(value),
-+                })
-+                .collect(),
-+            in_memory_index_last_modified: in_memory_index_last_modified
-+                .into_iter()
-+                .map(|(index_id, ts)| pb::funrun::IndexLastModified {
-+                    index_id: String::from(index_id),
-+                    last_modified_ts: ts.into(),
-+                })
-+                .collect(),
-+            context: Some(context.into()),
-+            backend_callback_url: Some(self.convex_origin.to_string()),
-+            callback_transport_url: self.callback_transport_url.clone(),
-+            callback_token: Some(callback_token),
-+            auth_header,
-+            http_module_path: Some(http_module_path.try_into()?),
-+            routed_path: routed_path.0,
-+            http_request_head: Some(request_head.clone().into()),
-+            http_request_body,
-+        };
-+        let mut client = pb::funrun::funrun_client::FunrunClient::new(self.channel.clone())
-+            .max_decoding_message_size(*MAX_GRPC_MESSAGE_BYTES)
-+            .max_encoding_message_size(*MAX_GRPC_MESSAGE_BYTES);
-+        let mut stream = timeout(
-+            *FUNRUN_RESPONSE_TIMEOUT,
-+            client.run_http_action(self.authenticated_request(request)?),
-+        )
-+        .await
-+        .context("funrun RunHttpAction response headers timed out")?
-+        .map_err(|status| status.into_anyhow())
-+        .context("funrun RunHttpAction failed")?
-+        .into_inner();
 +        let mut result: Option<pb::funrun::RunFunctionResult> = None;
 +        loop {
 +            let message = stream.message().fuse();
@@ -1143,6 +1163,7 @@ index 000000000..647c862e1
 +    async fn run_function(
 +        &self,
 +        udf_type: UdfType,
++        _udf_runtime: Option<UdfRuntime>,
 +        identity: Identity,
 +        ts: RepeatableTimestamp,
 +        existing_writes: FunctionWrites,
@@ -1296,10 +1317,10 @@ index 000000000..647c862e1
 +    fn set_action_callbacks(&self, _action_callbacks: Arc<dyn ActionCallbacks>) {}
 +}
 diff --git a/crates/function_runner/src/server.rs b/crates/function_runner/src/server.rs
-index 985494a40..1e60fbf6c 100644
+index 3756ee776..8c08cf68b 100644
 --- a/crates/function_runner/src/server.rs
 +++ b/crates/function_runner/src/server.rs
-@@ -183,6 +183,13 @@ impl<RT: Runtime> StorageForDeployment<RT> for DeploymentStorage {
+@@ -196,6 +196,13 @@ impl<RT: Runtime> StorageForDeployment<RT> for DeploymentStorage {
      }
  }
  
@@ -1313,49 +1334,12 @@ index 985494a40..1e60fbf6c 100644
  pub struct FunctionRunnerCore<RT: Runtime, S: StorageForDeployment<RT>> {
      rt: RT,
      storage: S,
-@@ -233,24 +240,30 @@ impl<RT: Runtime, S: StorageForDeployment<RT>> FunctionRunnerCore<RT, S> {
-         isolate_worker: W,
-     ) -> anyhow::Result<Self> {
-         let max_isolate_workers = *MAX_ISOLATE_WORKERS;
--        let isolate_client = IsolateClient::new(
-+        let shared = SharedIsolateResources::new_with_max_workers(
-             rt.clone(),
-             max_percent_per_client,
-             max_isolate_workers,
-             isolate_worker,
-         )?;
--        let index_cache = InMemoryIndexCache::new(rt.clone());
--        let module_cache = ModuleCache::new(rt.clone());
--        let code_cache = CodeCache::new();
-+        Ok(Self::new_with_isolate_client(rt, storage, shared))
-+    }
- 
--        Ok(Self {
-+    pub fn new_with_isolate_client(rt: RT, storage: S, shared: SharedIsolateResources<RT>) -> Self {
-+        let SharedIsolateResources {
-+            isolate_client,
-+            module_cache,
-+            code_cache,
-+        } = shared;
-+        let index_cache = InMemoryIndexCache::new(rt.clone());
-+        Self {
-             rt,
-             storage,
-             index_cache,
-             module_cache,
-             code_cache,
-             isolate_client,
--        })
-+        }
-     }
- 
-     pub fn active_isolate_workers(&self) -> usize {
 diff --git a/crates/function_runner/src/server/shared_isolate.rs b/crates/function_runner/src/server/shared_isolate.rs
 new file mode 100644
-index 000000000..edc493393
+index 000000000..b83f965d3
 --- /dev/null
 +++ b/crates/function_runner/src/server/shared_isolate.rs
-@@ -0,0 +1,70 @@
+@@ -0,0 +1,89 @@
 +use std::time::Duration;
 +
 +use common::knobs::FUNRUN_ISOLATE_ACTIVE_THREADS;
@@ -1387,9 +1371,28 @@ index 000000000..edc493393
 +
 +#[derive(Clone)]
 +pub struct SharedIsolateResources<RT: Runtime> {
-+    pub(super) isolate_client: IsolateClient<RT>,
-+    pub(super) module_cache: ModuleCache<RT>,
-+    pub(super) code_cache: CodeCache,
++    isolate_client: IsolateClient<RT>,
++    module_cache: ModuleCache<RT>,
++    code_cache: CodeCache,
++}
++
++impl<RT: Runtime, S: StorageForDeployment<RT>> FunctionRunnerCore<RT, S> {
++    pub fn new_with_isolate_client(rt: RT, storage: S, shared: SharedIsolateResources<RT>) -> Self {
++        let SharedIsolateResources {
++            isolate_client,
++            module_cache,
++            code_cache,
++        } = shared;
++        let index_cache = InMemoryIndexCache::new(rt.clone());
++        Self {
++            rt,
++            storage,
++            index_cache,
++            module_cache,
++            code_cache,
++            isolate_client,
++        }
++    }
 +}
 +
 +impl<RT: Runtime> SharedIsolateResources<RT> {
@@ -1427,7 +1430,7 @@ index 000000000..edc493393
 +    }
 +}
 diff --git a/crates/isolate/src/client.rs b/crates/isolate/src/client.rs
-index 66d4cda34..6093989f4 100644
+index 26fa7477b..c9e8051a1 100644
 --- a/crates/isolate/src/client.rs
 +++ b/crates/isolate/src/client.rs
 @@ -9,6 +9,7 @@ use std::{
@@ -1438,15 +1441,7 @@ index 66d4cda34..6093989f4 100644
              AtomicUsize,
              Ordering,
          },
-@@ -59,6 +60,7 @@ use common::{
-         ISOLATE_IDLE_TIMEOUT,
-         ISOLATE_MAX_LIFETIME,
-         ISOLATE_MAX_USER_HEAP_SIZE,
-+        ISOLATE_PRELOAD_WORKERS,
-         ISOLATE_QUEUE_CONGESTED_TIMEOUT,
-         ISOLATE_QUEUE_IDLE_TIMEOUT,
-         ISOLATE_QUEUE_SIZE,
-@@ -212,7 +214,6 @@ impl IsolateConfig {
+@@ -215,7 +216,6 @@ impl IsolateConfig {
              limiter,
          }
      }
@@ -1454,7 +1449,7 @@ index 66d4cda34..6093989f4 100644
  }
  
  pub struct UdfRequest<RT: Runtime> {
-@@ -461,6 +462,7 @@ impl<RT: Runtime> Clone for IsolateClient<RT> {
+@@ -465,6 +465,7 @@ impl<RT: Runtime> Clone for IsolateClient<RT> {
              sender: self.sender.clone(),
              internal_sender: self.internal_sender.clone(),
              active_workers: self.active_workers.clone(),
@@ -1462,7 +1457,17 @@ index 66d4cda34..6093989f4 100644
              max_workers: self.max_workers,
          }
      }
-@@ -550,6 +552,7 @@ pub struct IsolateClient<RT: Runtime> {
+@@ -545,6 +546,9 @@ pub fn initialize_v8() {
+ /// threads. Instead, we'll manage our V8 threads ourselves.
+ ///
+ /// [`IsolateClient`] is the "client" entry point to our V8 threads.
++static ISOLATE_PRELOAD_WORKERS: std::sync::LazyLock<usize> =
++    std::sync::LazyLock::new(|| cmd_util::env::env_config("ISOLATE_PRELOAD_WORKERS", 0));
++
+ pub struct IsolateClient<RT: Runtime> {
+     rt: RT,
+     handles: Arc<Mutex<Vec<IsolateWorkerHandle>>>,
+@@ -554,6 +558,7 @@ pub struct IsolateClient<RT: Runtime> {
      /// Shared with the scheduler. Tracks the total number of in-progress
      /// workers across all clients.
      active_workers: Arc<AtomicUsize>,
@@ -1470,7 +1475,7 @@ index 66d4cda34..6093989f4 100644
      max_workers: usize,
  }
  
-@@ -577,6 +580,9 @@ impl<RT: Runtime> IsolateClient<RT> {
+@@ -581,6 +586,9 @@ impl<RT: Runtime> IsolateClient<RT> {
          let active_workers = Arc::new(AtomicUsize::new(0));
          let _active_workers = active_workers.clone();
          let rt_clone = rt.clone();
@@ -1480,7 +1485,7 @@ index 66d4cda34..6093989f4 100644
          let scheduler = rt.spawn("shared_isolate_scheduler", async move {
              // The scheduler thread pops a worker from available_workers and
              // pops a request from the CoDelQueueReceiver. Then it sends the request
-@@ -589,7 +595,9 @@ impl<RT: Runtime> IsolateClient<RT> {
+@@ -593,7 +601,9 @@ impl<RT: Runtime> IsolateClient<RT> {
                  max_percent_per_client,
                  _active_workers,
              );
@@ -1491,7 +1496,7 @@ index 66d4cda34..6093989f4 100644
          });
          Ok(Self {
              rt,
-@@ -598,6 +606,7 @@ impl<RT: Runtime> IsolateClient<RT> {
+@@ -602,6 +612,7 @@ impl<RT: Runtime> IsolateClient<RT> {
              scheduler: Arc::new(Mutex::new(Some(scheduler))),
              handles,
              active_workers,
@@ -1499,7 +1504,7 @@ index 66d4cda34..6093989f4 100644
              max_workers: max_isolate_workers,
          })
      }
-@@ -614,6 +623,10 @@ impl<RT: Runtime> IsolateClient<RT> {
+@@ -618,6 +629,10 @@ impl<RT: Runtime> IsolateClient<RT> {
          self.max_workers
      }
  
@@ -1510,7 +1515,15 @@ index 66d4cda34..6093989f4 100644
      pub fn aggregate_heap_stats(&self) -> IsolateHeapStats {
          let mut total = IsolateHeapStats::default();
          for handle in self.handles.lock().iter() {
-@@ -1157,6 +1170,7 @@ pub struct SharedIsolateScheduler<RT: Runtime, W: IsolateWorker<RT>> {
+@@ -1067,6 +1082,7 @@ impl<RT: Runtime> IsolateClient<RT> {
+                 shutdown_and_join(handle.handle).await?;
+             }
+         }
++        self.scheduler_exited.store(true, Ordering::SeqCst);
+         if let Some(mut scheduler) = self.scheduler.lock().take() {
+             scheduler.shutdown();
+         }
+@@ -1162,6 +1178,7 @@ pub struct SharedIsolateScheduler<RT: Runtime, W: IsolateWorker<RT>> {
      /// recreated and there will be no penalty for reassigning this worker to a
      /// new client.
      available_workers: HashMap<String, VecDeque<IdleWorkerState>>,
@@ -1518,7 +1531,7 @@ index 66d4cda34..6093989f4 100644
      /// Set of futures awaiting a response from an active worker.
      in_progress_workers:
          FuturesUnordered<Join<oneshot::Receiver<IdleWorkerInfo>, Ready<ActiveWorkerState>>>,
-@@ -1203,6 +1217,7 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
+@@ -1208,6 +1225,7 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
              in_progress_count: HashMap::new(),
              active_workers,
              available_workers: HashMap::new(),
@@ -1526,7 +1539,7 @@ index 66d4cda34..6093989f4 100644
              max_workers,
              handles,
              max_active_workers_per_client: (max_workers * max_percent_per_client)
-@@ -1257,6 +1272,10 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
+@@ -1262,6 +1280,10 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
          internal_receiver: mpsc::UnboundedReceiver<Request<RT>>,
      ) {
          log_pool_max(self.worker.config().name, self.max_workers);
@@ -1537,7 +1550,7 @@ index 66d4cda34..6093989f4 100644
          let mut report_stats = self.rt.wait(*HEAP_WORKER_REPORT_INTERVAL_SECONDS);
          let mut expired_receiver = receiver.expired_receiver();
          let limiter = self.worker.config().limiter.clone();
-@@ -1435,26 +1454,13 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
+@@ -1440,26 +1462,13 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
              // It's possible that one of our own workers will end up being the
              // least-recently-used one.
          }
@@ -1568,7 +1581,7 @@ index 66d4cda34..6093989f4 100644
          }
          // No existing worker for this client and we've already started the max number
          // of workers -- just grab the least recently used worker. This worker is least
-@@ -1487,6 +1493,26 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
+@@ -1492,6 +1501,26 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
          Ok(worker.worker_id)
      }
  
@@ -1595,6 +1608,28 @@ index 66d4cda34..6093989f4 100644
      fn aggregate_heap_stats(&self) -> IsolateHeapStats {
          let mut total = IsolateHeapStats::default();
          for handle in self.handles.lock().iter() {
+diff --git a/crates/keybroker/src/broker.rs b/crates/keybroker/src/broker.rs
+index 45dafe076..e9a7a3033 100644
+--- a/crates/keybroker/src/broker.rs
++++ b/crates/keybroker/src/broker.rs
+@@ -1196,8 +1196,15 @@ impl KeyBroker {
+     }
+ 
+     pub fn issue_action_token(&self, component_id: ComponentId) -> ActionCallbackToken {
+-        let now = SystemTime::now();
+-        let since_epoch = now
++        self.issue_action_token_at(component_id, SystemTime::now())
++    }
++
++    pub fn issue_action_token_at(
++        &self,
++        component_id: ComponentId,
++        issued_at: SystemTime,
++    ) -> ActionCallbackToken {
++        let since_epoch = issued_at
+             .duration_since(SystemTime::UNIX_EPOCH)
+             .expect("Failed to compute seconds since epoch?");
+ 
 diff --git a/crates/keybroker/src/funrun_auth.rs b/crates/keybroker/src/funrun_auth.rs
 new file mode 100644
 index 000000000..96936ce89
@@ -1758,18 +1793,18 @@ index 000000000..96936ce89
 +    }
 +}
 diff --git a/crates/keybroker/src/lib.rs b/crates/keybroker/src/lib.rs
-index 42f33efca..00e020949 100644
+index 132770c3d..86e1b0d74 100644
 --- a/crates/keybroker/src/lib.rs
 +++ b/crates/keybroker/src/lib.rs
-@@ -2,6 +2,7 @@
- 
+@@ -3,6 +3,7 @@
  mod broker;
+ mod deployment_jwt;
  mod encryptor;
 +mod funrun_auth;
  mod legacy_encryptor;
  mod metrics;
  mod operations;
-@@ -29,6 +30,12 @@ pub use self::{
+@@ -36,6 +37,12 @@ pub use self::{
          Encryptor,
          RandomEncryptor,
      },
@@ -1783,7 +1818,7 @@ index 42f33efca..00e020949 100644
      operations::{
          bad_admin_key_error,
 diff --git a/crates/search/src/query.rs b/crates/search/src/query.rs
-index 209ba1f94..e76033c5e 100644
+index 3a6b0a5c4..5b237068d 100644
 --- a/crates/search/src/query.rs
 +++ b/crates/search/src/query.rs
 @@ -45,6 +45,8 @@ use crate::{
@@ -1981,33 +2016,3 @@ index 000000000..fbabce96a
 +        assert_eq!(reads, decoded);
 +    }
 +}
-diff --git a/crates/udf/src/http_action.rs b/crates/udf/src/http_action.rs
-index 57f61791c..f9b5e8c34 100644
---- a/crates/udf/src/http_action.rs
-+++ b/crates/udf/src/http_action.rs
-@@ -94,6 +94,25 @@ impl TryFrom<pb::common::HttpActionRequestHead> for HttpActionRequestHead {
-     }
- }
- 
-+impl From<HttpActionRequestHead> for pb::common::HttpActionRequestHead {
-+    fn from(
-+        HttpActionRequestHead {
-+            headers,
-+            url,
-+            method,
-+        }: HttpActionRequestHead,
-+    ) -> Self {
-+        let http_headers = normalize_header_map(headers)
-+            .map(HttpHeader::from)
-+            .collect();
-+        Self {
-+            http_headers,
-+            url: url.to_string(),
-+            method: method.to_string(),
-+        }
-+    }
-+}
-+
- #[derive(Debug, Clone)]
- pub enum HttpActionResponsePart {
-     Head(HttpActionResponseHead),

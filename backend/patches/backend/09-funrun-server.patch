@@ -1,9 +1,9 @@
 diff --git a/crates/funrun_server/Cargo.toml b/crates/funrun_server/Cargo.toml
 new file mode 100644
-index 000000000..c0f0f8f7a
+index 000000000..86827b915
 --- /dev/null
 +++ b/crates/funrun_server/Cargo.toml
-@@ -0,0 +1,51 @@
+@@ -0,0 +1,52 @@
 +[package]
 +name = "funrun_server"
 +version = "0.1.0"
@@ -20,6 +20,7 @@ index 000000000..c0f0f8f7a
 +async-trait = { workspace = true }
 +application = { workspace = true }
 +axum = { workspace = true }
++base64 = { workspace = true }
 +bytes = { workspace = true }
 +clusters = { workspace = true }
 +cmd_util = { workspace = true }
@@ -57,10 +58,10 @@ index 000000000..c0f0f8f7a
 +workspace = true
 diff --git a/crates/funrun_server/src/callbacks.rs b/crates/funrun_server/src/callbacks.rs
 new file mode 100644
-index 000000000..193f468af
+index 000000000..b8ba61698
 --- /dev/null
 +++ b/crates/funrun_server/src/callbacks.rs
-@@ -0,0 +1,606 @@
+@@ -0,0 +1,616 @@
 +use anyhow::Context;
 +use async_trait::async_trait;
 +use common::{
@@ -78,6 +79,7 @@ index 000000000..193f468af
 +    http::{
 +        CONVEX_ACTIONS_CALLBACK_TOKEN_HEADER,
 +        CONVEX_ACTION_FUNCTION_NAME_HEADER,
++        CONVEX_DEFERRED_AUTH_ERROR_HEADER,
 +        CONVEX_EXECUTION_ID_HEADER,
 +        CONVEX_REQUEST_ID_HEADER,
 +        CONVEX_ROOT_REQUEST_HEADER,
@@ -158,6 +160,15 @@ index 000000000..193f468af
 +        }
 +        if let Some(user_agent) = &context.request_metadata.user_agent {
 +            req = req.header("Convex-Request-Client-User-Agent", user_agent.as_str());
++        }
++        if *identity == self.request_identity
++            && let Identity::Unknown(Some(error)) = identity
++        {
++            let encoded = serde_json::json!([error.short_msg.as_ref(), error.msg.as_ref()]);
++            req = req.header(
++                CONVEX_DEFERRED_AUTH_ERROR_HEADER,
++                base64::encode(encoded.to_string()),
++            );
 +        }
 +        if *identity == self.request_identity
 +            && let Some(auth) = &self.auth_header
@@ -741,10 +752,10 @@ index 000000000..dad12bc23
 +}
 diff --git a/crates/funrun_server/src/main.rs b/crates/funrun_server/src/main.rs
 new file mode 100644
-index 000000000..7065f22b4
+index 000000000..7c1ea5680
 --- /dev/null
 +++ b/crates/funrun_server/src/main.rs
-@@ -0,0 +1,280 @@
+@@ -0,0 +1,278 @@
 +#![recursion_limit = "256"]
 +
 +use std::sync::{
@@ -776,7 +787,6 @@ index 000000000..7065f22b4
 +mod snapshot;
 +
 +use config::FunrunConfig;
-+use function_runner::remote::MAX_GRPC_MESSAGE_BYTES;
 +use metrics::log_isolate_pool;
 +use service::FunrunService;
 +use snapshot::InstanceRegistry;
@@ -835,8 +845,7 @@ index 000000000..7065f22b4
 +        );
 +        let service = FunrunService::new(grpc_runtime, grpc_registry, state)?;
 +        let server = pb::funrun::funrun_server::FunrunServer::new(service)
-+            .max_decoding_message_size(*MAX_GRPC_MESSAGE_BYTES)
-+            .max_encoding_message_size(*MAX_GRPC_MESSAGE_BYTES);
++            .max_decoding_message_size(usize::MAX);
 +        builder
 +            .add_service(server)
 +            .serve_with_shutdown(config.listen, wait_for_shutdown(grpc_shutdown))
@@ -1096,10 +1105,10 @@ index 000000000..7b902cd7e
 +}
 diff --git a/crates/funrun_server/src/service.rs b/crates/funrun_server/src/service.rs
 new file mode 100644
-index 000000000..92c77b3f1
+index 000000000..3a019d9c5
 --- /dev/null
 +++ b/crates/funrun_server/src/service.rs
-@@ -0,0 +1,644 @@
+@@ -0,0 +1,640 @@
 +use std::{
 +    collections::BTreeMap,
 +    pin::Pin,
@@ -1268,7 +1277,7 @@ index 000000000..92c77b3f1
 +        })
 +    }
 +
-+    async fn resolve_and_authenticate(
++    fn resolve_and_authenticate(
 +        &self,
 +        instance_name: &str,
 +        metadata: &tonic::metadata::MetadataMap,
@@ -1686,9 +1695,7 @@ index 000000000..92c77b3f1
 +    ) -> Result<Response<Self::RunFunctionStream>, Status> {
 +        let metadata = request.metadata().clone();
 +        let req = request.into_inner();
-+        let instance = self
-+            .resolve_and_authenticate(&req.instance_name, &metadata)
-+            .await?;
++        let instance = self.resolve_and_authenticate(&req.instance_name, &metadata)?;
 +        let (part_tx, part_rx) = mpsc::channel(RESPONSE_STREAM_BUFFER);
 +        let fetch_client = self.fetch_client.clone();
 +        let callback_client = self.callback_client.clone();
@@ -1718,9 +1725,7 @@ index 000000000..92c77b3f1
 +    ) -> Result<Response<Self::RunHttpActionStream>, Status> {
 +        let metadata = request.metadata().clone();
 +        let req = request.into_inner();
-+        let instance = self
-+            .resolve_and_authenticate(&req.instance_name, &metadata)
-+            .await?;
++        let instance = self.resolve_and_authenticate(&req.instance_name, &metadata)?;
 +        let (part_tx, part_rx) = mpsc::channel(RESPONSE_STREAM_BUFFER);
 +        let fetch_client = self.fetch_client.clone();
 +        let callback_client = self.callback_client.clone();
@@ -1746,10 +1751,10 @@ index 000000000..92c77b3f1
 +}
 diff --git a/crates/funrun_server/src/snapshot.rs b/crates/funrun_server/src/snapshot.rs
 new file mode 100644
-index 000000000..c3bbc802b
+index 000000000..72e98b104
 --- /dev/null
 +++ b/crates/funrun_server/src/snapshot.rs
-@@ -0,0 +1,405 @@
+@@ -0,0 +1,408 @@
 +use std::{
 +    sync::{
 +        Arc,
@@ -1836,7 +1841,7 @@ index 000000000..c3bbc802b
 +    instance: FunrunInstanceConfig,
 +    shared_isolate: SharedIsolateResources<RT>,
 +    searcher: Arc<dyn search::Searcher>,
-+    state: Arc<OnceCell<Arc<InstanceState<RT>>>>,
++    state: OnceCell<Arc<InstanceState<RT>>>,
 +    load_error: Mutex<Option<InstanceLoadError>>,
 +}
 +
@@ -1859,7 +1864,7 @@ index 000000000..c3bbc802b
 +            shared_isolate.max_isolate_workers(),
 +        );
 +        let searcher: Arc<dyn search::Searcher> = Arc::new(InProcessSearcher::new(rt.clone())?);
-+        let state = Arc::new(OnceCell::new());
++        let state = OnceCell::new();
 +        Ok(Self {
 +            rt,
 +            require_ssl: config.require_ssl,
@@ -2048,11 +2053,31 @@ index 000000000..c3bbc802b
 +
 +    pub async fn snapshot_inputs(&self, ts: RepeatableTimestamp) -> anyhow::Result<SnapshotInputs> {
 +        log_snapshot_request();
++        let prepare = self.prepare_snapshot_inputs(ts).fuse();
++        let deadline = self.rt.wait(*FUNRUN_SNAPSHOT_WAIT_TIMEOUT).fuse();
++        futures::pin_mut!(prepare, deadline);
++        futures::select_biased! {
++            result = prepare => result,
++            _ = deadline => anyhow::bail!(ErrorMetadata::rejected_before_execution(
++                "FunrunSnapshotTimeout", "funrun follower did not prepare the requested snapshot",
++            )),
++        }
++    }
++
++    async fn prepare_snapshot_inputs(
++        &self,
++        ts: RepeatableTimestamp,
++    ) -> anyhow::Result<SnapshotInputs> {
 +        if self.tailer.has_reached(ts) {
 +            log_snapshot_warm_hit();
 +        } else {
 +            log_snapshot_cold();
-+            self.await_tailer(ts).await?;
++            self.tailer.wait_for(ts).await.map_err(|error| {
++                error.context(ErrorMetadata::rejected_before_execution(
++                    "FunrunTailerExited",
++                    "funrun follower tailer exited",
++                ))
++            })?;
 +        }
 +        let persistence =
 +            RepeatablePersistence::new(self.reader.clone(), ts, self.retention_validator.clone());
@@ -2074,22 +2099,6 @@ index 000000000..c3bbc802b
 +                self.full_cold_snapshot_inputs(ts, index_reader).await
 +            },
 +            Err(error) => Err(error),
-+        }
-+    }
-+
-+    async fn await_tailer(&self, ts: RepeatableTimestamp) -> anyhow::Result<()> {
-+        let wait = self.tailer.wait_for(ts).fuse();
-+        let deadline = self.rt.wait(*FUNRUN_SNAPSHOT_WAIT_TIMEOUT).fuse();
-+        futures::pin_mut!(wait, deadline);
-+        futures::select_biased! {
-+            result = wait => result.map_err(|error| error.context(
-+                ErrorMetadata::rejected_before_execution(
-+                    "FunrunTailerExited", "funrun follower tailer exited",
-+                )
-+            )),
-+            _ = deadline => anyhow::bail!(ErrorMetadata::rejected_before_execution(
-+                "FunrunSnapshotTimeout", "funrun follower did not reach the requested snapshot",
-+            )),
 +        }
 +    }
 +
@@ -2148,7 +2157,6 @@ index 000000000..c3bbc802b
 +    pub last_load_error_unix_ts: Option<u64>,
 +}
 +
-+#[derive(Clone)]
 +pub struct SnapshotInputs {
 +    pub index_reader: Arc<dyn IndexReader>,
 +    pub bootstrap_metadata: BootstrapMetadata,
