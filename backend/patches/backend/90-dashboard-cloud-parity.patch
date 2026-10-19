@@ -30,10 +30,10 @@ index 6c018be51..58d9cf3f6 100644
        {children}
 diff --git a/npm-packages/dashboard-common/src/features/health/components/ChartForInsight.tsx b/npm-packages/dashboard-common/src/features/health/components/ChartForInsight.tsx
 new file mode 100644
-index 000000000..418c5fd01
+index 000000000..923f892bd
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/health/components/ChartForInsight.tsx
-@@ -0,0 +1,275 @@
+@@ -0,0 +1,277 @@
 +import {
 +  useInsightsPeriod,
 +  HourlyCount,
@@ -283,7 +283,7 @@ index 000000000..418c5fd01
 +      return "Invalid date";
 +    }
 +    const date = new Date(timestamp);
-+    return date.toLocaleDateString();
++    return date.toLocaleDateString(undefined, { timeZone: "UTC" });
 +  } catch (error) {
 +    console.error("Error in dateLabel:", error, value);
 +    return "Invalid date";
@@ -303,17 +303,19 @@ index 000000000..418c5fd01
 +    }
 +    const date = new Date(timestamp);
 +    const oneHourLater = new Date(date.getTime() + 60 * 60 * 1000);
-+    return `${format(date, "P")} ${format(date, "h a")} – ${format(oneHourLater, "h a")}`;
++    const hour = (d: Date) =>
++      d.toLocaleTimeString(undefined, { timeZone: "UTC", hour: "numeric" });
++    return `${date.toLocaleDateString(undefined, { timeZone: "UTC" })} ${hour(date)} – ${hour(oneHourLater)}`;
 +  } catch (error) {
 +    console.error("Error formatting date:", error, stringValue);
 +    return "Invalid date format";
 +  }
 +};
 diff --git a/npm-packages/dashboard-common/src/features/health/components/DeploymentSummary.tsx b/npm-packages/dashboard-common/src/features/health/components/DeploymentSummary.tsx
-index 1cdaae3b8..b51b755d3 100644
+index d9abe1961..2a9622ef2 100644
 --- a/npm-packages/dashboard-common/src/features/health/components/DeploymentSummary.tsx
 +++ b/npm-packages/dashboard-common/src/features/health/components/DeploymentSummary.tsx
-@@ -203,6 +203,9 @@ export function DeploymentSummary({
+@@ -215,6 +215,9 @@ export function DeploymentSummary({
    // ViewData-gated). When the panel is hidden, round all corners of
    // the main panel.
    const showUrlPanel = deployment.kind === "cloud" && canViewData;
@@ -323,7 +325,7 @@ index 1cdaae3b8..b51b755d3 100644
    const mainPanelRounding = showUrlPanel
      ? "rounded-l-lg rounded-tr-lg rounded-bl-none lg:flex-1 lg:rounded-tr-none lg:rounded-bl-lg"
      : "rounded-lg";
-@@ -243,9 +246,19 @@ export function DeploymentSummary({
+@@ -255,9 +258,19 @@ export function DeploymentSummary({
            </div>
  
            {/* Row 2: Region/Port + Class + Version */}
@@ -1051,10 +1053,10 @@ index 000000000..ef3c06896
 +}
 diff --git a/npm-packages/dashboard-common/src/features/health/components/HealthWithInsights.tsx b/npm-packages/dashboard-common/src/features/health/components/HealthWithInsights.tsx
 new file mode 100644
-index 000000000..712034709
+index 000000000..a5d025188
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/health/components/HealthWithInsights.tsx
-@@ -0,0 +1,284 @@
+@@ -0,0 +1,281 @@
 +import React, {
 +  useState,
 +  useCallback,
@@ -1264,8 +1266,7 @@ index 000000000..712034709
 +    >
 +      {children}
 +      <div
-+        // @ts-expect-error https://github.com/facebook/react/issues/17157
-+        inert={page !== "insights" ? "inert" : undefined}
++        inert={page !== "insights"}
 +        className="mb-6 flex w-full shrink-0 px-6"
 +      >
 +        <Sheet
@@ -1289,8 +1290,7 @@ index 000000000..712034709
 +        </Sheet>
 +      </div>
 +      <div
-+        // @ts-expect-error https://github.com/facebook/react/issues/17157
-+        inert={!page?.startsWith("insight:") ? "inert" : undefined}
++        inert={!page?.startsWith("insight:")}
 +        className="scrollbar flex w-full shrink-0 overflow-y-auto px-6"
 +      >
 +        <InsightSummaryBreakdown
@@ -1318,8 +1318,7 @@ index 000000000..712034709
 +  return (
 +    <div
 +      className="scrollbar flex w-full shrink-0 grow flex-col overflow-y-auto px-6 pb-4"
-+      // @ts-expect-error https://github.com/facebook/react/issues/17157
-+      inert={page !== "home" ? "inert" : undefined}
++      inert={page !== "home"}
 +    >
 +      {children}
 +      <SmallInsightsSummary onViewAll={onViewAll} />
@@ -1456,10 +1455,10 @@ index 000000000..12e644d62
 +}
 diff --git a/npm-packages/dashboard-common/src/features/health/components/InsightsSummaryBreakdown.tsx b/npm-packages/dashboard-common/src/features/health/components/InsightsSummaryBreakdown.tsx
 new file mode 100644
-index 000000000..fbb76b742
+index 000000000..c66e70950
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/health/components/InsightsSummaryBreakdown.tsx
-@@ -0,0 +1,62 @@
+@@ -0,0 +1,61 @@
 +import { Insight } from "@common/features/health/lib/insights";
 +import { Sheet } from "@ui/Sheet";
 +import { Loading } from "@ui/Loading";
@@ -1478,9 +1477,8 @@ index 000000000..fbb76b742
 +  insight?: Insight | null;
 +}) {
 +  const { nents } = useNents();
-+  const selectedNentId = nents?.find(
-+    (nent) => nent.path === insight?.componentPath,
-+  )?.id;
++  const selectedNentId =
++    nents?.find((nent) => nent.path === insight?.componentPath)?.id ?? null;
 +  const urlToSelectedFunction = useFunctionUrl(
 +    insight?.functionId || "",
 +    selectedNentId,
@@ -2050,16 +2048,18 @@ index 000000000..4005b536b
 +}
 diff --git a/npm-packages/dashboard-common/src/features/health/lib/insights.ts b/npm-packages/dashboard-common/src/features/health/lib/insights.ts
 new file mode 100644
-index 000000000..c5ae14dea
+index 000000000..d5346c4ba
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/health/lib/insights.ts
-@@ -0,0 +1,207 @@
+@@ -0,0 +1,211 @@
 +import { UrlObject } from "url";
 +import {
 +  rootComponentPath,
 +  useUsageQuery,
 +} from "@common/features/health/lib/usage";
 +import { useModuleFunctions } from "@common/lib/functions/FunctionsProvider";
++import { PermissionsContext } from "@common/lib/deploymentContext";
++import { useContext } from "react";
 +
 +const HOUR_MS = 60 * 60 * 1000;
 +const DAY_MS = 24 * HOUR_MS;
@@ -2183,11 +2183,10 @@ index 000000000..c5ae14dea
 +
 +export function useInsights(): Insight[] | undefined {
 +  const moduleFunctions = useModuleFunctions();
++  const { useIsOperationAllowed } = useContext(PermissionsContext);
++  const canViewData = useIsOperationAllowed("ViewData");
 +  const { period, data: insightsData, error } = useInsightsUsage();
-+  if (error) {
-+    return [];
-+  }
-+  if (!insightsData) {
++  if (error || !insightsData) {
 +    return undefined;
 +  }
 +  const insights = insightsData.flatMap((d) => {
@@ -2227,6 +2226,9 @@ index 000000000..c5ae14dea
 +    };
 +    return order[a.kind] - order[b.kind];
 +  });
++  if (!canViewData) {
++    return insights;
++  }
 +  return insights.filter((insight) =>
 +    moduleFunctions.some(
 +      (mf) =>
@@ -2263,10 +2265,10 @@ index 000000000..c5ae14dea
 +}
 diff --git a/npm-packages/dashboard-common/src/features/health/lib/usage.ts b/npm-packages/dashboard-common/src/features/health/lib/usage.ts
 new file mode 100644
-index 000000000..8c425293d
+index 000000000..49a749033
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/health/lib/usage.ts
-@@ -0,0 +1,45 @@
+@@ -0,0 +1,47 @@
 +import useSWR, { BareFetcher } from "swr";
 +import { deploymentAuthMiddleware } from "@common/lib/deploymentApi";
 +import { deploymentFetch } from "@common/lib/fetching";
@@ -2283,8 +2285,16 @@ index 000000000..8c425293d
 +    queryParams.set("from", period.from);
 +    queryParams.set("to", period.to);
 +  }
-+  const fetcher = deploymentFetch as BareFetcher<unknown[][]>;
-+  const result = useSWR<unknown[][]>(
++  const fetcher: BareFetcher<string[][]> = async (
++    key: readonly [string, ...unknown[]],
++  ) => {
++    const data = await deploymentFetch(key);
++    if (data === undefined) {
++      throw new Error("Insights request failed");
++    }
++    return data;
++  };
++  return useSWR<string[][]>(
 +    `/api/insights/usage/query?${queryParams.toString()}`,
 +    fetcher,
 +    {
@@ -2293,12 +2303,6 @@ index 000000000..8c425293d
 +      refreshInterval: USAGE_REFRESH_INTERVAL_MS,
 +    },
 +  );
-+  return {
-+    ...result,
-+    data: result.data?.map((row) => row.map((cell) => cell ?? "")) as
-+      | string[][]
-+      | undefined,
-+  };
 +}
 +
 +function getURLConfigInt(name: string, defaultValue: number) {
@@ -2314,10 +2318,10 @@ index 000000000..8c425293d
 +}
 diff --git a/npm-packages/dashboard-common/src/features/settings/components/backups/SnapshotExport.tsx b/npm-packages/dashboard-common/src/features/settings/components/backups/SnapshotExport.tsx
 new file mode 100644
-index 000000000..ae7cb5ee7
+index 000000000..767fa2945
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/settings/components/backups/SnapshotExport.tsx
-@@ -0,0 +1,131 @@
+@@ -0,0 +1,139 @@
 +import { DownloadIcon } from "@radix-ui/react-icons";
 +import { Button } from "@ui/Button";
 +import { Spinner } from "@ui/Spinner";
@@ -2327,7 +2331,10 @@ index 000000000..ae7cb5ee7
 +import { Fragment, useContext } from "react";
 +import { useQuery } from "convex/react";
 +import udfs from "@common/udfs";
-+import { DeploymentInfoContext } from "@common/lib/deploymentContext";
++import {
++  DeploymentInfoContext,
++  PermissionsContext,
++} from "@common/lib/deploymentContext";
 +import { CompletedExport } from "system-udfs/convex/_system/frontend/common";
 +
 +function LatestSnapshot({
@@ -2393,7 +2400,12 @@ index 000000000..ae7cb5ee7
 +}
 +
 +export function SnapshotExport() {
-+  const existingExport = useQuery(udfs.latestExport.default);
++  const { useIsOperationAllowed } = useContext(PermissionsContext);
++  const canViewBackups = useIsOperationAllowed("ViewBackups");
++  const existingExport = useQuery(
++    udfs.latestExport.default,
++    canViewBackups ? {} : "skip",
++  );
 +  const requestZipExport = useRequestZipExport();
 +  const inProgress =
 +    existingExport?.state === "requested" ||
@@ -2451,10 +2463,10 @@ index 000000000..ae7cb5ee7
 +}
 diff --git a/npm-packages/dashboard-common/src/features/settings/components/backups/SnapshotImport.tsx b/npm-packages/dashboard-common/src/features/settings/components/backups/SnapshotImport.tsx
 new file mode 100644
-index 000000000..9381c3948
+index 000000000..42e6cd6f1
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/settings/components/backups/SnapshotImport.tsx
-@@ -0,0 +1,430 @@
+@@ -0,0 +1,435 @@
 +import {
 +  CheckCircledIcon,
 +  CheckIcon,
@@ -2469,6 +2481,8 @@ index 000000000..9381c3948
 +import { Sheet } from "@ui/Sheet";
 +import { ConfirmationDialog } from "@ui/ConfirmationDialog";
 +import { useQuery } from "convex/react";
++import { useContext } from "react";
++import { PermissionsContext } from "@common/lib/deploymentContext";
 +import udfs from "@common/udfs";
 +import { Doc, Id } from "system-udfs/convex/_generated/dataModel";
 +import { formatDistanceStrict } from "date-fns";
@@ -2814,7 +2828,10 @@ index 000000000..9381c3948
 +}
 +
 +const useSnapshotImports = () => {
-+  const existingImports = useQuery(udfs.snapshotImport.list) ?? [];
++  const { useIsOperationAllowed } = useContext(PermissionsContext);
++  const canViewBackups = useIsOperationAllowed("ViewBackups");
++  const existingImports =
++    useQuery(udfs.snapshotImport.list, canViewBackups ? {} : "skip") ?? [];
 +  return existingImports.filter((s) => s.requestor.type === "snapshotImport");
 +};
 +
@@ -2930,10 +2947,10 @@ index 28ae40fc5..2d5875595 100644
  }
 diff --git a/npm-packages/dashboard-common/src/lib/snapshotApi.ts b/npm-packages/dashboard-common/src/lib/snapshotApi.ts
 new file mode 100644
-index 000000000..91c9a63ec
+index 000000000..e5ba5e851
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/lib/snapshotApi.ts
-@@ -0,0 +1,175 @@
+@@ -0,0 +1,186 @@
 +import { useCallback, useContext } from "react";
 +import { Id } from "system-udfs/convex/_generated/dataModel";
 +import { useAdminKey, useDeploymentUrl } from "@common/lib/deploymentApi";
@@ -2964,16 +2981,15 @@ index 000000000..91c9a63ec
 +          ...init,
 +          headers: { Authorization: `Convex ${adminKey}`, ...init.headers },
 +        });
++        if (res.ok) {
++          return res;
++        }
++        const err = await deploymentResponseError(res);
++        reportHttpError(init.method ?? "GET", res.url, err);
++        toast("error", err.message);
 +      } catch (e) {
 +        toast("error", e instanceof Error ? e.message : String(e));
-+        return null;
 +      }
-+      if (res.ok) {
-+        return res;
-+      }
-+      const err = await deploymentResponseError(res);
-+      reportHttpError(init.method ?? "GET", res.url, err);
-+      toast("error", err.message);
 +      return null;
 +    },
 +    [deploymentUrl, adminKey, reportHttpError],
@@ -2992,7 +3008,13 @@ index 000000000..91c9a63ec
 +      if (!res) {
 +        return;
 +      }
-+      const { token } = await res.json();
++      let token: string;
++      try {
++        ({ token } = await res.json());
++      } catch (e) {
++        toast("error", e instanceof Error ? e.message : String(e));
++        return;
++      }
 +      const anchor = document.createElement("a");
 +      anchor.href = `${deploymentUrl}${exportUrl}?${new URLSearchParams({ token })}`;
 +      document.body.appendChild(anchor);
@@ -3084,11 +3106,14 @@ index 000000000..91c9a63ec
 +  const checkedFetch = useCheckedDeploymentFetch();
 +  return useCallback(
 +    async (id: Id<"_snapshot_imports">) => {
-+      await checkedFetch("/api/cancel_import", {
++      const res = await checkedFetch("/api/cancel_import", {
 +        method: "POST",
 +        headers: { "Content-Type": "application/json" },
 +        body: JSON.stringify({ importId: id }),
 +      });
++      if (!res) {
++        throw new Error("import not cancelled");
++      }
 +    },
 +    [checkedFetch],
 +  );
@@ -3100,11 +3125,14 @@ index 000000000..91c9a63ec
 +  const checkedFetch = useCheckedDeploymentFetch();
 +  return useCallback(
 +    async (importId: Id<"_snapshot_imports">) => {
-+      await checkedFetch("/api/perform_import", {
++      const res = await checkedFetch("/api/perform_import", {
 +        method: "POST",
 +        headers: { "Content-Type": "application/json" },
 +        body: JSON.stringify({ importId }),
 +      });
++      if (!res) {
++        throw new Error("import not confirmed");
++      }
 +    },
 +    [checkedFetch],
 +  );
