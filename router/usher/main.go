@@ -51,10 +51,6 @@ const (
 	routesPerDeployment     = 2
 	maxHeaderBytes          = 64 * 1024
 	proxyBufferSize         = 32 * 1024
-	defaultConnIdle         = time.Hour
-	connWatchFloor          = 10 * time.Millisecond
-	connWatchCeil           = time.Minute
-	connWatchDivisor        = 4
 )
 
 var (
@@ -241,7 +237,7 @@ func (t *tracker) applyLeader(lr leaderResponse, fromPoll bool) bool {
 	defer t.mu.Unlock()
 	if lr.Epoch != t.lastEpoch {
 		if !fromPoll {
-			t.nudgeResolve()
+			t.wakeResolve()
 			return false
 		}
 		t.lastEpoch = lr.Epoch
@@ -627,15 +623,11 @@ func main() {
 	if err = dec.Decode(&cfg); err != nil {
 		log.Fatalf("parse config: %v", err)
 	}
+	if _, err = dec.Token(); !errors.Is(err, io.EOF) {
+		log.Fatalf("parse config: trailing data after the configuration object")
+	}
 	if err = validateConfig(cfg, *bigbrainURL, *mono); err != nil {
 		log.Fatalf("invalid config: %v", err)
-	}
-	connIdle, err := parseConnIdle(os.Getenv("USHER_CONN_IDLE_TIMEOUT"))
-	if err != nil {
-		log.Fatalf("invalid USHER_CONN_IDLE_TIMEOUT: %v", err)
-	}
-	if connIdle == 0 {
-		log.Print("usher: connection idle watchdog disabled (USHER_CONN_IDLE_TIMEOUT=0)")
 	}
 	maxBody, err := parseMaxBodyBytes(os.Getenv("USHER_MAX_BODY_BYTES"))
 	if err != nil {
@@ -649,17 +641,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("usher: listen %s: %v", *addr, err)
 	}
-	os.Exit(run(cfg, *addr, *bigbrainURL, connIdle, maxBody, *mono, rawLn))
+	os.Exit(run(cfg, *addr, *bigbrainURL, maxBody, *mono, rawLn))
 }
 
-func run(
-	cfg config,
-	addr, bigbrainURL string,
-	connIdle time.Duration,
-	maxBody int64,
-	mono bool,
-	rawLn net.Listener,
-) int {
+func run(cfg config, addr, bigbrainURL string, maxBody int64, mono bool, ln net.Listener) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	client := &http.Client{Transport: newControlPlaneTransport()}
@@ -680,17 +665,10 @@ func run(
 	//nolint:gosec // operator-configured values, not request data
 	log.Printf("usher listening on %s, %d deployment(s), bigbrain=%q", addr, len(cfg.Deployments), bigbrainURL)
 	srv := &http.Server{
-		Addr:              addr,
 		Handler:           newMux(routes, trackers, monoHost),
 		ReadHeaderTimeout: readHeaderTimeout,
 		IdleTimeout:       idleTimeout,
 		MaxHeaderBytes:    maxHeaderBytes,
-	}
-	ln := rawLn
-	if connIdle > 0 {
-		//nolint:gosec // a parsed time.Duration, not attacker-controlled text
-		log.Printf("usher: closing connections with no read/write progress for %s", connIdle.String())
-		ln = &activityListener{Listener: ln, idle: connIdle, ctx: ctx}
 	}
 	serveErr := make(chan error, 1)
 	go func() {
@@ -714,85 +692,6 @@ func run(
 		return 1
 	}
 	return 0
-}
-
-type activityListener struct {
-	net.Listener
-
-	idle    time.Duration
-	ctx     context.Context
-	killLog logThrottle
-}
-
-func (l *activityListener) Accept() (net.Conn, error) {
-	c, err := l.Listener.Accept()
-	if err != nil {
-		return nil, err
-	}
-	ac := newActivityConn(c)
-	go ac.watch(l.ctx, l.idle, &l.killLog)
-	return ac, nil
-}
-
-type activityConn struct {
-	net.Conn
-
-	last      atomic.Int64
-	closed    chan struct{}
-	closeOnce sync.Once
-}
-
-func newActivityConn(c net.Conn) *activityConn {
-	ac := &activityConn{Conn: c, closed: make(chan struct{})}
-	ac.touch()
-	return ac
-}
-
-func (c *activityConn) touch() {
-	c.last.Store(time.Now().UnixNano())
-}
-
-func (c *activityConn) Read(b []byte) (int, error) {
-	n, err := c.Conn.Read(b)
-	if n > 0 {
-		c.touch()
-	}
-	return n, err
-}
-
-func (c *activityConn) Write(b []byte) (int, error) {
-	n, err := c.Conn.Write(b)
-	if n > 0 {
-		c.touch()
-	}
-	return n, err
-}
-
-func (c *activityConn) Close() error {
-	c.closeOnce.Do(func() { close(c.closed) })
-	return c.Conn.Close()
-}
-
-func (c *activityConn) watch(ctx context.Context, idle time.Duration, killLog *logThrottle) {
-	tick := min(max(idle/connWatchDivisor, connWatchFloor), connWatchCeil)
-	t := time.NewTicker(tick)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-c.closed:
-			return
-		case <-t.C:
-			if time.Since(time.Unix(0, c.last.Load())) > idle {
-				if killLog.allow() {
-					log.Printf("usher: closing connection %s: no progress for %s", c.RemoteAddr(), idle)
-				}
-				_ = c.Close()
-				return
-			}
-		}
-	}
 }
 
 func validateConfig(cfg config, bigbrainURL string, mono bool) error {
@@ -846,20 +745,6 @@ func validateHost(host string) error {
 		return fmt.Errorf("deployment host %q must be a bare hostname", host)
 	}
 	return nil
-}
-
-func parseConnIdle(v string) (time.Duration, error) {
-	if v == "" {
-		return defaultConnIdle, nil
-	}
-	d, err := time.ParseDuration(v)
-	if err != nil {
-		return 0, fmt.Errorf("parse %q: %w", v, err)
-	}
-	if d < 0 {
-		return 0, fmt.Errorf("must be >= 0, got %s", d)
-	}
-	return d, nil
 }
 
 func parseMaxBodyBytes(v string) (int64, error) {

@@ -2,14 +2,12 @@ package main
 
 import (
 	"context"
-	"errors"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
-	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -756,42 +754,6 @@ func TestConsumeStream_IdleWatchdogCancelsSilentStream(t *testing.T) {
 	}
 	if got := leaderSnapshot(tr); got != "http://10.0.0.8:3210" {
 		t.Fatalf("leader=%q want the event applied before the stream went silent", got)
-	}
-}
-
-func TestActivityConn_ClosesIdleAndSparesActive(t *testing.T) {
-	t.Parallel()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	al := &activityListener{Listener: ln, idle: 200 * time.Millisecond, ctx: t.Context()}
-	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}), ReadHeaderTimeout: time.Minute}
-	go func() { _ = srv.Serve(al) }()
-	defer func() { _ = srv.Close() }()
-	idle, err := net.Dial("tcp", ln.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = idle.Close() }()
-	_ = idle.SetReadDeadline(time.Now().Add(2 * time.Second))
-	buf := make([]byte, 1)
-	if _, rerr := idle.Read(buf); rerr == nil || errors.Is(rerr, os.ErrDeadlineExceeded) {
-		t.Fatalf("idle connection should have been closed by the watchdog, got %v", rerr)
-	}
-	active, err := net.Dial("tcp", ln.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = active.Close() }()
-	deadline := time.Now().Add(600 * time.Millisecond)
-	for time.Now().Before(deadline) {
-		if _, werr := active.Write([]byte("X")); werr != nil {
-			t.Fatalf("active connection was closed despite progress: %v", werr)
-		}
-		time.Sleep(50 * time.Millisecond)
 	}
 }
 
