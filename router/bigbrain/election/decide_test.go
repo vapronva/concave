@@ -16,7 +16,7 @@ const (
 func obs(pod string, isLeader bool, latestTS uint64, lease int64) observation {
 	o := observation{
 		be:     k8sclient.Backend{Pod: pod, URL: "http://" + pod + ":3210"},
-		status: backend.Leadership{IsLeader: isLeader, LatestTS: latestTS},
+		status: backend.Leadership{IsLeader: isLeader, LatestTS: latestTS, TailerHealthy: true},
 		reach:  true,
 	}
 	if lease >= 0 {
@@ -36,7 +36,7 @@ func unreachable(pod string) observation {
 }
 
 func withTailer(o observation, healthy bool) observation {
-	o.status.TailerHealthy = &healthy
+	o.status.TailerHealthy = healthy
 	return o
 }
 

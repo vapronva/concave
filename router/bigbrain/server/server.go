@@ -20,7 +20,7 @@ import (
 
 const (
 	keepaliveInterval = 25 * time.Second
-	usageBodyLimit    = 4 * 1024 * 1024
+	usageBodyLimit    = 16 * 1024 * 1024
 	writeTimeout      = 10 * time.Second
 	keepaliveFrame    = ": keepalive\n\n"
 )
@@ -139,12 +139,7 @@ func (s *Server) handleUsageQuery(w http.ResponseWriter, r *http.Request) {
 	}
 	out, err := s.ins.Query(dep, from, to)
 	if err != nil {
-		if errors.Is(err, insights.ErrBadDate) || errors.Is(err, insights.ErrBadDateRange) {
-			writeErr(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		s.log.ErrorContext(r.Context(), "usage query failed", "deployment", dep, "err", err)
-		writeErr(w, http.StatusInternalServerError, "query failed")
+		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -186,6 +181,11 @@ func (s *Server) handleLeaderStream(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "unknown deployment "+name)
 		return
 	}
+	if r.Method == http.MethodHead {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 	ch, cancel, ok := s.reg.Subscribe(name)
 	if !ok {
 		writeErr(w, http.StatusServiceUnavailable, "too many leader-stream subscribers")
@@ -195,6 +195,7 @@ func (s *Server) handleLeaderStream(w http.ResponseWriter, r *http.Request) {
 	rc := http.NewResponseController(w)
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
+	_ = rc.SetWriteDeadline(time.Now().Add(writeTimeout))
 	w.WriteHeader(http.StatusOK)
 	if rc.Flush() != nil {
 		return
@@ -229,6 +230,7 @@ func (s *Server) handleLeaderStream(w http.ResponseWriter, r *http.Request) {
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(writeTimeout))
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(v)
@@ -251,26 +253,13 @@ func emitFrame(w http.ResponseWriter, rc *http.ResponseController, frame []byte)
 	return rc.Flush() == nil
 }
 
-func quietPattern(pattern string) bool {
-	switch pattern {
-	case "GET /healthz",
-		"GET /readyz",
-		"GET /registry/deployments/{name}/leader",
-		"GET /registry/deployments/{name}/leader-stream",
-		"POST /internal/usage":
-		return true
-	default:
-		return false
-	}
-}
-
 func logging(log *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(sw, r)
 		level := slog.LevelInfo
-		if quietPattern(r.Pattern) && sw.status < http.StatusBadRequest {
+		if sw.status < http.StatusBadRequest {
 			level = slog.LevelDebug
 		}
 		if !log.Enabled(r.Context(), level) {

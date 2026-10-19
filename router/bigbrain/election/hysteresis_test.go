@@ -28,13 +28,13 @@ func TestActLeaderless_RetainsLastKnownLeaderDuringHysteresis(t *testing.T) {
 	}
 	leaderless := decision{liveLeaderCount: 0}
 	for streak := 1; streak < debounce; streak++ {
-		c.act(ctx, "dev", st, leaderless, streak, false)
+		c.act(ctx, "dev", st, leaderless, streak, false, time.Now())
 		if pod, ok := leaderOf(t, reg, "dev"); !ok || pod != "backend-0" {
 			t.Fatalf("streak %d < debounce %d: last-known leader must be retained, got %q ok=%v",
 				streak, debounce, pod, ok)
 		}
 	}
-	c.act(ctx, "dev", st, leaderless, debounce, false)
+	c.act(ctx, "dev", st, leaderless, debounce, false, time.Now())
 	if _, ok := leaderOf(t, reg, "dev"); ok {
 		t.Fatalf("streak == debounce %d: leader must be cleared", debounce)
 	}
@@ -49,7 +49,7 @@ func TestActLeaderless_RetainsUnreachableIncumbentWithinGrace(t *testing.T) {
 	st := c.deploymentState("dev")
 	c.setLeader("dev", st, "backend-0", "http://10.0.0.1:3210")
 	leaderless := decision{liveLeaderCount: 0, incumbentUnreachable: true, promoteTarget: &observation{}}
-	c.act(context.Background(), "dev", st, leaderless, debounce, true)
+	c.act(context.Background(), "dev", st, leaderless, debounce, true, time.Now())
 	if pod, ok := leaderOf(t, reg, "dev"); !ok || pod != "backend-0" {
 		t.Fatalf("unreachable incumbent within grace must be retained even at debounce, got %q ok=%v", pod, ok)
 	}
@@ -76,6 +76,9 @@ func TestCommitState_UnreachableIncumbentGraceExpiry(t *testing.T) {
 	reachable := decision{liveLeaderCount: 0, incumbentUnreachable: false}
 	if _, _, retain := c.commitState(st, reachable, false, base.Add(62*time.Second)); retain {
 		t.Fatal("a reachable/absent incumbent must reset retain")
+	}
+	if _, _, retain := c.commitState(st, d, false, base.Add(63*time.Second)); !retain {
+		t.Fatal("an incumbent that drops out again after the reset gets a fresh grace window")
 	}
 }
 
@@ -160,7 +163,7 @@ func TestActLeaderless_RetainsLeaderWhenPromotionBlockedByInflight(t *testing.T)
 	c.setLeader("prod", st, "backend-0", "http://10.0.0.1:3210")
 	st.promoting = true
 	d := decision{liveLeaderCount: 0, promoteTarget: &observation{}}
-	c.actLeaderless(context.Background(), "prod", st, d, debounce, false)
+	c.actLeaderless(context.Background(), "prod", st, d, debounce, false, time.Now())
 	if pod, ok := leaderOf(t, reg, "prod"); !ok || pod != "backend-0" {
 		t.Fatalf("promotion blocked by inflight must retain last-known leader, got %q ok=%v", pod, ok)
 	}

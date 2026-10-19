@@ -25,6 +25,7 @@ type decision struct {
 
 type failbackState struct {
 	candidate     string
+	restarts      int32
 	eligibleSince time.Time
 }
 
@@ -63,11 +64,7 @@ func anyTransitioning(obs []observation) bool {
 }
 
 func isPromotable(o observation) bool {
-	return o.reach && !o.status.IsLeader && !isTransitioning(o) && tailerHealthy(o)
-}
-
-func tailerHealthy(o observation) bool {
-	return o.status.TailerHealthy == nil || *o.status.TailerHealthy
+	return o.reach && !o.status.IsLeader && !isTransitioning(o) && o.status.TailerHealthy
 }
 
 func incumbentDiscoveredUnreachable(obs []observation, incumbent string) bool {
@@ -184,7 +181,9 @@ func decide(obs []observation, p decideParams) decision {
 }
 
 func retainedFailback(obs []observation, prior failbackState) failbackState {
-	isCandidate := func(o observation) bool { return o.be.Pod == prior.candidate && isPromotable(o) }
+	isCandidate := func(o observation) bool {
+		return o.be.Pod == prior.candidate && o.be.Restarts == prior.restarts && isPromotable(o)
+	}
 	if slices.ContainsFunc(obs, isCandidate) {
 		return prior
 	}
@@ -204,10 +203,10 @@ func evaluateFailback(
 		return nil, failbackState{}
 	}
 	since := p.now
-	if p.prior.candidate == cand.be.Pod && !p.prior.eligibleSince.IsZero() {
+	if p.prior.candidate == cand.be.Pod && p.prior.restarts == cand.be.Restarts && !p.prior.eligibleSince.IsZero() {
 		since = p.prior.eligibleSince
 	}
-	st := failbackState{candidate: cand.be.Pod, eligibleSince: since}
+	st := failbackState{candidate: cand.be.Pod, restarts: cand.be.Restarts, eligibleSince: since}
 	if p.now.Sub(since) >= p.stabilityWindow {
 		return &cand, st
 	}

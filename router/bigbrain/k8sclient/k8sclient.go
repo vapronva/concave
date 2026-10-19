@@ -18,6 +18,7 @@ const (
 	labelDeployment = labelPrefix + "/instance"
 	labelRole       = labelPrefix + "/role"
 	LabelComponent  = labelPrefix + "/component"
+	containerName   = "backend"
 )
 
 const (
@@ -74,24 +75,24 @@ func (c *Client) DiscoverBackends(ctx context.Context, ns, name string) ([]Backe
 		if p.Status.Phase == corev1.PodFailed || p.Status.Phase == corev1.PodSucceeded {
 			continue
 		}
-		role := p.Labels[labelRole]
 		out = append(out, Backend{
 			Pod:      p.Name,
 			URL:      fmt.Sprintf("http://%s", net.JoinHostPort(p.Status.PodIP, strconv.Itoa(BackendPort))),
-			Priority: priorityFor(role),
-			Restarts: containerRestarts(p),
+			Priority: priorityFor(p.Labels[labelRole]),
+			Restarts: backendRestarts(p),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Pod < out[j].Pod })
 	return out, nil
 }
 
-func containerRestarts(p *corev1.Pod) int32 {
-	var n int32
+func backendRestarts(p *corev1.Pod) int32 {
 	for _, cs := range p.Status.ContainerStatuses {
-		n += cs.RestartCount
+		if cs.Name == containerName {
+			return cs.RestartCount
+		}
 	}
-	return n
+	return 0
 }
 
 func priorityFor(role string) int {

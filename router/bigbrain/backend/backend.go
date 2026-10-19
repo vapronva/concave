@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptrace"
 	"strconv"
+	"sync/atomic"
 )
 
 type Leadership struct {
@@ -16,7 +18,7 @@ type Leadership struct {
 	LatestTS            uint64  `json:"latest_ts"`
 	LeaseTS             *uint64 `json:"lease_ts"`
 	LeaseUnverifiedSecs *uint64 `json:"lease_unverified_secs"`
-	TailerHealthy       *bool   `json:"tailer_healthy"`
+	TailerHealthy       bool    `json:"tailer_healthy"`
 }
 
 const (
@@ -57,7 +59,7 @@ func (c *Client) Leadership(ctx context.Context, base string) (Leadership, error
 	return l, nil
 }
 
-func (c *Client) Promote(ctx context.Context, deployment, base string) (int, error) {
+func (c *Client) Promote(ctx context.Context, deployment, base string) (int, bool, error) {
 	return c.post(ctx, deployment, base+"/instance/promote")
 }
 
@@ -66,17 +68,26 @@ func (c *Client) Demote(ctx context.Context, deployment, base string, leaseTS *u
 	if leaseTS != nil {
 		url += "?lease_ts=" + strconv.FormatUint(*leaseTS, 10)
 	}
-	return c.post(ctx, deployment, url)
+	status, _, err := c.post(ctx, deployment, url)
+	return status, err
 }
 
-func (c *Client) post(ctx context.Context, deployment, url string) (int, error) {
+func (c *Client) post(ctx context.Context, deployment, url string) (int, bool, error) {
+	var wrote atomic.Bool
+	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+		GetConn:      func(string) { wrote.Store(false) },
+		WroteRequest: func(info httptrace.WroteRequestInfo) { wrote.Store(info.Err == nil) },
+	})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	c.setControlPlaneToken(req, deployment)
 	status, _, err := do(c.http, req)
-	return status, err
+	if status == 0 {
+		return 0, wrote.Load(), err
+	}
+	return status, true, nil
 }
 
 func do(hc *http.Client, req *http.Request) (int, []byte, error) {
@@ -87,7 +98,7 @@ func do(hc *http.Client, req *http.Request) (int, []byte, error) {
 	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
 	if err != nil {
-		return 0, nil, err
+		return resp.StatusCode, nil, err
 	}
 	return resp.StatusCode, body, nil
 }

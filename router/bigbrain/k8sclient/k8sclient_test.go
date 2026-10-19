@@ -70,7 +70,10 @@ func TestDiscoverBackends_SkipsTerminalPods(t *testing.T) {
 	t.Parallel()
 	const prefix = "convex"
 	running := pod(prefix, "backend-0", "leader", "backend", "10.0.0.1", true)
-	running.Status.ContainerStatuses = []corev1.ContainerStatus{{RestartCount: 2}}
+	running.Status.ContainerStatuses = []corev1.ContainerStatus{
+		{Name: "istio-proxy", RestartCount: 5},
+		{Name: "backend", RestartCount: 2},
+	}
 	failed := pod(prefix, "backend-1", "follower", "backend", "10.0.0.2", false)
 	failed.Status.Phase = corev1.PodFailed
 	succeeded := pod(prefix, "backend-2", "follower", "backend", "10.0.0.3", false)

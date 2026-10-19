@@ -41,7 +41,7 @@ func (p *FunrunProvider) GetMetricByName(
 	info provider.CustomMetricInfo,
 	metricSelector labels.Selector,
 ) (*custom_metrics.MetricValue, error) {
-	if info.Metric != MetricName || info.GroupResource.Resource != podsResource {
+	if info.Metric != MetricName || info.GroupResource != (schema.GroupResource{Resource: podsResource}) {
 		return nil, provider.NewMetricNotFoundError(info.GroupResource, info.Metric)
 	}
 	if !matchesUnlabeledMetric(metricSelector) {
@@ -69,7 +69,7 @@ func (p *FunrunProvider) GetMetricBySelector(
 	info provider.CustomMetricInfo,
 	metricSelector labels.Selector,
 ) (*custom_metrics.MetricValueList, error) {
-	if info.Metric != MetricName || info.GroupResource.Resource != podsResource {
+	if info.Metric != MetricName || info.GroupResource != (schema.GroupResource{Resource: podsResource}) {
 		return nil, provider.NewMetricNotFoundError(info.GroupResource, info.Metric)
 	}
 	if !matchesUnlabeledMetric(metricSelector) {

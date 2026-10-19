@@ -80,7 +80,7 @@ func run() int {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	metricsDone, apiserverErr := startMetricsAPIServer(ctx, stop, k8s, reg, log)
+	metricsDone, apiserverFailed := startMetricsAPIServer(ctx, stop, k8s, reg, log)
 	ctrlDone := runController(ctx, ctrl)
 	serveErr := make(chan error, 1)
 	go func() {
@@ -100,7 +100,7 @@ func run() int {
 		return 1
 	}
 	select {
-	case <-apiserverErr:
+	case <-apiserverFailed:
 		return 1
 	default:
 	}
@@ -189,7 +189,7 @@ func startMetricsAPIServer(
 	k8s *k8sclient.Client,
 	reg *registry.Registry,
 	log *slog.Logger,
-) (<-chan struct{}, <-chan error) {
+) (<-chan struct{}, <-chan struct{}) {
 	if !envBool("BIGBRAIN_METRICS_APISERVER_ENABLED", false) {
 		return nil, nil
 	}
@@ -219,11 +219,11 @@ func startMetricsAPIServer(
 	wg.Go(func() {
 		apiserver.NewScraper(k8s.Clientset(), namespaces, prov, metricsScrapeInterval, log).Run(ctx)
 	})
-	apiserverErr := make(chan error, 1)
+	apiserverFailed := make(chan struct{})
 	wg.Go(func() {
 		if aerr := apiserver.Run(ctx, cfg, prov, log); aerr != nil {
 			log.ErrorContext(ctx, "bigbrain: custom-metrics apiserver exited", "err", aerr)
-			apiserverErr <- aerr
+			close(apiserverFailed)
 			stop()
 		}
 	})
@@ -233,7 +233,7 @@ func startMetricsAPIServer(
 		close(done)
 	}()
 	log.InfoContext(ctx, "bigbrain: custom-metrics apiserver enabled", "port", cfg.SecurePort)
-	return done, apiserverErr
+	return done, apiserverFailed
 }
 
 func runController(ctx context.Context, ctrl *election.Controller) <-chan struct{} {
@@ -249,16 +249,28 @@ func loadDeploymentTokens(deployments []deploymentRef) (map[string]string, map[s
 	controlPlaneTokens := make(map[string]string, len(deployments))
 	usageTokens := make(map[string]string, len(deployments))
 	for i, d := range deployments {
-		token := env(fmt.Sprintf("BIGBRAIN_CONTROL_PLANE_TOKEN_%d", i), "")
+		name := fmt.Sprintf("BIGBRAIN_CONTROL_PLANE_TOKEN_%d", i)
+		token := env(name, "")
 		if token == "" {
-			return nil, nil, fmt.Errorf("deployment %s (index %d) has no BIGBRAIN_CONTROL_PLANE_TOKEN_%d", d.name, i, i)
+			return nil, nil, fmt.Errorf("deployment %s (index %d) has no %s", d.name, i, name)
+		}
+		if !headerSafe(token) {
+			return nil, nil, fmt.Errorf("%s contains whitespace or control characters", name)
 		}
 		controlPlaneTokens[d.name] = token
-		if usage := env(fmt.Sprintf("BIGBRAIN_USAGE_TOKEN_%d", i), ""); usage != "" {
+		name = fmt.Sprintf("BIGBRAIN_USAGE_TOKEN_%d", i)
+		if usage := env(name, ""); usage != "" {
+			if !headerSafe(usage) {
+				return nil, nil, fmt.Errorf("%s contains whitespace or control characters", name)
+			}
 			usageTokens[d.name] = usage
 		}
 	}
 	return controlPlaneTokens, usageTokens, nil
+}
+
+func headerSafe(token string) bool {
+	return !strings.ContainsFunc(token, func(r rune) bool { return r <= ' ' || r == 0x7f })
 }
 
 type deploymentRef struct{ name, namespace string }

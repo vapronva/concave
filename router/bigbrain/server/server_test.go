@@ -198,7 +198,7 @@ func TestServer_UsageIngestOversizedTrailingBytesIs413(t *testing.T) {
 	t.Parallel()
 	reg, h := newTestServer(t)
 	reg.EnsureDeployment("dev", "convex-dev")
-	const limit = 4 * 1024 * 1024
+	const limit = 16 * 1024 * 1024
 	head := `{"deployment":"dev","read_limits":{"documents":1,"bytes":1,"warning_ratio":1},"events":[],"pad":"`
 	tail := `"}`
 	body := head + strings.Repeat("x", limit-len(head)-len(tail)) + tail + "\n"

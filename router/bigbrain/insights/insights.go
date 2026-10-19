@@ -6,19 +6,14 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 )
 
 const (
 	rootComponent              = "-root-component-"
-	groupSep                   = "\x1f"
 	maxRecentPerGroup          = 50
 	inclusiveEndHours          = 24
-	occKeyPartsCount           = 4
-	readKeyPartsCount          = 2
-	sortKeyFields              = 3
 	kindOCC                    = "occ"
 	kindRead                   = "read"
 	kindOCCRetried             = "occRetried"
@@ -175,22 +170,20 @@ func (i *Insights) Query(deployment, fromDate, toDate string) ([][]any, error) {
 }
 
 func rowLess(a, b []any) bool {
-	for i := range sortKeyFields {
+	for i := range min(len(a), len(b)) {
 		as, bs := fmt.Sprint(a[i]), fmt.Sprint(b[i])
 		if as != bs {
 			return as < bs
 		}
 	}
-	return false
+	return len(a) < len(b)
 }
 
 func aggregateOCC(rows []Row) [][]any {
 	groups := groupByOCC(rows)
 	out := make([][]any, 0, len(groups))
 	for key, grp := range groups {
-		parts := strings.SplitN(key, groupSep, occKeyPartsCount)
-		udfID, comp, occTable, kind := parts[0], parts[1], parts[2], parts[3]
-		out = append(out, buildOCCRow(udfID, comp, occTable, kind, grp))
+		out = append(out, buildOCCRow(key.udfID, key.comp, key.table, key.kind, grp))
 	}
 	return out
 }
@@ -229,19 +222,21 @@ func buildOCCRow(udfID, comp, occTable, kind string, grp []Row) []any {
 	return []any{kind, udfID, comp, string(mustJSON(body))}
 }
 
-func groupByOCC(rows []Row) map[string][]Row {
-	g := make(map[string][]Row)
+type occKey struct {
+	udfID, comp, table, kind string
+}
+
+func groupByOCC(rows []Row) map[occKey][]Row {
+	g := make(map[occKey][]Row)
 	for _, r := range rows {
 		if r.Kind != kindOCC {
 			continue
 		}
-		comp := derefOr(r.ComponentPath, rootComponent)
-		occTbl := derefOr(r.OCCTableName, "")
 		kind := kindOCCRetried
 		if r.OCCFailedPermanently {
 			kind = kindOCCFailedPermanent
 		}
-		key := strings.Join([]string{r.UDFID, comp, occTbl, kind}, groupSep)
+		key := occKey{r.UDFID, derefOr(r.ComponentPath, rootComponent), derefOr(r.OCCTableName, ""), kind}
 		g[key] = append(g[key], r)
 	}
 	return g
@@ -251,8 +246,7 @@ func aggregateRead(rows []Row, limits ReadLimits) [][]any {
 	groups := groupByRead(rows)
 	out := make([][]any, 0)
 	for key, grp := range groups {
-		parts := strings.SplitN(key, groupSep, readKeyPartsCount)
-		udfID, comp := parts[0], parts[1]
+		udfID, comp := key.udfID, key.comp
 		bytes := readDimension{
 			limit:         limits.Bytes,
 			threshold:     limits.threshold(limits.Bytes),
@@ -352,14 +346,17 @@ func readRecent(grp []Row) []map[string]any {
 	return recent
 }
 
-func groupByRead(rows []Row) map[string][]Row {
-	g := make(map[string][]Row)
+type readKey struct {
+	udfID, comp string
+}
+
+func groupByRead(rows []Row) map[readKey][]Row {
+	g := make(map[readKey][]Row)
 	for _, r := range rows {
 		if r.Kind != kindRead {
 			continue
 		}
-		comp := derefOr(r.ComponentPath, rootComponent)
-		key := r.UDFID + groupSep + comp
+		key := readKey{r.UDFID, derefOr(r.ComponentPath, rootComponent)}
 		g[key] = append(g[key], r)
 	}
 	return g

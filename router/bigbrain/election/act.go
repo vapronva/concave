@@ -3,6 +3,7 @@ package election
 import (
 	"context"
 	"net/http"
+	"time"
 )
 
 func (c *Controller) act(
@@ -12,9 +13,10 @@ func (c *Controller) act(
 	d decision,
 	streak int,
 	retain bool,
+	pollStart time.Time,
 ) {
 	if d.liveLeaderCount == 0 {
-		c.actLeaderless(ctx, name, st, d, streak, retain)
+		c.actLeaderless(ctx, name, st, d, streak, retain, pollStart)
 		return
 	}
 	if len(d.demotes) > 0 {
@@ -24,7 +26,7 @@ func (c *Controller) act(
 	c.setLeader(name, st, d.leaderPod, d.leaderURL)
 	c.demoteAll(ctx, name, st, d.demotes)
 	if d.failbackTarget != nil {
-		c.actFailback(ctx, name, st, d.leaderPod, *d.failbackTarget)
+		c.actFailback(ctx, name, st, d.leaderPod, *d.failbackTarget, pollStart)
 	}
 }
 
@@ -34,8 +36,9 @@ func (c *Controller) actFailback(
 	st *deploymentState,
 	incumbent string,
 	target observation,
+	pollStart time.Time,
 ) {
-	if !c.tryAcquire(&st.promoting) {
+	if !c.tryAcquirePromote(st, pollStart) {
 		return
 	}
 	base := context.WithoutCancel(ctx)
@@ -71,6 +74,7 @@ func (c *Controller) actLeaderless(
 	d decision,
 	streak int,
 	retain bool,
+	pollStart time.Time,
 ) {
 	if streak < c.cfg.PromoteDebounce {
 		c.log.DebugContext(ctx, "election: leaderless, retaining last-known leader during hysteresis",
@@ -93,7 +97,7 @@ func (c *Controller) actLeaderless(
 			"deployment", name, "streak", streak)
 		return
 	}
-	if !c.tryAcquire(&st.promoting) {
+	if !c.tryAcquirePromote(st, pollStart) {
 		return
 	}
 	c.setLeader(name, st, "", "")
@@ -111,14 +115,17 @@ func (c *Controller) actLeaderless(
 func (c *Controller) promoteAndLog(base context.Context, name, kind string, st *deploymentState, target observation) {
 	actx, cancel := context.WithTimeout(base, c.cfg.ActuationTimeout)
 	defer cancel()
-	code, err := c.backend.Promote(actx, name, target.be.URL)
+	code, delivered, err := c.backend.Promote(actx, name, target.be.URL)
 	if err != nil {
+		if delivered {
+			c.markTransitioning(st, target.be.Pod)
+		}
 		c.log.ErrorContext(base, "election: "+kind+" failed", "deployment", name, "pod", target.be.Pod, "err", err)
 		return
 	}
 	switch code {
 	case http.StatusOK, http.StatusAccepted:
-		c.markTransitioning(st, target.be)
+		c.markTransitioning(st, target.be.Pod)
 		c.log.InfoContext(base, "election: "+kind+" accepted",
 			"deployment", name, "pod", target.be.Pod, "status", code)
 	case http.StatusForbidden:
@@ -190,6 +197,21 @@ func (c *Controller) tryAcquire(flag *bool) bool {
 		return false
 	}
 	*flag = true
+	return true
+}
+
+func (c *Controller) tryAcquirePromote(st *deploymentState, pollStart time.Time) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if st.promoting {
+		return false
+	}
+	for _, seen := range st.transitioningSeen {
+		if seen.After(pollStart) {
+			return false
+		}
+	}
+	st.promoting = true
 	return true
 }
 

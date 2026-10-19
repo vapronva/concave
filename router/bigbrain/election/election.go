@@ -70,12 +70,7 @@ type deploymentState struct {
 	demoting                  bool
 	discoveryDown             bool
 	failback                  failbackState
-	transitioningSeen         map[string]transitionMemory
-}
-
-type transitionMemory struct {
-	seen     time.Time
-	restarts int32
+	transitioningSeen         map[string]time.Time
 }
 
 func New(cfg Config, k8s *k8sclient.Client, b *backend.Client, reg *registry.Registry, log *slog.Logger) *Controller {
@@ -172,9 +167,10 @@ func (c *Controller) reconcile(ctx context.Context, name string) {
 	if c.setDiscoveryDown(st, false) {
 		c.log.InfoContext(ctx, "election: discovery recovered", "deployment", name)
 	}
+	pollStart := time.Now()
 	obs := c.pollAll(ctx, name, pods)
 	now := time.Now()
-	c.rememberTransitions(st, obs, now)
+	c.rememberTransitions(st, obs, pollStart)
 	dec := decide(obs, decideParams{
 		incumbent:            st.incumbentPod,
 		leaseUnverifiedGrace: c.cfg.LeaseUnverifiedGrace,
@@ -191,7 +187,7 @@ func (c *Controller) reconcile(ctx context.Context, name string) {
 		c.actEmptyDiscovery(ctx, name, ns, st, emptyStreak)
 		return
 	}
-	c.act(ctx, name, st, dec, streak, retain)
+	c.act(ctx, name, st, dec, streak, retain, pollStart)
 }
 
 func (c *Controller) setDiscoveryDown(st *deploymentState, down bool) bool {
@@ -207,39 +203,41 @@ func (c *Controller) setDiscoveryDown(st *deploymentState, down bool) bool {
 	return true
 }
 
-func (c *Controller) rememberTransitions(st *deploymentState, obs []observation, now time.Time) {
+func (c *Controller) rememberTransitions(st *deploymentState, obs []observation, pollStart time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for pod, m := range st.transitioningSeen {
-		if now.Sub(m.seen) >= c.cfg.UnreachableLeaderGrace {
+	for pod, seen := range st.transitioningSeen {
+		if pollStart.Sub(seen) >= c.cfg.UnreachableLeaderGrace {
 			delete(st.transitioningSeen, pod)
 		}
 	}
 	for i := range obs {
 		o := &obs[i]
+		seen, ok := st.transitioningSeen[o.be.Pod]
 		switch {
 		case !o.reach:
-			m, ok := st.transitioningSeen[o.be.Pod]
-			o.wasTransitioning = ok && m.restarts == o.be.Restarts
+			o.wasTransitioning = ok
 		case isTransitioning(*o):
-			st.rememberTransition(o.be, now)
-		default:
+			if !ok || pollStart.After(seen) {
+				st.rememberTransition(o.be.Pod, pollStart)
+			}
+		case ok && seen.Before(pollStart):
 			delete(st.transitioningSeen, o.be.Pod)
 		}
 	}
 }
 
-func (st *deploymentState) rememberTransition(be k8sclient.Backend, now time.Time) {
+func (st *deploymentState) rememberTransition(pod string, at time.Time) {
 	if st.transitioningSeen == nil {
-		st.transitioningSeen = make(map[string]transitionMemory)
+		st.transitioningSeen = make(map[string]time.Time)
 	}
-	st.transitioningSeen[be.Pod] = transitionMemory{seen: now, restarts: be.Restarts}
+	st.transitioningSeen[pod] = at
 }
 
-func (c *Controller) markTransitioning(st *deploymentState, be k8sclient.Backend) {
+func (c *Controller) markTransitioning(st *deploymentState, pod string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	st.rememberTransition(be, time.Now())
+	st.rememberTransition(pod, time.Now())
 }
 
 func (c *Controller) commitState(st *deploymentState, dec decision, emptyList bool, now time.Time) (int, int, bool) {
@@ -277,6 +275,13 @@ func (c *Controller) pollAll(ctx context.Context, name string, pods []k8sclient.
 	var wg sync.WaitGroup
 	for i := range pods {
 		wg.Go(func() {
+			defer func() {
+				if r := recover(); r != nil {
+					c.log.ErrorContext(ctx, "election: leadership poll panicked",
+						"deployment", name, "pod", pods[i].Pod, "panic", r)
+					obs[i] = observation{be: pods[i]}
+				}
+			}()
 			pctx, cancel := context.WithTimeout(ctx, pollTimeout)
 			defer cancel()
 			l, err := c.backend.Leadership(pctx, pods[i].URL)

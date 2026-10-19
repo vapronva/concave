@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"git.horse/vapronva/concave/router/bigbrain/backend"
 )
@@ -22,9 +23,9 @@ func TestActuation_SendsTokenAndObservedLease(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := backend.New(map[string]string{"dev": "s3cr3t"})
-	code, err := c.Promote(context.Background(), "dev", srv.URL)
-	if err != nil || code != http.StatusAccepted {
-		t.Fatalf("promote: code=%d err=%v", code, err)
+	code, delivered, err := c.Promote(context.Background(), "dev", srv.URL)
+	if err != nil || code != http.StatusAccepted || !delivered {
+		t.Fatalf("promote: code=%d delivered=%v err=%v", code, delivered, err)
 	}
 	if token != "s3cr3t" || path != "/instance/promote" || query != "" {
 		t.Fatalf("promote request: token=%q path=%q query=%q", token, path, query)
@@ -38,6 +39,32 @@ func TestActuation_SendsTokenAndObservedLease(t *testing.T) {
 	}
 	if _, err = c.Demote(context.Background(), "dev", srv.URL, nil); err != nil || query != "" {
 		t.Fatalf("demote without an observed lease must be unconditional: query=%q err=%v", query, err)
+	}
+}
+
+func TestPromote_ReportsWhetherTheRequestWasWritten(t *testing.T) {
+	t.Parallel()
+	hung := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer hung.Close()
+	c := backend.New(nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	code, delivered, err := c.Promote(ctx, "dev", hung.URL)
+	if err == nil || code != 0 || !delivered {
+		t.Fatalf(
+			"a request the backend read but never answered is delivered: code=%d delivered=%v err=%v",
+			code,
+			delivered,
+			err,
+		)
+	}
+	refused := httptest.NewServer(http.NotFoundHandler())
+	refused.Close()
+	code, delivered, err = c.Promote(context.Background(), "dev", refused.URL)
+	if err == nil || code != 0 || delivered {
+		t.Fatalf("a refused dial is not delivered: code=%d delivered=%v err=%v", code, delivered, err)
 	}
 }
 
