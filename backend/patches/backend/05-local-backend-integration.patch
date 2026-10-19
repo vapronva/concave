@@ -74,7 +74,7 @@ index dfe80d124..0b1f0aa5e 100644
 +    }
 +}
 diff --git a/crates/local_backend/src/lib.rs b/crates/local_backend/src/lib.rs
-index 89f88e8a0..fa066ec25 100644
+index 5140998c7..fd0a4e69e 100644
 --- a/crates/local_backend/src/lib.rs
 +++ b/crates/local_backend/src/lib.rs
 @@ -35,7 +35,6 @@ use common::{
@@ -101,7 +101,7 @@ index 89f88e8a0..fa066ec25 100644
  pub mod custom_headers;
  pub mod dashboard;
  pub mod deploy_config;
-@@ -99,6 +98,7 @@ pub mod deployment_info;
+@@ -100,6 +99,7 @@ pub mod deployment_jwks;
  pub mod deployment_state;
  pub mod environment_variables;
  pub mod http_actions;
@@ -109,7 +109,7 @@ index 89f88e8a0..fa066ec25 100644
  pub mod log_sinks;
  pub mod logs;
  pub mod node_action_callbacks;
-@@ -114,10 +114,9 @@ pub mod storage;
+@@ -115,10 +115,9 @@ pub mod storage;
  pub mod streaming_export;
  pub mod streaming_import;
  pub mod subs;
@@ -121,7 +121,7 @@ index 89f88e8a0..fa066ec25 100644
  #[derive(Clone)]
  pub struct LocalAppState {
      // Origin for the server (e.g. http://127.0.0.1:3210, https://demo.convex.cloud)
-@@ -126,6 +125,11 @@ pub struct LocalAppState {
+@@ -127,6 +126,11 @@ pub struct LocalAppState {
      pub site_origin: ConvexSite,
      // Name of the instance. (e.g. crazy-giraffe-123)
      pub instance_name: String,
@@ -133,7 +133,7 @@ index 89f88e8a0..fa066ec25 100644
      pub application: Application<ProdRuntime>,
      pub zombify_rx: async_broadcast::Receiver<()>,
  }
-@@ -154,7 +158,7 @@ pub struct EmptyResponse {}
+@@ -155,7 +159,7 @@ pub struct EmptyResponse {}
  pub async fn make_app(
      runtime: ProdRuntime,
      config: LocalConfig,
@@ -142,7 +142,7 @@ index 89f88e8a0..fa066ec25 100644
      zombify_rx: async_broadcast::Receiver<()>,
      preempt_tx: ShutdownSignal,
  ) -> anyhow::Result<LocalAppState> {
-@@ -164,30 +168,52 @@ pub async fn make_app(
+@@ -165,30 +169,52 @@ pub async fn make_app(
      // TODO(CX-6572) Separate `SegmentMetadataFetcher` from `SearcherImpl`
      let segment_metadata_fetcher: Arc<dyn SegmentTermMetadataFetcher> = in_process_searcher;
      let (deleted_tablet_sender, deleted_tablet_receiver) = tokio::sync::mpsc::channel(100);
@@ -218,7 +218,7 @@ index 89f88e8a0..fa066ec25 100644
  
      let file_storage = FileStorage {
          transactional_file_storage: TransactionalFileStorage::new(
-@@ -230,21 +256,41 @@ pub async fn make_app(
+@@ -231,21 +257,41 @@ pub async fn make_app(
          reqwest::redirect::Policy::default(),
      );
      let function_runner: Arc<dyn FunctionRunner<ProdRuntime>> =
@@ -272,7 +272,7 @@ index 89f88e8a0..fa066ec25 100644
          runtime.clone(),
          database.clone(),
          file_storage.clone(),
-@@ -262,7 +308,7 @@ pub async fn make_app(
+@@ -263,7 +309,7 @@ pub async fn make_app(
          config.convex_site_url()?,
          searcher.clone(),
          segment_metadata_fetcher,
@@ -281,7 +281,7 @@ index 89f88e8a0..fa066ec25 100644
          node_actions,
          Arc::new(RedactLogsToClient::new(config.redact_logs_to_client)),
          Arc::new(ApplicationAuth::new(
-@@ -288,7 +334,7 @@ pub async fn make_app(
+@@ -289,7 +335,7 @@ pub async fn make_app(
      let origin = config.convex_origin_url()?;
      let instance_name = config.name();
  
@@ -290,7 +290,7 @@ index 89f88e8a0..fa066ec25 100644
          let beacon_future = beacon::start_beacon(
              runtime.clone(),
              database.clone(),
-@@ -302,10 +348,22 @@ pub async fn make_app(
+@@ -303,10 +349,22 @@ pub async fn make_app(
          origin,
          site_origin: config.convex_site_url()?,
          instance_name,
@@ -315,7 +315,7 @@ index 89f88e8a0..fa066ec25 100644
  }
  
 diff --git a/crates/local_backend/src/main.rs b/crates/local_backend/src/main.rs
-index 93bad254f..cec3a23b2 100644
+index 93bad254f..209dcf0fe 100644
 --- a/crates/local_backend/src/main.rs
 +++ b/crates/local_backend/src/main.rs
 @@ -1,5 +1,6 @@
@@ -518,14 +518,17 @@ index 93bad254f..cec3a23b2 100644
              r?;
              let _: Result<_, _> = shutdown_tx.broadcast(()).await;
          },
-@@ -248,8 +321,12 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
+@@ -246,10 +319,14 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
+             // Forcibly shutdown when the cool down expires
+             _ = force_exit_future => {
                  tracing::info!("Cool down expired. Shutting down");
-                 break;
-             }
+-                break;
++                std::process::exit(0);
++            }
 +            _err = preempt_rx => {
 +                tracing::info!("Received a fatal error while draining. Shutting down immediately");
-+                break;
-+            }
++                std::process::exit(0);
+             }
              // Forcibly shutdown with second ctrl-c.
 -            r = signal::ctrl_c().fuse() => {
 +            r = shutdown_signal().fuse() => {
@@ -561,22 +564,23 @@ index 93bad254f..cec3a23b2 100644
 +    ))
 +}
 diff --git a/crates/local_backend/src/node_action_callbacks.rs b/crates/local_backend/src/node_action_callbacks.rs
-index 1b0b4d2a6..501fb975a 100644
+index 1b0b4d2a6..1ce2b70e6 100644
 --- a/crates/local_backend/src/node_action_callbacks.rs
 +++ b/crates/local_backend/src/node_action_callbacks.rs
-@@ -34,6 +34,11 @@ use common::{
+@@ -34,6 +34,12 @@ use common::{
          },
          ExtractClientVersion,
          HttpResponseError,
 +        CONVEX_ACTIONS_CALLBACK_TOKEN_HEADER,
 +        CONVEX_ACTION_FUNCTION_NAME_HEADER,
++        CONVEX_DEFERRED_AUTH_ERROR_HEADER,
 +        CONVEX_EXECUTION_ID_HEADER,
 +        CONVEX_REQUEST_ID_HEADER,
 +        CONVEX_ROOT_REQUEST_HEADER,
      },
      knobs::V8_ACTION_USER_TIMEOUT,
      runtime::UnixTimestamp,
-@@ -90,10 +95,20 @@ use crate::{
+@@ -90,10 +96,20 @@ use crate::{
      LocalAppState,
  };
  
@@ -597,7 +601,7 @@ index 1b0b4d2a6..501fb975a 100644
      pub reference: Option<String>,
      pub function_handle: Option<String>,
      pub args: UdfArgsJson,
-@@ -183,16 +198,16 @@ pub async fn internal_query_post(
+@@ -183,16 +199,16 @@ pub async fn internal_query_post(
      ExtractExecutionContext(context): ExtractExecutionContext,
      Json(req): Json<NodeCallbackUdfPostRequest>,
  ) -> Result<impl IntoResponse, HttpResponseError> {
@@ -624,7 +628,7 @@ index 1b0b4d2a6..501fb975a 100644
      let udf_return = st
          .application
          .read_only_udf(
-@@ -242,16 +257,16 @@ pub async fn internal_mutation_post(
+@@ -242,16 +258,16 @@ pub async fn internal_mutation_post(
          .mutation_identifier
          .map(SessionRequestIdentifier::try_from)
          .transpose()?;
@@ -651,7 +655,7 @@ index 1b0b4d2a6..501fb975a 100644
      let udf_result = st
          .application
          .mutation_udf(
-@@ -301,16 +316,16 @@ pub async fn internal_action_post(
+@@ -301,16 +317,16 @@ pub async fn internal_action_post(
      ExtractExecutionContext(context): ExtractExecutionContext,
      Json(req): Json<NodeCallbackUdfPostRequest>,
  ) -> Result<impl IntoResponse, HttpResponseError> {
@@ -678,7 +682,7 @@ index 1b0b4d2a6..501fb975a 100644
      let udf_result = st
          .application
          .action_udf(
-@@ -349,6 +364,7 @@ pub struct ScheduleJobRequest {
+@@ -349,6 +365,7 @@ pub struct ScheduleJobRequest {
      reference: Option<String>,
      function_handle: Option<String>,
      udf_path: Option<String>,
@@ -686,7 +690,7 @@ index 1b0b4d2a6..501fb975a 100644
      udf_args: UdfArgsJson,
      scheduled_ts: f64,
  }
-@@ -372,19 +388,17 @@ pub async fn schedule_job(
+@@ -372,19 +389,17 @@ pub async fn schedule_job(
          ErrorMetadata::bad_request("InvalidTimestamp", "Requested scheduled_ts is invalid")
      })?;
      // User might have entered an invalid path, so this is a developer error.
@@ -717,7 +721,7 @@ index 1b0b4d2a6..501fb975a 100644
      let udf_args = req.udf_args.into_serialized_args()?;
      let job_id = st
          .application
-@@ -432,6 +446,7 @@ pub async fn cancel_developer_job(
+@@ -432,6 +447,7 @@ pub async fn cancel_developer_job(
  #[serde(rename_all = "camelCase")]
  pub struct CreateFunctionHandleRequest {
      udf_path: Option<String>,
@@ -725,7 +729,7 @@ index 1b0b4d2a6..501fb975a 100644
      reference: Option<String>,
  }
  
-@@ -449,19 +464,17 @@ pub async fn create_function_handle(
+@@ -449,19 +465,17 @@ pub async fn create_function_handle(
      }: ExtractActionIdentity,
      Json(req): Json<CreateFunctionHandleRequest>,
  ) -> Result<impl IntoResponse, HttpResponseError> {
@@ -756,7 +760,7 @@ index 1b0b4d2a6..501fb975a 100644
      let handle = st
          .application
          .runner()
-@@ -636,14 +649,12 @@ pub async fn audit_log(
+@@ -636,14 +650,12 @@ pub async fn audit_log(
      .into())
  }
  
@@ -772,7 +776,19 @@ index 1b0b4d2a6..501fb975a 100644
          .context("Missing callback token - is the call from actions?")?;
  
      let token = value
-@@ -735,7 +746,7 @@ impl<S: Sync> FromRequestParts<S> for ExtractActionName {
+@@ -713,7 +725,10 @@ where
+         // Validate the auth token based on when the action token was issued. This
+         // prevents errors due to auth token expiring in the middle of long action.
+         let (issue_time, component_id) = check_actions_token(&st, &parts.headers).await?;
+-        let identity = st.application.authenticate(token, issue_time).await?;
++        let identity = match (token, funrun::deferred_auth_error(&parts.headers)?) {
++            (AuthenticationToken::None, Some(error)) => Identity::Unknown(Some(error)),
++            (token, _) => st.application.authenticate(token, issue_time).await?,
++        };
+         st.application
+             .validate_component_id(identity.clone(), component_id)
+             .await?;
+@@ -735,7 +750,7 @@ impl<S: Sync> FromRequestParts<S> for ExtractActionName {
      ) -> Result<Self, Self::Rejection> {
          let action_name = parts
              .headers
@@ -781,7 +797,7 @@ index 1b0b4d2a6..501fb975a 100644
              .map(|value| value.to_str())
              .transpose()
              .context("Convex-Action-Function-Name must be a string")?
-@@ -756,7 +767,7 @@ impl<T: Sync> FromRequestParts<T> for ExtractExecutionContext {
+@@ -756,7 +771,7 @@ impl<T: Sync> FromRequestParts<T> for ExtractExecutionContext {
      ) -> Result<Self, Self::Rejection> {
          let request_id: RequestId = parts
              .headers
@@ -790,7 +806,7 @@ index 1b0b4d2a6..501fb975a 100644
              .map(|v| v.to_str())
              .transpose()
              .context("Request id must be a string")?
-@@ -766,7 +777,7 @@ impl<T: Sync> FromRequestParts<T> for ExtractExecutionContext {
+@@ -766,7 +781,7 @@ impl<T: Sync> FromRequestParts<T> for ExtractExecutionContext {
              .unwrap_or(RequestId::new());
          let execution_id: ExecutionId = parts
              .headers
@@ -799,7 +815,7 @@ index 1b0b4d2a6..501fb975a 100644
              .map(|v| v.to_str())
              .transpose()
              .context("Execution id must be a string")?
-@@ -775,7 +786,7 @@ impl<T: Sync> FromRequestParts<T> for ExtractExecutionContext {
+@@ -775,7 +790,7 @@ impl<T: Sync> FromRequestParts<T> for ExtractExecutionContext {
              // For backwards compatibility
              .unwrap_or(ExecutionId::new());
  
@@ -810,10 +826,10 @@ index 1b0b4d2a6..501fb975a 100644
          };
 diff --git a/crates/local_backend/src/node_action_callbacks/funrun.rs b/crates/local_backend/src/node_action_callbacks/funrun.rs
 new file mode 100644
-index 000000000..223644238
+index 000000000..08f81cc28
 --- /dev/null
 +++ b/crates/local_backend/src/node_action_callbacks/funrun.rs
-@@ -0,0 +1,133 @@
+@@ -0,0 +1,142 @@
 +use common::{
 +    bootstrap_model::components::handles::FunctionHandle,
 +    components::{
@@ -826,6 +842,15 @@ index 000000000..223644238
 +use prost::Message;
 +
 +use super::*;
++
++pub(super) fn deferred_auth_error(headers: &HeaderMap) -> anyhow::Result<Option<ErrorMetadata>> {
++    let Some(value) = headers.get(CONVEX_DEFERRED_AUTH_ERROR_HEADER) else {
++        return Ok(None);
++    };
++    let decoded = base64::decode(value.as_bytes())?;
++    let (short_msg, msg): (String, String) = serde_json::from_slice(&decoded)?;
++    Ok(Some(ErrorMetadata::unauthenticated(short_msg, msg)))
++}
 +
 +pub(super) async fn callback_function_path(
 +    st: &LocalAppState,

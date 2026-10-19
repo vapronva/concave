@@ -85,10 +85,10 @@ index 000000000..d2e634c3f
 +}
 diff --git a/crates/local_backend/src/leadership.rs b/crates/local_backend/src/leadership.rs
 new file mode 100644
-index 000000000..9dd28bcaa
+index 000000000..37b3aacbc
 --- /dev/null
 +++ b/crates/local_backend/src/leadership.rs
-@@ -0,0 +1,676 @@
+@@ -0,0 +1,678 @@
 +use std::{
 +    sync::{
 +        Arc,
@@ -525,7 +525,9 @@ index 000000000..9dd28bcaa
 +    let rw_persistence = match (st.persistence_factory)().await {
 +        Ok(p) => p,
 +        Err(e) => {
-+            tracing::warn!("[concave] promotion lease acquisition failed; staying follower: {e:#}");
++            tracing::warn!(
++                "[concave] promotion could not acquire the lease; staying follower: {e:#}"
++            );
 +            st.role.abort_promotion();
 +            return;
 +        },
@@ -766,7 +768,7 @@ index 000000000..9dd28bcaa
 +    }
 +}
 diff --git a/crates/local_backend/src/router.rs b/crates/local_backend/src/router.rs
-index 0f98ae244..708c01c72 100644
+index ae8bad2b7..55c18f300 100644
 --- a/crates/local_backend/src/router.rs
 +++ b/crates/local_backend/src/router.rs
 @@ -1,6 +1,9 @@
@@ -796,7 +798,7 @@ index 0f98ae244..708c01c72 100644
      },
      knobs::{
          AIRBYTE_STREAMING_IMPORT_REQUEST_SIZE_LIMIT,
-@@ -41,7 +41,6 @@ use tower::ServiceBuilder;
+@@ -41,10 +41,10 @@ use tower::ServiceBuilder;
  use tower_http::{
      cors::{
          AllowHeaders,
@@ -804,7 +806,11 @@ index 0f98ae244..708c01c72 100644
          CorsLayer,
      },
      decompression::RequestDecompressionLayer,
-@@ -103,11 +102,14 @@ use crate::{
++    limit::RequestBodyLimitLayer,
+ };
+ use utoipa::{
+     openapi::security::{
+@@ -103,11 +103,14 @@ use crate::{
          internal_action_post,
          internal_mutation_post,
          internal_query_post,
@@ -819,7 +825,36 @@ index 0f98ae244..708c01c72 100644
          vector_search,
      },
      public_api::public_api_router,
-@@ -353,8 +355,7 @@ pub fn router(st: LocalAppState) -> Router {
+@@ -306,16 +309,23 @@ pub fn router(st: LocalAppState) -> Router {
+     let dashboard_routes = common_dashboard_routes()
+         .merge(local_only_dashboard_routes)
+         // Environment variable routes
+-        .route("/update_environment_variables", post(update_environment_variables))
+-        .route("/list_environment_variables", get(list_environment_variables))
++        .route(
++            "/update_environment_variables",
++            post(update_environment_variables),
++        )
++        .route(
++            "/list_environment_variables",
++            get(list_environment_variables),
++        )
+         // Canonical URL routes
+         .route("/update_canonical_url", post(update_canonical_url))
+         // Scheduled jobs routes
+         .route("/cancel_all_jobs", post(cancel_all_jobs))
+         .route("/cancel_job", post(cancel_job))
+-        .route("/dashboard_openapi.json", axum::routing::get({
+-            move || async { dashboard_openapi_json }
+-        }))
++        .route(
++            "/dashboard_openapi.json",
++            axum::routing::get({ move || async { dashboard_openapi_json } }),
++        )
+         .layer(ServiceBuilder::new());
+ 
+     let cli_routes = Router::new()
+@@ -353,8 +363,7 @@ pub fn router(st: LocalAppState) -> Router {
          .route("/schema_state/{schema_id}", get(schema_state))
          .route("/stream_udf_execution", get(stream_udf_execution))
          .route("/stream_function_logs", get(stream_function_logs))
@@ -829,7 +864,7 @@ index 0f98ae244..708c01c72 100644
  
      let snapshot_export_routes = Router::new()
          .route("/request/zip", post(request_zip_export))
-@@ -388,6 +389,10 @@ pub fn router(st: LocalAppState) -> Router {
+@@ -388,6 +397,10 @@ pub fn router(st: LocalAppState) -> Router {
          .nest("/actions", action_callback_routes(st.clone()))
          .nest("/export", snapshot_export_routes)
          .nest("/streaming_import", streaming_import_routes())
@@ -840,17 +875,25 @@ index 0f98ae244..708c01c72 100644
          .nest("/v1", platform_routes);
  
      // Endpoints migrated to use the RouterState trait instead of application.
-@@ -426,6 +431,9 @@ pub fn router(st: LocalAppState) -> Router {
-     Router::new()
+@@ -427,6 +440,9 @@ pub fn router(st: LocalAppState) -> Router {
          .nest("/api", api_routes)
          .merge(health_check_routes(version))
+         .route("/.well-known/jwks.json", get(deployment_jwks))
 +        .merge(crate::leadership::leadership_routes(
 +            st.control_plane_token.clone(),
 +        ))
          .layer(cors())
          .with_state(st)
          .merge(migrated)
-@@ -471,6 +479,9 @@ where
+@@ -468,14 +484,23 @@ where
+         .route("/cancel_job", post(cancel_developer_job))
+         .route("/create_function_handle", post(create_function_handle))
+         // file storage endpoints
+-        .route("/storage_generate_upload_url", post(storage_generate_upload_url))
++        .route(
++            "/storage_generate_upload_url",
++            post(storage_generate_upload_url),
++        )
          .route("/storage_get_url", post(storage_get_url))
          .route("/storage_get_metadata", post(storage_get_metadata))
          .route("/storage_delete", post(storage_delete))
@@ -860,7 +903,29 @@ index 0f98ae244..708c01c72 100644
          .route("/audit_log", post(audit_log))
          // All routes above this line get the increased limit
          .layer(DefaultBodyLimit::max(*MAX_BACKEND_RPC_REQUEST_SIZE))
-@@ -551,6 +562,7 @@ where
+-        .layer(axum::middleware::from_fn_with_state(state, action_callbacks_middleware::<S>))
++        .layer(axum::middleware::from_fn_with_state(
++            state,
++            action_callbacks_middleware::<S>,
++        ))
+ }
+ 
+ pub fn import_routes<S>() -> Router<S>
+@@ -492,10 +517,13 @@ where
+         .route("/cancel_import", post(cancel_import))
+ }
+ 
++const HTTP_ACTION_REQUEST_BODY_LIMIT: usize = 20 << 20;
++
+ pub fn http_action_routes() -> Router<RouterState> {
+     Router::new()
+         .route("/{*rest}", http_action_handler())
+         .route("/", http_action_handler())
++        .layer(RequestBodyLimitLayer::new(HTTP_ACTION_REQUEST_BODY_LIMIT))
+ }
+ 
+ pub fn app_metrics_routes<S>() -> Router<S>
+@@ -551,6 +579,7 @@ where
              get(|MtState(st): MtState<LocalAppState>| async move { st.instance_name.clone() }),
          )
          .route("/instance_version", get(|| async move { version }))
@@ -868,7 +933,18 @@ index 0f98ae244..708c01c72 100644
          .route(
              "/",
              get(|| async { "This Convex deployment is running. See https://docs.convex.dev/." }),
-@@ -617,10 +629,16 @@ where
+@@ -558,8 +587,8 @@ where
+         .route(
+             "/echo",
+             post(|body: axum::body::Body| async move { body })
+-        // Limit requests to 128MiB to help mitigate DDoS attacks.
+-        .layer(DefaultBodyLimit::max(*MAX_ECHO_BYTES)),
++                // Limit requests to 128MiB to help mitigate DDoS attacks.
++                .layer(DefaultBodyLimit::max(*MAX_ECHO_BYTES)),
+         )
+         .layer(cors())
+ }
+@@ -617,10 +646,16 @@ where
          )
  }
  
@@ -886,7 +962,7 @@ index 0f98ae244..708c01c72 100644
          .allow_methods(vec![
              Method::GET,
              Method::POST,
-@@ -629,6 +647,5 @@ pub fn cors() -> CorsLayer {
+@@ -629,6 +664,5 @@ pub fn cors() -> CorsLayer {
              Method::DELETE,
              Method::PUT,
          ])

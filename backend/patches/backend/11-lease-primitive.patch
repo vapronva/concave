@@ -1,8 +1,8 @@
 diff --git a/crates/common/src/persistence/mod.rs b/crates/common/src/persistence/mod.rs
-index 4bd999d26..65d0ce6ee 100644
+index 608ebd7f2..eba07a373 100644
 --- a/crates/common/src/persistence/mod.rs
 +++ b/crates/common/src/persistence/mod.rs
-@@ -438,6 +438,22 @@ pub trait Persistence: Sync + Send + 'static {
+@@ -445,6 +445,22 @@ pub trait Persistence: Sync + Send + 'static {
      async fn finish_loading(&self) -> anyhow::Result<()> {
          Ok(())
      }
@@ -25,7 +25,7 @@ index 4bd999d26..65d0ce6ee 100644
  }
  
  #[derive(Debug, Clone, Copy)]
-@@ -717,7 +733,6 @@ pub trait PersistenceReader: Send + Sync + 'static {
+@@ -724,7 +740,6 @@ pub trait PersistenceReader: Send + Sync + 'static {
      async fn table_size_stats(&self) -> anyhow::Result<Vec<PersistenceTableSize>> {
          Ok(vec![])
      }
@@ -35,10 +35,10 @@ index 4bd999d26..65d0ce6ee 100644
  /// Timestamp that is repeatable because the caller is holding the lease and
 diff --git a/crates/postgres/src/ha.rs b/crates/postgres/src/ha.rs
 new file mode 100644
-index 000000000..d42fdd901
+index 000000000..6de807a48
 --- /dev/null
 +++ b/crates/postgres/src/ha.rs
-@@ -0,0 +1,82 @@
+@@ -0,0 +1,93 @@
 +use common::errors::database_operational_error;
 +
 +use super::*;
@@ -85,11 +85,22 @@ index 000000000..d42fdd901
 +        self.lease_ts
 +    }
 +
++    pub(super) async fn fatal_on_err<T>(
++        &self,
++        probe: impl std::future::Future<Output = anyhow::Result<T>>,
++    ) -> anyhow::Result<T> {
++        probe.await.inspect_err(|e| {
++            self.lease_lost_shutdown.signal(anyhow::anyhow!(
++                "persistence failed to initialize after acquiring the lease: {e:#}"
++            ))
++        })
++    }
++
 +    pub(super) async fn lease_held(&self) -> anyhow::Result<bool> {
 +        self.probe_lease_row().await.map_err(|e| {
 +            let unreachable = e.downcast_ref::<tokio_postgres::Error>().is_some_and(|pg| {
 +                pg.code()
-+                    .is_none_or(|c| matches!(c.code().get(..2), Some("53" | "57")))
++                    .is_none_or(|c| matches!(c.code().get(..2), Some("08" | "53" | "57")))
 +            });
 +            if unreachable {
 +                database_operational_error(e)
@@ -122,7 +133,7 @@ index 000000000..d42fdd901
 +    }
 +}
 diff --git a/crates/postgres/src/lib.rs b/crates/postgres/src/lib.rs
-index 35df19ff7..81c7433af 100644
+index 96af1f23e..d20e5fa69 100644
 --- a/crates/postgres/src/lib.rs
 +++ b/crates/postgres/src/lib.rs
 @@ -2,6 +2,7 @@
@@ -133,7 +144,29 @@ index 35df19ff7..81c7433af 100644
  mod metrics;
  mod sql;
  
-@@ -525,6 +526,18 @@ impl Persistence for PostgresPersistence {
+@@ -338,12 +339,15 @@ impl PostgresPersistence {
+             lease_lost_shutdown,
+         )
+         .await?;
+-        let newly_created = {
+-            let client = pool
+-                .get_connection("check_newly_created", &schema, &options.instance_name)
+-                .await?;
+-            Self::check_newly_created(&client, options.multitenant, &options.instance_name).await?
+-        };
++        let newly_created = lease
++            .fatal_on_err(async {
++                let client = pool
++                    .get_connection("check_newly_created", &schema, &options.instance_name)
++                    .await?;
++                Self::check_newly_created(&client, options.multitenant, &options.instance_name)
++                    .await
++            })
++            .await?;
+         Ok(Self {
+             newly_created: newly_created.into(),
+             lease,
+@@ -511,6 +515,18 @@ impl Persistence for PostgresPersistence {
          })
      }
  
@@ -152,7 +185,18 @@ index 35df19ff7..81c7433af 100644
      #[fastrace::trace]
      async fn write<'a>(
          &self,
-@@ -1783,27 +1796,27 @@ impl Lease {
+@@ -1750,8 +1766,8 @@ struct Lease {
+ }
+ 
+ impl Lease {
+-    /// Acquire a lease. Blocks as long as there is another lease holder.
+-    /// Returns any transient errors encountered.
++    /// Acquire the lease, stealing it from any current holder unless the
++    /// instance is marked read-only. Returns any transient errors encountered.
+     async fn acquire(
+         pool: Arc<ConvexPgPool>,
+         schema: &SchemaName,
+@@ -1770,29 +1786,30 @@ impl Lease {
              .as_nanos() as i64;
  
          tracing::info!("attempting to acquire lease");
@@ -160,14 +204,17 @@ index 35df19ff7..81c7433af 100644
 +        let instance_name_q = instance_name.clone();
 +        let row = client
              .with_retry(async move |client| {
--                client.prepare_cached(sql::lease_acquire(multitenant)).await
 +                let mut params = vec![&ts as &(dyn ToSql + Sync)];
 +                if multitenant {
 +                    params.push(&instance_name_q.raw as &(dyn ToSql + Sync));
 +                }
-+                client
-+                    .query_opt(sql::lease_acquire(multitenant), params.as_slice())
-+                    .await
+                 client
+-                    .prepare_cached(sql::lease_acquire(multitenant, allow_read_only))
++                    .query_opt(
++                        sql::lease_acquire(multitenant, allow_read_only),
++                        params.as_slice(),
++                    )
+                     .await
              })
              .await?;
 -        let mut params = vec![&ts as &(dyn ToSql + Sync)];
@@ -178,12 +225,12 @@ index 35df19ff7..81c7433af 100644
          drop(client);
 -        anyhow::ensure!(
 -            rows_modified == 1,
--            "failed to acquire lease: Already acquired with higher timestamp"
+-            "failed to acquire lease: already acquired with higher timestamp, or read-only"
 -        );
 -        tracing::info!("lease acquired with ts {}", ts);
 -
 +        let acquired_ts: i64 = row
-+            .context("failed to acquire lease: leases row missing")?
++            .context("failed to acquire lease: leases row missing, or read-only")?
 +            .get(0);
 +        tracing::info!("lease acquired with ts {}", acquired_ts);
          timer.finish();
@@ -195,10 +242,10 @@ index 35df19ff7..81c7433af 100644
              instance_name,
              multitenant,
 diff --git a/crates/postgres/src/sql.rs b/crates/postgres/src/sql.rs
-index a531a8b5a..4e5940bc9 100644
+index 269fb0371..ef5fd14ba 100644
 --- a/crates/postgres/src/sql.rs
 +++ b/crates/postgres/src/sql.rs
-@@ -716,6 +716,20 @@ pub const fn unset_read_only(multitenant: bool) -> &'static str {
+@@ -700,6 +700,20 @@ pub const fn unset_read_only(multitenant: bool) -> &'static str {
      )
  }
  
@@ -219,17 +266,18 @@ index a531a8b5a..4e5940bc9 100644
  // If this query returns a result, the lease is still valid and will remain so
  // until the end of the transaction.
  pub const fn lease_precond(multitenant: bool) -> &'static str {
-@@ -742,12 +756,11 @@ pub const fn advisory_lease_check(multitenant: bool) -> &'static str {
+@@ -726,12 +740,12 @@ pub const fn advisory_lease_check(multitenant: bool) -> &'static str {
      )
  }
  
 -// Acquire the lease unless acquire by someone with a higher timestamp.
- pub const fn lease_acquire(multitenant: bool) -> &'static str {
+ pub const fn lease_acquire(multitenant: bool, allow_read_only: bool) -> &'static str {
      tableify!(
-         multitenant,
+         [multitenant, allow_read_only],
          formatcp!(
--            "UPDATE @db_name.leases SET ts=$1 WHERE {column}={value} AND ts<$1",
-+            "UPDATE @db_name.leases SET ts=GREATEST($1, ts+1) WHERE {column}={value} RETURNING ts",
+-            "UPDATE @db_name.leases SET ts=$1 WHERE {column}={value} AND ts<$1 {ro_cond}",
++            "UPDATE @db_name.leases SET ts=GREATEST($1, ts+1) WHERE {column}={value} {ro_cond} \
++             RETURNING ts",
              column = if multitenant { "instance_name" } else { "id" },
-             value = if multitenant { "$2" } else { "1" }
-         )
+             value = if multitenant { "$2" } else { "1" },
+             ro_cond = if allow_read_only {
