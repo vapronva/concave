@@ -21,9 +21,9 @@ pkg-base-setup
 apt-get install --assume-yes cmake libclang-dev clang curl pkg-config git protobuf-compiler python3
 EOF
 
-ARG JUST_VERSION=1.58.0
+ARG JUST_VERSION=1.59.0
 
-ARG JUST_SHA256=4a5cc2f53e6f0f8c59092a6cc38291eb729d46a7dd95d3ae582008881b84931d
+ARG JUST_SHA256=409044617b6f06517c1035e55ca38c8c856ff8b650e41bc2aa1ef82d5903a23e
 
 RUN <<EOF
 set -o errexit -o nounset -o xtrace
@@ -34,9 +34,9 @@ rm /tmp/just.tar.gz
 just --version
 EOF
 
-ARG UV_VERSION=0.12.22
+ARG UV_VERSION=0.13.1
 
-ARG UV_SHA256=b9980552309f09c15172b8be828555e375097f16deb459795ce7bfd200380f0b
+ARG UV_SHA256=eadd9d27c134ab5ac1ffd4473b97a741407f3ea238288f03121fc4deddf90220
 
 RUN <<EOF
 set -o errexit -o nounset -o xtrace
@@ -56,7 +56,7 @@ COPY UPSTREAM /tmp/patches/UPSTREAM
 RUN <<EOF
 set -o errexit -o nounset -o xtrace
 git init --quiet .
-git remote add origin https://github.com/get-convex/convex-backend.git
+git remote add origin https://github.com/convex/convex-backend.git
 git fetch --quiet --depth 1 origin "$(head -1 /tmp/patches/UPSTREAM)"
 git checkout --quiet FETCH_HEAD
 EOF
@@ -66,7 +66,7 @@ COPY apply-patches.sh /tmp/apply-patches.sh
 
 RUN PATCHES_DIR=/tmp/patches/backend UPSTREAM_PIN=/tmp/patches/UPSTREAM bash /tmp/apply-patches.sh /convex
 
-ARG NODE_SHA256=fd8e59d5a511510f6a298afb548f18c7d2b1be404d8b4a27d94fbe49f56cb2d6
+ARG NODE_SHA256=cc2f601cee82d9a5a233302fe307abc600727035fd7d2c3a3571755989e95008
 
 RUN <<EOF
 set -o errexit -o nounset -o xtrace
