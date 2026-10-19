@@ -1,9 +1,10 @@
 {{- if .Values.funrun.enabled }}
-{{- $funrunDrainDelay := int (.Values.funrun.drainDelaySeconds | default 8) }}
+{{- $funrunDrainSet := not (or (kindIs "invalid" .Values.funrun.drainDelaySeconds) (eq (toString .Values.funrun.drainDelaySeconds) "")) }}
+{{- $funrunDrainDelay := ternary (int .Values.funrun.drainDelaySeconds) 8 $funrunDrainSet }}
 {{- $funrunActionBudget := int (.Values.backend.actionUserTimeoutSeconds | default 600) }}
-{{- $funrunShutdownNeed := add 15 $funrunDrainDelay $funrunActionBudget 300 }}
+{{- $funrunShutdownNeed := add 15 $funrunDrainDelay 30 $funrunActionBudget 300 }}
 {{- if gt $funrunShutdownNeed (int .Values.funrun.terminationGracePeriodSeconds) }}
-{{- fail (printf "funrun.terminationGracePeriodSeconds=%d is below the %d seconds a clean shutdown needs: 15 (preStop sleep) + %d (drain delay) + %d (V8_ACTION_USER_TIMEOUT_SECS) + 300 (V8_ACTION_SYSTEM_TIMEOUT); raise funrun.terminationGracePeriodSeconds or lower backend.actionUserTimeoutSeconds" (int .Values.funrun.terminationGracePeriodSeconds) $funrunShutdownNeed $funrunDrainDelay $funrunActionBudget) }}
+{{- fail (printf "funrun.terminationGracePeriodSeconds=%d is below the %d seconds a clean shutdown needs: 15 (preStop sleep) + %d (drain delay) + 30 (FUNRUN_SNAPSHOT_WAIT_TIMEOUT_SECS) + %d (V8_ACTION_USER_TIMEOUT_SECS) + 300 (V8_ACTION_SYSTEM_TIMEOUT_SECONDS); raise funrun.terminationGracePeriodSeconds or lower backend.actionUserTimeoutSeconds" (int .Values.funrun.terminationGracePeriodSeconds) $funrunShutdownNeed $funrunDrainDelay $funrunActionBudget) }}
 {{- end }}
 ---
 apiVersion: apps/v1
@@ -58,17 +59,16 @@ spec:
           ports:
             - { name: grpc, containerPort: {{ include "convex.listenPort" .Values.funrun.listen }} }
             - { name: health, containerPort: {{ include "convex.listenPort" .Values.funrun.healthListen }} }
-          envFrom:
-            - configMapRef:
-                name: {{ include "convex.envConfigName" . }}
           env:
+            - name: RUST_LOG
+              value: info
             - name: FUNRUN_LISTEN
               value: "0.0.0.0:{{ include "convex.listenPort" .Values.funrun.listen }}"
             - name: FUNRUN_HEALTH_LISTEN
               value: "0.0.0.0:{{ include "convex.listenPort" .Values.funrun.healthListen }}"
-            {{- with .Values.funrun.drainDelaySeconds }}
+            {{- if $funrunDrainSet }}
             - name: CONVEX_FUNRUN_DRAIN_DELAY_SECS
-              value: {{ int64 . | quote }}
+              value: {{ int64 .Values.funrun.drainDelaySeconds | quote }}
             {{- end }}
             - name: FUNRUN_INSTANCE_NAME
               value: {{ required "instance.name is required" .Values.instance.name | quote }}

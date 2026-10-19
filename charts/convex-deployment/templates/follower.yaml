@@ -35,7 +35,7 @@ spec:
       {{- else }}
       affinity:
         podAntiAffinity:
-          {{- $prefix := include "convex.labelPrefix" . }}
+          {{- $prefix := "convex" }}
           {{- $spreadKey := .Values.ha.spreadTopologyKey | default "kubernetes.io/hostname" }}
           {{- if .Values.ha.requireNodeSpread }}
           requiredDuringSchedulingIgnoredDuringExecution:

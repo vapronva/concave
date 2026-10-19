@@ -3,15 +3,11 @@
 {{- end -}}
 
 {{- define "convex.fullname" -}}
-{{- default .Release.Name .Values.fullnameOverride | trunc 63 | trimSuffix "-" -}}
+{{- default .Release.Name .Values.fullnameOverride | trunc 53 | trimSuffix "-" -}}
 {{- end -}}
 
 {{- define "convex.chart" -}}
 {{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" -}}
-{{- end -}}
-
-{{- define "convex.labelPrefix" -}}
-convex
 {{- end -}}
 
 {{- define "convex.selectorLabels" -}}
@@ -68,7 +64,7 @@ header @cors_preflight {
 {{- if .allowCredentials }}
   Access-Control-Allow-Credentials "true"
 {{- end }}
-  Access-Control-Max-Age {{ .maxAge | default 86400 | int64 | quote }}
+  Access-Control-Max-Age {{ ternary (int64 .maxAge) 86400 (not (or (kindIs "invalid" .maxAge) (eq (toString .maxAge) ""))) | quote }}
   Vary "Origin, Access-Control-Request-Method, Access-Control-Request-Headers"
 }
 respond @cors_preflight 204
@@ -154,14 +150,14 @@ strategy:
 
 {{- define "convex.backendDiscoveryLabels" -}}
 {{- $ctx := .ctx -}}
-{{- $prefix := include "convex.labelPrefix" $ctx -}}
+{{- $prefix := "convex" -}}
 {{ $prefix }}/component: backend
 {{ $prefix }}/instance: {{ required "instance.name is required" $ctx.Values.instance.name | quote }}
 {{ $prefix }}/role: {{ required "role is required for backend discovery labels" .role }}
 {{- end -}}
 
 {{- define "convex.componentDiscoveryLabel" -}}
-{{- $prefix := include "convex.labelPrefix" .ctx -}}
+{{- $prefix := "convex" -}}
 {{ $prefix }}/component: {{ .component }}
 {{- end -}}
 

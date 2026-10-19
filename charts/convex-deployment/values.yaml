@@ -90,7 +90,7 @@ funrun:
   listen: :8090
   healthListen: :8091
   drainDelaySeconds: ""
-  terminationGracePeriodSeconds: 930
+  terminationGracePeriodSeconds: 960
   nodes: []
   nodeSelector: {}
   tolerations: []

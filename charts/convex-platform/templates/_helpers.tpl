@@ -3,15 +3,11 @@
 {{- end -}}
 
 {{- define "convex.fullname" -}}
-{{- default .Release.Name .Values.fullnameOverride | trunc 63 | trimSuffix "-" -}}
+{{- default .Release.Name .Values.fullnameOverride | trunc 54 | trimSuffix "-" -}}
 {{- end -}}
 
 {{- define "convex.chart" -}}
 {{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" -}}
-{{- end -}}
-
-{{- define "convex.labelPrefix" -}}
-convex
 {{- end -}}
 
 {{- define "convex.selectorLabels" -}}
