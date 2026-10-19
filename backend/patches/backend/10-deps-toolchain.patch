@@ -1,15 +1,15 @@
 diff --git a/.nvmrc b/.nvmrc
-index db49bb14d..df6ae3370 100644
+index db49bb14d..a43a5b943 100644
 --- a/.nvmrc
 +++ b/.nvmrc
 @@ -1 +1 @@
 -22.22.2
-+24.21.0
++24.22.0
 diff --git a/Cargo.lock b/Cargo.lock
-index a375abc9b..7234d8999 100644
+index e893f1bbb..a03c80569 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
-@@ -3853,7 +3853,7 @@ dependencies = [
+@@ -4368,7 +4368,7 @@ dependencies = [
   "fxhash",
   "maplit",
   "proptest",
@@ -18,16 +18,16 @@ index a375abc9b..7234d8999 100644
   "prost-types",
   "tonic",
   "tonic-prost",
-@@ -3885,7 +3885,7 @@ dependencies = [
+@@ -4400,7 +4400,7 @@ dependencies = [
   "pretty_assertions",
   "proptest",
   "proptest-derive",
 - "prost 0.14.3",
 + "prost 0.14.4",
   "prost-types",
-  "reqwest",
+  "reqwest 0.13.4",
   "serde",
-@@ -3917,7 +3917,7 @@ dependencies = [
+@@ -4432,7 +4432,7 @@ dependencies = [
   "pretty_assertions",
   "proptest",
   "proptest-derive",
@@ -35,8 +35,8 @@ index a375abc9b..7234d8999 100644
 + "prost 0.14.4",
   "prost-types",
   "rand 0.9.4",
-  "reqwest",
-@@ -4087,6 +4087,8 @@ dependencies = [
+  "reqwest 0.13.4",
+@@ -4612,6 +4612,8 @@ dependencies = [
   "anyhow",
   "async-trait",
   "async_lru",
@@ -45,7 +45,7 @@ index a375abc9b..7234d8999 100644
   "common",
   "convex_sync_types",
   "database",
-@@ -4101,19 +4103,65 @@ dependencies = [
+@@ -4626,17 +4628,64 @@ dependencies = [
   "model",
   "moka",
   "parking_lot",
@@ -56,16 +56,16 @@ index a375abc9b..7234d8999 100644
   "rand 0.9.4",
   "runtime",
 + "search",
-  "storage",
-  "tokio",
-  "tokio-stream",
++ "storage",
++ "tokio",
++ "tokio-stream",
 + "tonic",
 + "tracing",
-  "udf",
-  "usage_tracking",
-  "value",
- ]
- 
++ "udf",
++ "usage_tracking",
++ "value",
++]
++
 +[[package]]
 +name = "funrun_server"
 +version = "0.1.0"
@@ -74,6 +74,7 @@ index a375abc9b..7234d8999 100644
 + "application",
 + "async-trait",
 + "axum",
++ "base64 0.13.1",
 + "bytes",
 + "clusters",
 + "cmd_util",
@@ -92,26 +93,24 @@ index a375abc9b..7234d8999 100644
 + "parking_lot",
 + "pb",
 + "prost 0.14.4",
-+ "reqwest",
++ "reqwest 0.13.4",
 + "runtime",
 + "search",
 + "serde",
 + "serde_json",
-+ "storage",
-+ "tokio",
-+ "tokio-stream",
+  "storage",
+  "tokio",
+  "tokio-stream",
 + "tonic",
 + "tracing",
-+ "udf",
-+ "usage_tracking",
-+ "value",
+  "udf",
+  "usage_tracking",
+  "value",
 + "vector",
-+]
-+
+ ]
+ 
  [[package]]
- name = "funty"
- version = "2.0.0"
-@@ -4453,9 +4501,9 @@ dependencies = [
+@@ -5000,9 +5049,9 @@ dependencies = [
  
  [[package]]
  name = "h2"
@@ -123,7 +122,7 @@ index a375abc9b..7234d8999 100644
  dependencies = [
   "atomic-waker",
   "bytes",
-@@ -5719,7 +5767,7 @@ dependencies = [
+@@ -6380,7 +6429,7 @@ dependencies = [
   "pretty_assertions",
   "proptest",
   "proptest-derive",
@@ -132,7 +131,7 @@ index a375abc9b..7234d8999 100644
   "rand 0.9.4",
   "rsa",
   "runtime",
-@@ -6019,7 +6067,10 @@ dependencies = [
+@@ -6755,7 +6804,10 @@ dependencies = [
   "moka",
   "node_executor",
   "parking_lot",
@@ -140,10 +139,10 @@ index a375abc9b..7234d8999 100644
 + "postgres",
   "proptest",
 + "prost 0.14.4",
-  "reqwest",
+  "reqwest 0.13.4",
   "roles",
   "runtime",
-@@ -6029,6 +6080,7 @@ dependencies = [
+@@ -6765,6 +6817,7 @@ dependencies = [
   "serde_json",
   "serde_with",
   "shape_inference",
@@ -151,7 +150,7 @@ index a375abc9b..7234d8999 100644
   "storage",
   "streaming_export",
   "sync",
-@@ -7338,7 +7390,7 @@ dependencies = [
+@@ -8291,7 +8344,7 @@ dependencies = [
   "pb_build",
   "pb_extras",
   "proptest",
@@ -160,7 +159,7 @@ index a375abc9b..7234d8999 100644
   "prost-reflect",
   "prost-types",
   "tonic",
-@@ -7350,7 +7402,7 @@ dependencies = [
+@@ -8303,7 +8356,7 @@ dependencies = [
  name = "pb_build"
  version = "0.1.0"
  dependencies = [
@@ -169,7 +168,7 @@ index a375abc9b..7234d8999 100644
   "tonic-prost-build",
  ]
  
-@@ -7360,7 +7412,7 @@ version = "0.1.0"
+@@ -8313,7 +8366,7 @@ version = "0.1.0"
  dependencies = [
   "pb",
   "pb_build",
@@ -178,7 +177,7 @@ index a375abc9b..7234d8999 100644
   "prost-reflect",
  ]
  
-@@ -7943,19 +7995,19 @@ dependencies = [
+@@ -8918,19 +8971,19 @@ dependencies = [
  
  [[package]]
  name = "prost"
@@ -203,16 +202,16 @@ index a375abc9b..7234d8999 100644
  dependencies = [
   "heck",
   "itertools 0.14.0",
-@@ -7963,7 +8015,7 @@ dependencies = [
+@@ -8938,7 +8991,7 @@ dependencies = [
   "multimap",
   "petgraph 0.8.3",
-  "prettyplease",
+  "prettyplease 0.2.37",
 - "prost 0.14.3",
 + "prost 0.14.4",
   "prost-types",
   "pulldown-cmark",
   "pulldown-cmark-to-cmark",
-@@ -7987,9 +8039,9 @@ dependencies = [
+@@ -8962,9 +9015,9 @@ dependencies = [
  
  [[package]]
  name = "prost-derive"
@@ -224,7 +223,7 @@ index a375abc9b..7234d8999 100644
  dependencies = [
   "anyhow",
   "itertools 0.14.0",
-@@ -8006,17 +8058,17 @@ checksum = "b89455ef41ed200cafc47c76c552ee7792370ac420497e551f16123a9135f76e"
+@@ -8981,17 +9034,17 @@ checksum = "b89455ef41ed200cafc47c76c552ee7792370ac420497e551f16123a9135f76e"
  dependencies = [
   "logos",
   "miette",
@@ -246,7 +245,7 @@ index a375abc9b..7234d8999 100644
  ]
  
  [[package]]
-@@ -8668,9 +8720,9 @@ dependencies = [
+@@ -9779,9 +9832,9 @@ dependencies = [
  
  [[package]]
  name = "rtrb"
@@ -258,7 +257,7 @@ index a375abc9b..7234d8999 100644
  
  [[package]]
  name = "runtime"
-@@ -10043,7 +10095,7 @@ dependencies = [
+@@ -11194,7 +11247,7 @@ dependencies = [
   "fastrace",
   "keybroker",
   "pb_data_sync",
@@ -267,7 +266,7 @@ index a375abc9b..7234d8999 100644
   "table_iteration",
   "tracing",
   "usage_tracking",
-@@ -10952,9 +11004,9 @@ dependencies = [
+@@ -12122,9 +12175,9 @@ dependencies = [
  
  [[package]]
  name = "tonic"
@@ -279,7 +278,7 @@ index a375abc9b..7234d8999 100644
  dependencies = [
   "async-trait",
   "axum",
-@@ -10984,9 +11036,9 @@ dependencies = [
+@@ -12154,9 +12207,9 @@ dependencies = [
  
  [[package]]
  name = "tonic-build"
@@ -289,9 +288,9 @@ index a375abc9b..7234d8999 100644
 -checksum = "1882ac3bf5ef12877d7ed57aad87e75154c11931c2ba7e6cde5e22d63522c734"
 +checksum = "c68f61875ac5293cf72e6c8cf0158086428c82c37229e98c840878f1706b0322"
  dependencies = [
-  "prettyplease",
+  "prettyplease 0.2.37",
   "proc-macro2",
-@@ -11000,7 +11052,7 @@ version = "0.14.5"
+@@ -12170,7 +12223,7 @@ version = "0.14.5"
  source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "f4ff0636fef47afb3ec02818f5bceb4377b8abb9d6a386aeade18bd6212f8eb7"
  dependencies = [
@@ -300,7 +299,7 @@ index a375abc9b..7234d8999 100644
   "tokio",
   "tokio-stream",
   "tonic",
-@@ -11021,20 +11073,20 @@ dependencies = [
+@@ -12191,20 +12244,20 @@ dependencies = [
  
  [[package]]
  name = "tonic-prost"
@@ -324,7 +323,7 @@ index a375abc9b..7234d8999 100644
 -checksum = "f3144df636917574672e93d0f56d7edec49f90305749c668df5101751bb8f95a"
 +checksum = "654e5643eff75d7f8c99197ce1440ed19a3474eada74c12bbac488b2cafdae27"
  dependencies = [
-  "prettyplease",
+  "prettyplease 0.2.37",
   "proc-macro2",
 diff --git a/crates/local_backend/Cargo.toml b/crates/local_backend/Cargo.toml
 index 1f9454d70..d5733b904 100644
@@ -349,12 +348,12 @@ index 1f9454d70..d5733b904 100644
  clusters = { workspace = true, features = ["testing"] }
  common = { workspace = true, features = ["testing"] }
 diff --git a/rust-toolchain b/rust-toolchain
-index 1ba2c04ca..25e1069e7 100644
+index 1ba2c04ca..008bc410f 100644
 --- a/rust-toolchain
 +++ b/rust-toolchain
 @@ -1,3 +1,4 @@
  [toolchain]
 -channel = "nightly-2026-06-28"
-+channel = "nightly-2026-10-03"
++channel = "nightly-2026-10-19"
  targets = ["wasm32-wasip1"]
 +components = ["rustfmt"]
