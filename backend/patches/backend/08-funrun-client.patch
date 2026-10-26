@@ -116,10 +116,10 @@ index 5c1665f6f..c94be5c4b 100644
  #[async_trait]
 diff --git a/crates/function_runner/src/proto.rs b/crates/function_runner/src/proto.rs
 new file mode 100644
-index 000000000..47def6fd1
+index 000000000..f2c8bf562
 --- /dev/null
 +++ b/crates/function_runner/src/proto.rs
-@@ -0,0 +1,264 @@
+@@ -0,0 +1,246 @@
 +use std::{
 +    collections::BTreeMap,
 +    str::FromStr,
@@ -128,7 +128,6 @@ index 000000000..47def6fd1
 +use anyhow::Context;
 +use common::{
 +    bootstrap_model::index::database_index::IndexedFields,
-+    http::normalize_header_map,
 +    interval::IntervalSet,
 +    types::TabletIndexName,
 +};
@@ -145,7 +144,6 @@ index 000000000..47def6fd1
 +    QueryReads as SearchQueryReads,
 +};
 +use sync_types::Timestamp;
-+use udf::HttpActionRequestHead;
 +use value::{
 +    FieldPath,
 +    ResolvedDocumentId,
@@ -157,22 +155,6 @@ index 000000000..47def6fd1
 +    FunctionReads,
 +    FunctionWrites,
 +};
-+
-+pub fn http_action_request_head_proto(
-+    HttpActionRequestHead {
-+        headers,
-+        url,
-+        method,
-+    }: HttpActionRequestHead,
-+) -> pb::common::HttpActionRequestHead {
-+    pb::common::HttpActionRequestHead {
-+        http_headers: normalize_header_map(headers)
-+            .map(pb::common::HttpHeader::from)
-+            .collect(),
-+        url: url.to_string(),
-+        method: method.to_string(),
-+    }
-+}
 +
 +impl From<FunctionReads> for pb::funrun::FunctionReads {
 +    fn from(
@@ -386,10 +368,10 @@ index 000000000..47def6fd1
 +}
 diff --git a/crates/function_runner/src/remote.rs b/crates/function_runner/src/remote.rs
 new file mode 100644
-index 000000000..2eb6187a0
+index 000000000..be9354ff8
 --- /dev/null
 +++ b/crates/function_runner/src/remote.rs
-@@ -0,0 +1,926 @@
+@@ -0,0 +1,925 @@
 +use std::{
 +    collections::{
 +        BTreeMap,
@@ -499,7 +481,6 @@ index 000000000..2eb6187a0
 +use value::identifier::Identifier;
 +
 +use crate::{
-+    proto::http_action_request_head_proto,
 +    server::{
 +        funrun_isolate_worker,
 +        DeploymentStorage,
@@ -1017,7 +998,7 @@ index 000000000..2eb6187a0
 +        let callback_token = self
 +            .key_broker
 +            .issue_action_token_at(component, callback_token_issued_at(&identity));
-+        let http_request_head = http_action_request_head_proto(request_head.clone());
++        let http_request_head = request_head.clone().into();
 +        let http_body = http_request.body;
 +        let dispatch = async move {
 +            self.wait_for_endpoints().await?;
@@ -1430,7 +1411,7 @@ index 000000000..b83f965d3
 +    }
 +}
 diff --git a/crates/isolate/src/client.rs b/crates/isolate/src/client.rs
-index 26fa7477b..c9e8051a1 100644
+index 0207fcf03..4ba10c5ad 100644
 --- a/crates/isolate/src/client.rs
 +++ b/crates/isolate/src/client.rs
 @@ -9,6 +9,7 @@ use std::{
@@ -1441,15 +1422,15 @@ index 26fa7477b..c9e8051a1 100644
              AtomicUsize,
              Ordering,
          },
-@@ -215,7 +216,6 @@ impl IsolateConfig {
-             limiter,
-         }
+@@ -219,7 +220,6 @@ impl IsolateConfig {
+     pub fn max_user_timeout(&self) -> Option<Duration> {
+         self.max_user_timeout
      }
 -
  }
  
  pub struct UdfRequest<RT: Runtime> {
-@@ -465,6 +465,7 @@ impl<RT: Runtime> Clone for IsolateClient<RT> {
+@@ -469,6 +469,7 @@ impl<RT: Runtime> Clone for IsolateClient<RT> {
              sender: self.sender.clone(),
              internal_sender: self.internal_sender.clone(),
              active_workers: self.active_workers.clone(),
@@ -1457,17 +1438,17 @@ index 26fa7477b..c9e8051a1 100644
              max_workers: self.max_workers,
          }
      }
-@@ -545,6 +546,9 @@ pub fn initialize_v8() {
- /// threads. Instead, we'll manage our V8 threads ourselves.
- ///
- /// [`IsolateClient`] is the "client" entry point to our V8 threads.
+@@ -544,6 +545,9 @@ pub fn initialize_v8() {
+     });
+ }
+ 
 +static ISOLATE_PRELOAD_WORKERS: std::sync::LazyLock<usize> =
 +    std::sync::LazyLock::new(|| cmd_util::env::env_config("ISOLATE_PRELOAD_WORKERS", 0));
 +
- pub struct IsolateClient<RT: Runtime> {
-     rt: RT,
-     handles: Arc<Mutex<Vec<IsolateWorkerHandle>>>,
-@@ -554,6 +558,7 @@ pub struct IsolateClient<RT: Runtime> {
+ /// The V8 code all expects to run on a single thread, which makes it ineligible
+ /// for Tokio's scheduler, which wants the ability to move work across scheduler
+ /// threads. Instead, we'll manage our V8 threads ourselves.
+@@ -558,6 +562,7 @@ pub struct IsolateClient<RT: Runtime> {
      /// Shared with the scheduler. Tracks the total number of in-progress
      /// workers across all clients.
      active_workers: Arc<AtomicUsize>,
@@ -1475,7 +1456,7 @@ index 26fa7477b..c9e8051a1 100644
      max_workers: usize,
  }
  
-@@ -581,6 +586,9 @@ impl<RT: Runtime> IsolateClient<RT> {
+@@ -585,6 +590,9 @@ impl<RT: Runtime> IsolateClient<RT> {
          let active_workers = Arc::new(AtomicUsize::new(0));
          let _active_workers = active_workers.clone();
          let rt_clone = rt.clone();
@@ -1485,7 +1466,7 @@ index 26fa7477b..c9e8051a1 100644
          let scheduler = rt.spawn("shared_isolate_scheduler", async move {
              // The scheduler thread pops a worker from available_workers and
              // pops a request from the CoDelQueueReceiver. Then it sends the request
-@@ -593,7 +601,9 @@ impl<RT: Runtime> IsolateClient<RT> {
+@@ -597,7 +605,9 @@ impl<RT: Runtime> IsolateClient<RT> {
                  max_percent_per_client,
                  _active_workers,
              );
@@ -1496,7 +1477,7 @@ index 26fa7477b..c9e8051a1 100644
          });
          Ok(Self {
              rt,
-@@ -602,6 +612,7 @@ impl<RT: Runtime> IsolateClient<RT> {
+@@ -606,6 +616,7 @@ impl<RT: Runtime> IsolateClient<RT> {
              scheduler: Arc::new(Mutex::new(Some(scheduler))),
              handles,
              active_workers,
@@ -1504,7 +1485,7 @@ index 26fa7477b..c9e8051a1 100644
              max_workers: max_isolate_workers,
          })
      }
-@@ -618,6 +629,10 @@ impl<RT: Runtime> IsolateClient<RT> {
+@@ -622,6 +633,10 @@ impl<RT: Runtime> IsolateClient<RT> {
          self.max_workers
      }
  
@@ -1515,7 +1496,7 @@ index 26fa7477b..c9e8051a1 100644
      pub fn aggregate_heap_stats(&self) -> IsolateHeapStats {
          let mut total = IsolateHeapStats::default();
          for handle in self.handles.lock().iter() {
-@@ -1067,6 +1082,7 @@ impl<RT: Runtime> IsolateClient<RT> {
+@@ -1071,6 +1086,7 @@ impl<RT: Runtime> IsolateClient<RT> {
                  shutdown_and_join(handle.handle).await?;
              }
          }
@@ -1523,7 +1504,7 @@ index 26fa7477b..c9e8051a1 100644
          if let Some(mut scheduler) = self.scheduler.lock().take() {
              scheduler.shutdown();
          }
-@@ -1162,6 +1178,7 @@ pub struct SharedIsolateScheduler<RT: Runtime, W: IsolateWorker<RT>> {
+@@ -1166,6 +1182,7 @@ pub struct SharedIsolateScheduler<RT: Runtime, W: IsolateWorker<RT>> {
      /// recreated and there will be no penalty for reassigning this worker to a
      /// new client.
      available_workers: HashMap<String, VecDeque<IdleWorkerState>>,
@@ -1531,7 +1512,7 @@ index 26fa7477b..c9e8051a1 100644
      /// Set of futures awaiting a response from an active worker.
      in_progress_workers:
          FuturesUnordered<Join<oneshot::Receiver<IdleWorkerInfo>, Ready<ActiveWorkerState>>>,
-@@ -1208,6 +1225,7 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
+@@ -1212,6 +1229,7 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
              in_progress_count: HashMap::new(),
              active_workers,
              available_workers: HashMap::new(),
@@ -1539,7 +1520,7 @@ index 26fa7477b..c9e8051a1 100644
              max_workers,
              handles,
              max_active_workers_per_client: (max_workers * max_percent_per_client)
-@@ -1262,6 +1280,10 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
+@@ -1266,6 +1284,10 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
          internal_receiver: mpsc::UnboundedReceiver<Request<RT>>,
      ) {
          log_pool_max(self.worker.config().name, self.max_workers);
@@ -1550,7 +1531,7 @@ index 26fa7477b..c9e8051a1 100644
          let mut report_stats = self.rt.wait(*HEAP_WORKER_REPORT_INTERVAL_SECONDS);
          let mut expired_receiver = receiver.expired_receiver();
          let limiter = self.worker.config().limiter.clone();
-@@ -1440,26 +1462,13 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
+@@ -1444,26 +1466,13 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
              // It's possible that one of our own workers will end up being the
              // least-recently-used one.
          }
@@ -1581,7 +1562,7 @@ index 26fa7477b..c9e8051a1 100644
          }
          // No existing worker for this client and we've already started the max number
          // of workers -- just grab the least recently used worker. This worker is least
-@@ -1492,6 +1501,26 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
+@@ -1496,6 +1505,26 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
          Ok(worker.worker_id)
      }
  

@@ -1751,10 +1751,10 @@ index 000000000..3a019d9c5
 +}
 diff --git a/crates/funrun_server/src/snapshot.rs b/crates/funrun_server/src/snapshot.rs
 new file mode 100644
-index 000000000..72e98b104
+index 000000000..4e86ff28b
 --- /dev/null
 +++ b/crates/funrun_server/src/snapshot.rs
-@@ -0,0 +1,408 @@
+@@ -0,0 +1,407 @@
 +use std::{
 +    sync::{
 +        Arc,
@@ -1982,7 +1982,6 @@ index 000000000..72e98b104
 +            clusters::DbDriverTag::Postgres(common::types::PersistenceVersion::V5),
 +            &config.db_spec,
 +            require_ssl,
-+            false,
 +            &config.instance_name,
 +            None,
 +            rt.clone(),
