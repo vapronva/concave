@@ -2,7 +2,7 @@ ARG TOOLS_IMAGE=docker.horse/ci/on-alpine/tools:1
 
 FROM $TOOLS_IMAGE AS tools
 
-FROM docker.io/library/node:24.22.0-trixie-slim AS build
+FROM docker.io/library/node:24.22.1-trixie-slim AS build
 
 ARG MIRROR_DEBIAN_URL=""
 
@@ -16,9 +16,9 @@ RUN echo 'Acquire::ForceIPv4 "true";' > /etc/apt/apt.conf.d/99force-ipv4 && \
       apt-get clean && \
       rm --recursive --force /var/lib/apt/lists/*
 
-ARG UV_VERSION=0.13.1
+ARG UV_VERSION=0.13.5
 
-ARG UV_SHA256=eadd9d27c134ab5ac1ffd4473b97a741407f3ea238288f03121fc4deddf90220
+ARG UV_SHA256=f68d291c75783122dad58ab77def0e13f3233f358731db5d6d7e8715603b928f
 
 RUN <<EOF
 set -o errexit -o nounset -o xtrace
@@ -72,7 +72,7 @@ ENV NEXT_PUBLIC_LOAD_MONACO_INTERNALLY=${NEXT_PUBLIC_LOAD_MONACO_INTERNALLY}
 
 RUN --mount=type=cache,target=/root/.cache/uv turbo run build --filter=dashboard-self-hosted...
 
-FROM docker.io/library/node:24.22.0-trixie-slim
+FROM docker.io/library/node:24.22.1-trixie-slim
 
 LABEL org.opencontainers.image.source=https://git.horse/vapronva/concave
 

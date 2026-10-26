@@ -34,9 +34,9 @@ rm /tmp/just.tar.gz
 just --version
 EOF
 
-ARG UV_VERSION=0.13.1
+ARG UV_VERSION=0.13.5
 
-ARG UV_SHA256=eadd9d27c134ab5ac1ffd4473b97a741407f3ea238288f03121fc4deddf90220
+ARG UV_SHA256=f68d291c75783122dad58ab77def0e13f3233f358731db5d6d7e8715603b928f
 
 RUN <<EOF
 set -o errexit -o nounset -o xtrace
@@ -66,7 +66,7 @@ COPY apply-patches.sh /tmp/apply-patches.sh
 
 RUN PATCHES_DIR=/tmp/patches/backend UPSTREAM_PIN=/tmp/patches/UPSTREAM bash /tmp/apply-patches.sh /convex
 
-ARG NODE_SHA256=cc2f601cee82d9a5a233302fe307abc600727035fd7d2c3a3571755989e95008
+ARG NODE_SHA256=6c172a9ab6718f7b801fb5a7bd486af2ee5e32758086a04b84fcce2aa77095e6
 
 RUN <<EOF
 set -o errexit -o nounset -o xtrace
