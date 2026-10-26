@@ -30,10 +30,10 @@ index 6c018be51..58d9cf3f6 100644
        {children}
 diff --git a/npm-packages/dashboard-common/src/features/health/components/ChartForInsight.tsx b/npm-packages/dashboard-common/src/features/health/components/ChartForInsight.tsx
 new file mode 100644
-index 000000000..923f892bd
+index 000000000..7f0889886
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/health/components/ChartForInsight.tsx
-@@ -0,0 +1,277 @@
+@@ -0,0 +1,265 @@
 +import {
 +  useInsightsPeriod,
 +  HourlyCount,
@@ -85,15 +85,9 @@ index 000000000..923f892bd
 +function InsightsLineChart({
 +  data,
 +  name,
-+  dataKey,
-+  max,
-+  formatY = formatNumberCompact,
 +}: {
-+  data?: HourlyCount[];
++  data: HourlyCount[];
 +  name: string;
-+  dataKey: "count";
-+  max?: number;
-+  formatY?: (value: number) => string;
 +}) {
 +  const { from } = useInsightsPeriod();
 +  const auditLogs = useDeploymentAuditLogs(Date.parse(from), {
@@ -109,7 +103,7 @@ index 000000000..923f892bd
 +    )} ${String(creationDate.getUTCHours()).padStart(2, "0")}:00:00`;
 +    return { hour, timestamp: log._creationTime };
 +  });
-+  const midnightTicks = (data ?? [])
++  const midnightTicks = data
 +    .filter((d) => new Date(toNumericUTCWithHour(d.hour)).getUTCHours() === 0)
 +    .map((d) => d.hour);
 +  return (
@@ -117,90 +111,87 @@ index 000000000..923f892bd
 +      <LoadingTransition
 +        loadingProps={{ fullHeight: false, className: "h-[200px] w-full" }}
 +      >
-+        {data && (
-+          <ResponsiveContainer height={200} width="100%">
-+            <LineChart
-+              data={data}
-+              style={{
++        <ResponsiveContainer height={200} width="100%">
++          <LineChart
++            data={data}
++            style={{
++              fontSize: 12,
++            }}
++          >
++            {deploysByHour?.map(({ hour, timestamp }) => (
++              <ReferenceLine
++                key={timestamp}
++                x={hour}
++                stroke="var(--brand-yellow)"
++                strokeDasharray="3 3"
++              />
++            ))}
++            <CartesianGrid
++              className="stroke-content-tertiary/30"
++              horizontal
++              strokeWidth={1}
++              syncWithTicks
++            />
++            <XAxis
++              dataKey="hour"
++              domain={["auto", "auto"]}
++              tickFormatter={dateLabel}
++              strokeWidth={1}
++              axisLine={{ className: "stroke-content-tertiary/30" }}
++              tickLine={false}
++              tick={{
 +                fontSize: 12,
++                fill: "var(--content-secondary)",
 +              }}
-+            >
-+              {deploysByHour?.map(({ hour, timestamp }) => (
-+                <ReferenceLine
-+                  key={timestamp}
-+                  x={hour}
-+                  stroke="var(--brand-yellow)"
-+                  strokeDasharray="3 3"
-+                />
-+              ))}
-+              <CartesianGrid
-+                className="stroke-content-tertiary/30"
-+                horizontal
-+                strokeWidth={1}
-+                syncWithTicks
-+              />
-+              <XAxis
-+                dataKey="hour"
-+                domain={["auto", "auto"]}
-+                tickFormatter={dateLabel}
-+                strokeWidth={1}
-+                axisLine={{ className: "stroke-content-tertiary/30" }}
-+                tickLine={false}
-+                tick={{
-+                  fontSize: 12,
-+                  fill: "var(--content-secondary)",
-+                }}
-+                max={max}
-+                {...(midnightTicks.length > 0 ? { ticks: midnightTicks } : {})}
-+              />
-+              <YAxis
-+                tick={{
-+                  fontSize: 12,
-+                  fill: "currentColor",
-+                }}
-+                axisLine={{ className: "stroke-content-tertiary/30" }}
-+                tickLine={false}
-+                tickFormatter={formatY}
-+                width={48}
-+              />
-+              <Tooltip
-+                content={({ active, payload, label }) => {
-+                  const deploymentTimes = deploysByHour
-+                    ?.filter((deploy) => deploy.hour === label)
-+                    .map((deploy) => format(new Date(deploy.timestamp), "Pp"));
-+                  return (
-+                    <ChartTooltip
-+                      active={active}
-+                      payload={payload?.map((p) => ({
-+                        formattedValue: (
-+                          <div className="flex flex-col items-start">
-+                            <div>
-+                              {formatY(p.payload[dataKey])} {name}
-+                            </div>
++              {...(midnightTicks.length > 0 ? { ticks: midnightTicks } : {})}
++            />
++            <YAxis
++              tick={{
++                fontSize: 12,
++                fill: "currentColor",
++              }}
++              axisLine={{ className: "stroke-content-tertiary/30" }}
++              tickLine={false}
++              tickFormatter={formatNumberCompact}
++              width={48}
++            />
++            <Tooltip
++              content={({ active, payload, label }) => {
++                const deploymentTimes = deploysByHour
++                  ?.filter((deploy) => deploy.hour === label)
++                  .map((deploy) => format(new Date(deploy.timestamp), "Pp"));
++                return (
++                  <ChartTooltip
++                    active={active}
++                    payload={payload?.map((p) => ({
++                      formattedValue: (
++                        <div className="flex flex-col items-start">
++                          <div>
++                            {formatNumberCompact(p.payload.count)} {name}
 +                          </div>
-+                        ),
-+                        ...p,
-+                      }))}
-+                      extraContent={
-+                        <DeploymentTimes deploymentTimes={deploymentTimes} />
-+                      }
-+                      label={timeLabel(label)}
-+                    />
-+                  );
-+                }}
-+                animationDuration={100}
-+              />
-+              <Line
-+                isAnimationActive={false}
-+                className="stroke-chart-line-1"
-+                activeDot={{ r: 4, className: "stroke-none" }}
-+                name={name}
-+                dataKey={dataKey}
-+                dot={false}
-+              />
-+            </LineChart>
-+          </ResponsiveContainer>
-+        )}
++                        </div>
++                      ),
++                      ...p,
++                    }))}
++                    extraContent={
++                      <DeploymentTimes deploymentTimes={deploymentTimes} />
++                    }
++                    label={timeLabel(label)}
++                  />
++                );
++              }}
++              animationDuration={100}
++            />
++            <Line
++              isAnimationActive={false}
++              className="stroke-chart-line-1"
++              activeDot={{ r: 4, className: "stroke-none" }}
++              name={name}
++              dataKey="count"
++              dot={false}
++            />
++          </LineChart>
++        </ResponsiveContainer>
 +      </LoadingTransition>
 +    </div>
 +  );
@@ -214,7 +205,6 @@ index 000000000..923f892bd
 +  return (
 +    <InsightsLineChart
 +      data={insight.details.hourlyCounts}
-+      dataKey="count"
 +      name={`write conflict ${insight.kind === "occFailedPermanently" ? "failures" : "retries"}`}
 +    />
 +  );
@@ -228,7 +218,6 @@ index 000000000..923f892bd
 +  return (
 +    <InsightsLineChart
 +      data={insight.details.hourlyCounts}
-+      dataKey="count"
 +      name={`function calls reading more than ${formatBytes(insight.details.threshold)}`}
 +    />
 +  );
@@ -244,7 +233,6 @@ index 000000000..923f892bd
 +  return (
 +    <InsightsLineChart
 +      data={insight.details.hourlyCounts}
-+      dataKey="count"
 +      name={`function calls reading more than ${formatNumberCompact(insight.details.threshold)} documents`}
 +    />
 +  );
@@ -349,10 +337,10 @@ index d9abe1961..2a9622ef2 100644
                  <div className="flex items-center gap-2">
 diff --git a/npm-packages/dashboard-common/src/features/health/components/EventsForInsight.tsx b/npm-packages/dashboard-common/src/features/health/components/EventsForInsight.tsx
 new file mode 100644
-index 000000000..ef3c06896
+index 000000000..831a6c837
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/health/components/EventsForInsight.tsx
-@@ -0,0 +1,698 @@
+@@ -0,0 +1,615 @@
 +import { DeploymentInfoContext } from "@common/lib/deploymentContext";
 +import {
 +  Disclosure,
@@ -368,7 +356,6 @@ index 000000000..ef3c06896
 +import { Insight } from "@common/features/health/lib/insights";
 +import { Button } from "@ui/Button";
 +import { FunctionNameOption } from "@common/elements/FunctionNameOption";
-+import { Loading } from "@ui/Loading";
 +import { Tooltip } from "@ui/Tooltip";
 +import { HelpTooltip } from "@ui/HelpTooltip";
 +import { formatBytes, formatNumberCompact } from "@common/lib/format";
@@ -378,28 +365,6 @@ index 000000000..ef3c06896
 +import { cn } from "@ui/cn";
 +import { Link } from "@ui/Link";
 +import { useContext } from "react";
-+
-+type HourlyCount = {
-+  hour: string;
-+  count: number;
-+};
-+
-+type OccRecentEvent = {
-+  timestamp: string;
-+  id: string;
-+  request_id: string;
-+  occ_document_id: string;
-+  occ_write_source: string;
-+  occ_retry_count: number;
-+};
-+
-+type BytesReadRecentEvent = {
-+  timestamp: string;
-+  id: string;
-+  request_id: string;
-+  calls: { table_name: string; bytes_read: number; documents_read: number }[];
-+  success: boolean;
-+};
 +
 +type FormattedBytesReadEvent = {
 +  timestamp: string;
@@ -420,40 +385,6 @@ index 000000000..ef3c06896
 +  occWriteSource: string;
 +  occRetryCount: number;
 +};
-+
-+function isOccInsight(insight: Insight): insight is Insight & {
-+  kind: "occRetried" | "occFailedPermanently";
-+  details: {
-+    occCalls: number;
-+    occTableName: string;
-+    hourlyCounts: HourlyCount[];
-+    recentEvents: OccRecentEvent[];
-+  };
-+} {
-+  return (
-+    insight.kind === "occRetried" || insight.kind === "occFailedPermanently"
-+  );
-+}
-+
-+function isMetricsInsight(insight: Insight): insight is Insight & {
-+  kind:
-+    | "bytesReadLimit"
-+    | "bytesReadThreshold"
-+    | "documentsReadLimit"
-+    | "documentsReadThreshold";
-+  details: {
-+    count: number;
-+    hourlyCounts: HourlyCount[];
-+    recentEvents: BytesReadRecentEvent[];
-+  };
-+} {
-+  return [
-+    "bytesReadLimit",
-+    "bytesReadThreshold",
-+    "documentsReadLimit",
-+    "documentsReadThreshold",
-+  ].includes(insight.kind);
-+}
 +
 +export function EventsForInsight({ insight }: { insight: Insight }) {
 +  return (
@@ -745,7 +676,7 @@ index 000000000..ef3c06896
 +  insight,
 +  columns,
 +}: {
-+  events?: T[];
++  events: T[];
 +  insight: I;
 +  columns: {
 +    header: React.ReactNode;
@@ -779,47 +710,21 @@ index 000000000..ef3c06896
 +        ))}
 +      </div>
 +      <div className="flex max-h-full grow flex-col">
-+        {events &&
-+          events.map((event) => (
-+            <div
-+              key={`${event.id}:${event.timestamp}`}
-+              className="flex min-w-fit animate-fadeInFromLoading gap-2 border-b p-2 text-xs last:border-b-0"
-+            >
-+              {columns.map((col) => (
-+                <col.Column
-+                  key={col.key}
-+                  event={event}
-+                  insight={insight}
-+                  componentId={nentId}
-+                />
-+              ))}
-+            </div>
-+          ))}
-+        {!events &&
-+          Array.from(
-+            {
-+              length: Math.min(
-+                7,
-+                isOccInsight(insight)
-+                  ? insight.details.occCalls
-+                  : isMetricsInsight(insight)
-+                    ? insight.details.count
-+                    : 7,
-+              ),
-+            },
-+            (_, i) => `loading-event-${i}`,
-+          ).map((key) => (
-+            <div
-+              key={key}
-+              className="flex w-full gap-2 border-b p-2 last:border-b-0"
-+            >
-+              {columns.map((col) => (
-+                <Loading className="h-4" key={col.key}>
-+                  <div className={col.className} />
-+                </Loading>
-+              ))}
-+            </div>
-+          ))}
++        {events.map((event) => (
++          <div
++            key={`${event.id}:${event.timestamp}`}
++            className="flex min-w-fit animate-fadeInFromLoading gap-2 border-b p-2 text-xs last:border-b-0"
++          >
++            {columns.map((col) => (
++              <col.Column
++                key={col.key}
++                event={event}
++                insight={insight}
++                componentId={nentId}
++              />
++            ))}
++          </div>
++        ))}
 +      </div>
 +    </div>
 +  );
@@ -1053,10 +958,10 @@ index 000000000..ef3c06896
 +}
 diff --git a/npm-packages/dashboard-common/src/features/health/components/HealthWithInsights.tsx b/npm-packages/dashboard-common/src/features/health/components/HealthWithInsights.tsx
 new file mode 100644
-index 000000000..a5d025188
+index 000000000..1b14178c7
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/health/components/HealthWithInsights.tsx
-@@ -0,0 +1,281 @@
+@@ -0,0 +1,262 @@
 +import React, {
 +  useState,
 +  useCallback,
@@ -1088,10 +993,7 @@ index 000000000..a5d025188
 +  itemIdentifier,
 +  useModuleFunctions,
 +} from "@common/lib/functions/FunctionsProvider";
-+import {
-+  functionIdentifierValue,
-+  functionIdentifierFromValue,
-+} from "@common/lib/functions/generateFileTree";
++import { functionIdentifierFromValue } from "@common/lib/functions/generateFileTree";
 +import { SmallInsightsSummary } from "./SmallInsightsSummary";
 +import { InsightsSummary } from "./InsightsSummary";
 +import { InsightSummaryBreakdown } from "./InsightsSummaryBreakdown";
@@ -1102,7 +1004,6 @@ index 000000000..a5d025188
 +      page: string;
 +      insights?: Insight[];
 +      selectedFunctions: MultiSelectValue;
-+      setSelectedFunctions: (selectedFunctions: MultiSelectValue) => void;
 +    }
 +  | undefined
 +>(undefined);
@@ -1121,24 +1022,11 @@ index 000000000..a5d025188
 +    useState<MultiSelectValue>("all");
 +  const insights = useInsights();
 +  const { from } = useInsightsPeriod();
-+  const {
-+    useCurrentDeployment,
-+    useCurrentTeam,
-+    useTeamMembers,
-+    useCurrentProject,
-+  } = useContext(DeploymentInfoContext);
++  const { useCurrentDeployment, useCurrentTeam, useCurrentProject } =
++    useContext(DeploymentInfoContext);
 +  const deployment = useCurrentDeployment();
 +  const team = useCurrentTeam();
 +  const project = useCurrentProject();
-+  const teamMembers = useTeamMembers(team?.id)?.filter(
-+    (
-+      member,
-+    ): member is {
-+      id: number;
-+      name?: string | null;
-+      email: string;
-+    } => member.email !== undefined,
-+  );
 +  const selectedInsight = insights?.find(
 +    (insight) => getInsightPageIdentifier(insight) === page,
 +  );
@@ -1230,9 +1118,8 @@ index 000000000..a5d025188
 +      page,
 +      insights,
 +      selectedFunctions,
-+      setSelectedFunctions,
 +    }),
-+    [page, insights, selectedFunctions, setSelectedFunctions],
++    [page, insights, selectedFunctions],
 +  );
 +  return (
 +    <InsightsContext.Provider value={providerValue}>
@@ -1243,7 +1130,6 @@ index 000000000..a5d025188
 +        deployment={deployment}
 +        teamSlug={team?.slug}
 +        projectSlug={project?.slug}
-+        teamMembers={teamMembers}
 +      />
 +    </InsightsContext.Provider>
 +  );
@@ -1296,7 +1182,7 @@ index 000000000..a5d025188
 +        <InsightSummaryBreakdown
 +          insight={
 +            insights
-+              ? insights?.find(
++              ? insights.find(
 +                  (insight) => getInsightPageIdentifier(insight) === page,
 +                ) || null
 +              : undefined
@@ -1522,10 +1408,10 @@ index 000000000..c66e70950
 +}
 diff --git a/npm-packages/dashboard-common/src/features/health/components/InsightsSummaryListItem.tsx b/npm-packages/dashboard-common/src/features/health/components/InsightsSummaryListItem.tsx
 new file mode 100644
-index 000000000..0df0808e5
+index 000000000..0c7b9dd40
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/health/components/InsightsSummaryListItem.tsx
-@@ -0,0 +1,84 @@
+@@ -0,0 +1,79 @@
 +import {
 +  Insight,
 +  getInsightPageIdentifier,
@@ -1542,12 +1428,8 @@ index 000000000..0df0808e5
 +import { useRouter } from "next/router";
 +import { SparklineForInsight } from "./SparklineForInsight";
 +import { ProblemForInsight } from "./ProblemForInsight";
-+import { useContext } from "react";
-+import { DeploymentInfoContext } from "@common/lib/deploymentContext";
 +
 +export function InsightsSummaryListItem({ insight }: { insight: Insight }) {
-+  const { useLogDeploymentEvent } = useContext(DeploymentInfoContext);
-+  const log = useLogDeploymentEvent();
 +  const { push } = useRouter();
 +  return (
 +    <Button
@@ -1559,7 +1441,6 @@ index 000000000..0df0808e5
 +          undefined,
 +          { shallow: true },
 +        );
-+        log("open insight", { kind: insight.kind });
 +      }}
 +    >
 +      <span className="w-20">
@@ -1870,7 +1751,7 @@ index 000000000..886e236ff
 +}
 diff --git a/npm-packages/dashboard-common/src/features/health/components/SmallInsightsSummary.tsx b/npm-packages/dashboard-common/src/features/health/components/SmallInsightsSummary.tsx
 new file mode 100644
-index 000000000..09c01fd4f
+index 000000000..c40a897a6
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/health/components/SmallInsightsSummary.tsx
 @@ -0,0 +1,100 @@
@@ -1896,12 +1777,11 @@ index 000000000..09c01fd4f
 +  const notConfigured = useIsInsightsNotConfigured();
 +  const errored = useInsightsErrored();
 +  const { from } = useInsightsPeriod();
-+  let summaryText = "No issues";
-+  if (errored) {
-+    summaryText = "Could not load";
-+  } else if (notConfigured) {
-+    summaryText = "Not configured";
-+  }
++  const summaryText = errored
++    ? "Could not load"
++    : notConfigured
++      ? "Not configured"
++      : "No issues";
 +  const criticalCount =
 +    insights?.filter(
 +      (insight) => severityForInsightKind[insight.kind] === "error",
@@ -1910,23 +1790,24 @@ index 000000000..09c01fd4f
 +    insights?.filter(
 +      (insight) => severityForInsightKind[insight.kind] === "warning",
 +    ).length ?? 0;
-+  const closedDescription = insights ? (
-+    <span className="flex animate-fadeInFromLoading items-center gap-3 text-xs text-content-secondary">
-+      {criticalCount > 0 && (
-+        <span className="flex items-center gap-1 text-content-error">
-+          <CrossCircledIcon className="size-3 min-w-3" />
-+          {criticalCount} critical
-+        </span>
-+      )}
-+      {warningCount > 0 && (
-+        <span className="flex items-center gap-1 text-content-warning">
-+          <ExclamationTriangleIcon className="size-3 min-w-3" />
-+          {warningCount} warning{warningCount !== 1 ? "s" : ""}
-+        </span>
-+      )}
-+      {criticalCount === 0 && warningCount === 0 && summaryText}
-+    </span>
-+  ) : null;
++  const closedDescription =
++    insights !== undefined || errored || notConfigured ? (
++      <span className="flex animate-fadeInFromLoading items-center gap-3 text-xs text-content-secondary">
++        {criticalCount > 0 && (
++          <span className="flex items-center gap-1 text-content-error">
++            <CrossCircledIcon className="size-3 min-w-3" />
++            {criticalCount} critical
++          </span>
++        )}
++        {warningCount > 0 && (
++          <span className="flex items-center gap-1 text-content-warning">
++            <ExclamationTriangleIcon className="size-3 min-w-3" />
++            {warningCount} warning{warningCount !== 1 ? "s" : ""}
++          </span>
++        )}
++        {criticalCount === 0 && warningCount === 0 && summaryText}
++      </span>
++    ) : null;
 +  return (
 +    <DisclosureSection
 +      id="insights"
@@ -1976,7 +1857,7 @@ index 000000000..09c01fd4f
 +}
 diff --git a/npm-packages/dashboard-common/src/features/health/components/SparklineForInsight.tsx b/npm-packages/dashboard-common/src/features/health/components/SparklineForInsight.tsx
 new file mode 100644
-index 000000000..4005b536b
+index 000000000..0d352c081
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/health/components/SparklineForInsight.tsx
 @@ -0,0 +1,66 @@
@@ -2005,7 +1886,7 @@ index 000000000..4005b536b
 +const HEIGHT = 36;
 +const WIDTH = 240;
 +
-+function Sparkline({ data }: { data?: number[] }) {
++function Sparkline({ data }: { data: number[] }) {
 +  return (
 +    <LoadingTransition
 +      loadingProps={{
@@ -2013,7 +1894,7 @@ index 000000000..4005b536b
 +        className: "h-[36px] w-60",
 +      }}
 +    >
-+      {data && data.length > 1 ? (
++      {data.length > 1 ? (
 +        <svg
 +          width={WIDTH}
 +          height={HEIGHT}
@@ -2048,10 +1929,10 @@ index 000000000..4005b536b
 +}
 diff --git a/npm-packages/dashboard-common/src/features/health/lib/insights.ts b/npm-packages/dashboard-common/src/features/health/lib/insights.ts
 new file mode 100644
-index 000000000..d5346c4ba
+index 000000000..0229d07b4
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/health/lib/insights.ts
-@@ -0,0 +1,211 @@
+@@ -0,0 +1,210 @@
 +import { UrlObject } from "url";
 +import {
 +  rootComponentPath,
@@ -2245,14 +2126,13 @@ index 000000000..d5346c4ba
 +
 +export function useInsightsErrored(): boolean {
 +  const { error } = useInsightsUsage();
-+  return !!error && !isInsightsNotConfiguredError(error);
++  return Boolean(error) && !isInsightsNotConfiguredError(error);
 +}
 +
 +export function getInsightPageIdentifier(insight: Insight): string {
 +  if (
 +    (insight.kind === "occRetried" ||
 +      insight.kind === "occFailedPermanently") &&
-+    "details" in insight &&
 +    "occTableName" in insight.details
 +  ) {
 +    return `insight:${insight.kind}:${insight.componentPath}:${insight.functionId}:${insight.details.occTableName}`;
@@ -2463,10 +2343,10 @@ index 000000000..767fa2945
 +}
 diff --git a/npm-packages/dashboard-common/src/features/settings/components/backups/SnapshotImport.tsx b/npm-packages/dashboard-common/src/features/settings/components/backups/SnapshotImport.tsx
 new file mode 100644
-index 000000000..42e6cd6f1
+index 000000000..4f891b7d3
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/settings/components/backups/SnapshotImport.tsx
-@@ -0,0 +1,435 @@
+@@ -0,0 +1,433 @@
 +import {
 +  CheckCircledIcon,
 +  CheckIcon,
@@ -2481,7 +2361,7 @@ index 000000000..42e6cd6f1
 +import { Sheet } from "@ui/Sheet";
 +import { ConfirmationDialog } from "@ui/ConfirmationDialog";
 +import { useQuery } from "convex/react";
-+import { useContext } from "react";
++import { useContext, useRef, useState } from "react";
 +import { PermissionsContext } from "@common/lib/deploymentContext";
 +import udfs from "@common/udfs";
 +import { Doc, Id } from "system-udfs/convex/_generated/dataModel";
@@ -2499,7 +2379,6 @@ index 000000000..42e6cd6f1
 +  DisclosureButton,
 +  DisclosurePanel,
 +} from "@headlessui/react";
-+import { useRef, useState } from "react";
 +import { PuzzlePieceIcon } from "@common/elements/icons";
 +
 +function ConfirmImportButton({
@@ -2725,7 +2604,7 @@ index 000000000..42e6cd6f1
 +    <div className="flex flex-col gap-4">
 +      {Array.from(checkpointsByComponent.entries()).map(
 +        ([componentPath, checkpoints]) => (
-+          <div key={componentPath ?? "root"}>
++          <div key={componentPath ?? ""}>
 +            {componentPath ? (
 +              <h5 className="mb-1 flex w-full items-center space-x-1">
 +                <PuzzlePieceIcon className="text-content-secondary" />
@@ -2847,7 +2726,6 @@ index 000000000..42e6cd6f1
 +              Import tables into your database from a snapshot.{" "}
 +              <Link
 +                target="_blank"
-+                rel="noopener noreferrer"
 +                href="https://docs.convex.dev/database/import-export/import"
 +              >
 +                Learn more
@@ -2947,10 +2825,10 @@ index 28ae40fc5..2d5875595 100644
  }
 diff --git a/npm-packages/dashboard-common/src/lib/snapshotApi.ts b/npm-packages/dashboard-common/src/lib/snapshotApi.ts
 new file mode 100644
-index 000000000..e5ba5e851
+index 000000000..7120011d8
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/lib/snapshotApi.ts
-@@ -0,0 +1,186 @@
+@@ -0,0 +1,185 @@
 +import { useCallback, useContext } from "react";
 +import { Id } from "system-udfs/convex/_generated/dataModel";
 +import { useAdminKey, useDeploymentUrl } from "@common/lib/deploymentApi";
@@ -2975,9 +2853,8 @@ index 000000000..e5ba5e851
 +  const { reportHttpError } = useContext(DeploymentInfoContext);
 +  return useCallback(
 +    async (path: string, init: RequestInit = {}): Promise<Response | null> => {
-+      let res: Response;
 +      try {
-+        res = await fetch(`${deploymentUrl}${path}`, {
++        const res = await fetch(`${deploymentUrl}${path}`, {
 +          ...init,
 +          headers: { Authorization: `Convex ${adminKey}`, ...init.headers },
 +        });
