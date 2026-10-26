@@ -23,9 +23,9 @@ func TestActuation_SendsTokenAndObservedLease(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := backend.New(map[string]string{"dev": "s3cr3t"})
-	code, delivered, err := c.Promote(context.Background(), "dev", srv.URL)
-	if err != nil || code != http.StatusAccepted || !delivered {
-		t.Fatalf("promote: code=%d delivered=%v err=%v", code, delivered, err)
+	code, sent, err := c.Promote(context.Background(), "dev", srv.URL)
+	if err != nil || code != http.StatusAccepted || !sent {
+		t.Fatalf("promote: code=%d sent=%v err=%v", code, sent, err)
 	}
 	if token != "s3cr3t" || path != "/instance/promote" || query != "" {
 		t.Fatalf("promote request: token=%q path=%q query=%q", token, path, query)
@@ -51,20 +51,20 @@ func TestPromote_ReportsWhetherTheRequestWasWritten(t *testing.T) {
 	c := backend.New(nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
-	code, delivered, err := c.Promote(ctx, "dev", hung.URL)
-	if err == nil || code != 0 || !delivered {
+	code, sent, err := c.Promote(ctx, "dev", hung.URL)
+	if err == nil || code != 0 || !sent {
 		t.Fatalf(
-			"a request the backend read but never answered is delivered: code=%d delivered=%v err=%v",
+			"a request the backend read but never answered is sent: code=%d sent=%v err=%v",
 			code,
-			delivered,
+			sent,
 			err,
 		)
 	}
 	refused := httptest.NewServer(http.NotFoundHandler())
 	refused.Close()
-	code, delivered, err = c.Promote(context.Background(), "dev", refused.URL)
-	if err == nil || code != 0 || delivered {
-		t.Fatalf("a refused dial is not delivered: code=%d delivered=%v err=%v", code, delivered, err)
+	code, sent, err = c.Promote(context.Background(), "dev", refused.URL)
+	if err == nil || code != 0 || sent {
+		t.Fatalf("a refused dial is not sent: code=%d sent=%v err=%v", code, sent, err)
 	}
 }
 

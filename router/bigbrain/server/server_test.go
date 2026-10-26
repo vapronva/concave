@@ -162,9 +162,9 @@ func TestServer_UsageEndpointsRequireTheDeploymentToken(t *testing.T) {
 	t.Parallel()
 	reg, h := newTestServer(t)
 	reg.EnsureDeployment("dev", "convex-dev")
-	post := func(deployment, auth string) int {
+	post := func(deployment, auth, events string) int {
 		rr := httptest.NewRecorder()
-		body := `{"deployment":"` + deployment + `","read_limits":{"documents":1,"bytes":1,"warning_ratio":1},"events":[]}`
+		body := `{"deployment":"` + deployment + `","read_limits":{"documents":1,"bytes":1,"warning_ratio":1},"events":` + events + `}`
 		req := httptest.NewRequest(http.MethodPost, "/internal/usage", strings.NewReader(body))
 		if auth != "" {
 			req.Header.Set("Authorization", auth)
@@ -172,8 +172,14 @@ func TestServer_UsageEndpointsRequireTheDeploymentToken(t *testing.T) {
 		h.ServeHTTP(rr, req)
 		return rr.Code
 	}
-	if code := post("dev", "Bearer usage-secret"); code != http.StatusOK {
+	if code := post("dev", "Bearer usage-secret", "[]"); code != http.StatusOK {
 		t.Fatalf("valid token: want 200, got %d", code)
+	}
+	if code := post("dev", "Bearer usage-secret", "17"); code != http.StatusBadRequest {
+		t.Fatalf("malformed events with a valid token: want 400, got %d", code)
+	}
+	if code := post("dev", "Bearer wrong", "17"); code != http.StatusUnauthorized {
+		t.Fatalf("malformed events with a wrong token must fail authentication first: want 401, got %d", code)
 	}
 	for _, tc := range []struct{ deployment, auth string }{
 		{"dev", ""},
@@ -181,7 +187,7 @@ func TestServer_UsageEndpointsRequireTheDeploymentToken(t *testing.T) {
 		{"dev", "Bearer usage-secret extra"},
 		{"ghost", "Bearer usage-secret"},
 	} {
-		if code := post(tc.deployment, tc.auth); code != http.StatusUnauthorized {
+		if code := post(tc.deployment, tc.auth, "[]"); code != http.StatusUnauthorized {
 			t.Fatalf("deployment=%q auth=%q: want 401, got %d", tc.deployment, tc.auth, code)
 		}
 	}

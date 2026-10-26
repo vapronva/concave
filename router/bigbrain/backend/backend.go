@@ -6,8 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
-	"net/http/httptrace"
 	"strconv"
 	"sync/atomic"
 )
@@ -26,19 +26,23 @@ const (
 	controlPlaneTokenHeader = "X-Convex-Control-Plane-Token" //nolint:gosec // HTTP header name, not a credential
 )
 
+type dialFunc func(ctx context.Context, network, addr string) (net.Conn, error)
+
 type Client struct {
 	http   *http.Client
+	dial   dialFunc
 	tokens map[string]string
 }
 
 func New(tokens map[string]string) *Client {
 	return &Client{
-		http: &http.Client{
-			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-		},
+		http:   &http.Client{CheckRedirect: noRedirect},
+		dial:   (&net.Dialer{}).DialContext,
 		tokens: tokens,
 	}
 }
+
+func noRedirect(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 
 func (c *Client) Leadership(ctx context.Context, base string) (Leadership, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/instance/leadership", nil)
@@ -73,21 +77,45 @@ func (c *Client) Demote(ctx context.Context, deployment, base string, leaseTS *u
 }
 
 func (c *Client) post(ctx context.Context, deployment, url string) (int, bool, error) {
-	var wrote atomic.Bool
-	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
-		GetConn:      func(string) { wrote.Store(false) },
-		WroteRequest: func(info httptrace.WroteRequestInfo) { wrote.Store(info.Err == nil) },
-	})
+	var written atomic.Bool
+	hc := &http.Client{
+		CheckRedirect: noRedirect,
+		Transport: &http.Transport{
+			DisableKeepAlives: true,
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				conn, err := c.dial(ctx, network, addr)
+				if err != nil {
+					return nil, err
+				}
+				return &trackedConn{Conn: conn, written: &written}, nil
+			},
+		},
+	}
+	defer hc.CloseIdleConnections()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
 	if err != nil {
 		return 0, false, err
 	}
 	c.setControlPlaneToken(req, deployment)
-	status, _, err := do(c.http, req)
+	status, _, err := do(hc, req)
 	if status == 0 {
-		return 0, wrote.Load(), err
+		return 0, written.Load(), err
 	}
 	return status, true, nil
+}
+
+type trackedConn struct {
+	net.Conn
+
+	written *atomic.Bool
+}
+
+func (c *trackedConn) Write(b []byte) (int, error) {
+	n, err := c.Conn.Write(b)
+	if n > 0 {
+		c.written.Store(true)
+	}
+	return n, err
 }
 
 func do(hc *http.Client, req *http.Request) (int, []byte, error) {

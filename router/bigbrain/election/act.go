@@ -115,9 +115,9 @@ func (c *Controller) actLeaderless(
 func (c *Controller) promoteAndLog(base context.Context, name, kind string, st *deploymentState, target observation) {
 	actx, cancel := context.WithTimeout(base, c.cfg.ActuationTimeout)
 	defer cancel()
-	code, delivered, err := c.backend.Promote(actx, name, target.be.URL)
+	code, sent, err := c.backend.Promote(actx, name, target.be.URL)
 	if err != nil {
-		if delivered {
+		if sent {
 			c.markTransitioning(st, target.be.Pod)
 		}
 		c.log.ErrorContext(base, "election: "+kind+" failed", "deployment", name, "pod", target.be.Pod, "err", err)

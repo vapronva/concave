@@ -89,16 +89,10 @@ func (s *Server) handleUsageIngest(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Deployment string              `json:"deployment"`
 		ReadLimits insights.ReadLimits `json:"read_limits"`
-		Events     []insights.AnyEvent `json:"events"`
+		Events     json.RawMessage     `json:"events"`
 	}
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.UseNumber()
-	if err = dec.Decode(&body); err != nil {
+	if err = json.Unmarshal(raw, &body); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid usage body")
-		return
-	}
-	if err = dec.Decode(new(json.RawMessage)); !errors.Is(err, io.EOF) {
-		writeErr(w, http.StatusBadRequest, "trailing data after usage body")
 		return
 	}
 	if body.Deployment == "" {
@@ -109,12 +103,28 @@ func (s *Server) handleUsageIngest(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnauthorized, "invalid usage token")
 		return
 	}
-	kept, err := s.ins.Ingest(body.Deployment, body.ReadLimits, body.Events)
+	events, err := decodeEvents(body.Events)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid usage events")
+		return
+	}
+	kept, err := s.ins.Ingest(body.Deployment, body.ReadLimits, events)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]int{"ingested": kept})
+}
+
+func decodeEvents(raw json.RawMessage) ([]insights.AnyEvent, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var events []insights.AnyEvent
+	err := dec.Decode(&events)
+	return events, err
 }
 
 func (s *Server) handleUsageQuery(w http.ResponseWriter, r *http.Request) {
