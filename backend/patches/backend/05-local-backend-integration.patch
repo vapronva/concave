@@ -74,7 +74,7 @@ index dfe80d124..0b1f0aa5e 100644
 +    }
 +}
 diff --git a/crates/local_backend/src/lib.rs b/crates/local_backend/src/lib.rs
-index 5140998c7..fd0a4e69e 100644
+index 3422eb840..2c314658b 100644
 --- a/crates/local_backend/src/lib.rs
 +++ b/crates/local_backend/src/lib.rs
 @@ -35,7 +35,6 @@ use common::{
@@ -85,7 +85,7 @@ index 5140998c7..fd0a4e69e 100644
      runtime::{
          new_rate_limiter,
          Runtime,
-@@ -51,7 +50,6 @@ use common::{
+@@ -52,7 +51,6 @@ use common::{
  };
  use config::LocalConfig;
  use database::Database;
@@ -93,7 +93,7 @@ index 5140998c7..fd0a4e69e 100644
  use exports::interface::InProcessExportProvider;
  use file_storage::{
      FileStorage,
-@@ -90,6 +88,7 @@ pub mod authentication;
+@@ -91,6 +89,7 @@ pub mod authentication;
  pub mod beacon;
  pub mod canonical_urls;
  pub mod config;
@@ -101,7 +101,7 @@ index 5140998c7..fd0a4e69e 100644
  pub mod custom_headers;
  pub mod dashboard;
  pub mod deploy_config;
-@@ -100,6 +99,7 @@ pub mod deployment_jwks;
+@@ -101,6 +100,7 @@ pub mod deployment_jwks;
  pub mod deployment_state;
  pub mod environment_variables;
  pub mod http_actions;
@@ -109,7 +109,7 @@ index 5140998c7..fd0a4e69e 100644
  pub mod log_sinks;
  pub mod logs;
  pub mod node_action_callbacks;
-@@ -115,10 +115,9 @@ pub mod storage;
+@@ -116,10 +116,9 @@ pub mod storage;
  pub mod streaming_export;
  pub mod streaming_import;
  pub mod subs;
@@ -121,7 +121,7 @@ index 5140998c7..fd0a4e69e 100644
  #[derive(Clone)]
  pub struct LocalAppState {
      // Origin for the server (e.g. http://127.0.0.1:3210, https://demo.convex.cloud)
-@@ -127,6 +126,11 @@ pub struct LocalAppState {
+@@ -128,6 +127,11 @@ pub struct LocalAppState {
      pub site_origin: ConvexSite,
      // Name of the instance. (e.g. crazy-giraffe-123)
      pub instance_name: String,
@@ -133,7 +133,7 @@ index 5140998c7..fd0a4e69e 100644
      pub application: Application<ProdRuntime>,
      pub zombify_rx: async_broadcast::Receiver<()>,
  }
-@@ -155,7 +159,7 @@ pub struct EmptyResponse {}
+@@ -156,7 +160,7 @@ pub struct EmptyResponse {}
  pub async fn make_app(
      runtime: ProdRuntime,
      config: LocalConfig,
@@ -142,7 +142,7 @@ index 5140998c7..fd0a4e69e 100644
      zombify_rx: async_broadcast::Receiver<()>,
      preempt_tx: ShutdownSignal,
  ) -> anyhow::Result<LocalAppState> {
-@@ -165,30 +169,52 @@ pub async fn make_app(
+@@ -166,30 +170,52 @@ pub async fn make_app(
      // TODO(CX-6572) Separate `SegmentMetadataFetcher` from `SearcherImpl`
      let segment_metadata_fetcher: Arc<dyn SegmentTermMetadataFetcher> = in_process_searcher;
      let (deleted_tablet_sender, deleted_tablet_receiver) = tokio::sync::mpsc::channel(100);
@@ -218,7 +218,7 @@ index 5140998c7..fd0a4e69e 100644
  
      let file_storage = FileStorage {
          transactional_file_storage: TransactionalFileStorage::new(
-@@ -231,21 +257,41 @@ pub async fn make_app(
+@@ -232,21 +258,41 @@ pub async fn make_app(
          reqwest::redirect::Policy::default(),
      );
      let function_runner: Arc<dyn FunctionRunner<ProdRuntime>> =
@@ -272,7 +272,7 @@ index 5140998c7..fd0a4e69e 100644
          runtime.clone(),
          database.clone(),
          file_storage.clone(),
-@@ -263,7 +309,7 @@ pub async fn make_app(
+@@ -264,7 +310,7 @@ pub async fn make_app(
          config.convex_site_url()?,
          searcher.clone(),
          segment_metadata_fetcher,
@@ -281,7 +281,7 @@ index 5140998c7..fd0a4e69e 100644
          node_actions,
          Arc::new(RedactLogsToClient::new(config.redact_logs_to_client)),
          Arc::new(ApplicationAuth::new(
-@@ -289,7 +335,7 @@ pub async fn make_app(
+@@ -291,7 +337,7 @@ pub async fn make_app(
      let origin = config.convex_origin_url()?;
      let instance_name = config.name();
  
@@ -290,7 +290,7 @@ index 5140998c7..fd0a4e69e 100644
          let beacon_future = beacon::start_beacon(
              runtime.clone(),
              database.clone(),
-@@ -303,10 +349,22 @@ pub async fn make_app(
+@@ -305,10 +351,22 @@ pub async fn make_app(
          origin,
          site_origin: config.convex_site_url()?,
          instance_name,
@@ -315,7 +315,7 @@ index 5140998c7..fd0a4e69e 100644
  }
  
 diff --git a/crates/local_backend/src/main.rs b/crates/local_backend/src/main.rs
-index 93bad254f..209dcf0fe 100644
+index 93bad254f..372c73253 100644
 --- a/crates/local_backend/src/main.rs
 +++ b/crates/local_backend/src/main.rs
 @@ -1,5 +1,6 @@
@@ -380,7 +380,7 @@ index 93bad254f..209dcf0fe 100644
  fn main() -> Result<(), MainError> {
      let config = LocalConfig::parse();
      if let Some(subcommand) = &config.subcommand {
-@@ -140,42 +161,93 @@ async fn run_server(runtime: ProdRuntime, config: LocalConfig) -> anyhow::Result
+@@ -140,42 +161,92 @@ async fn run_server(runtime: ProdRuntime, config: LocalConfig) -> anyhow::Result
  }
  
  async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::Result<()> {
@@ -447,7 +447,6 @@ index 93bad254f..209dcf0fe 100644
 +                config.db,
 +                &config.db_spec,
 +                !config.do_not_require_ssl,
-+                false,
 +                &config.name(),
 +                deployment_id,
 +                runtime.clone(),
@@ -494,7 +493,7 @@ index 93bad254f..209dcf0fe 100644
          *HTTP_SERVER_TIMEOUT_DURATION,
          HttpActionRouteMapper,
      );
-@@ -194,19 +266,20 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
+@@ -194,19 +265,20 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
      // Start shutdown when we get a manual shutdown signal or with the first
      // ctrl-c.
      let mut force_exit_duration = None;
@@ -518,7 +517,7 @@ index 93bad254f..209dcf0fe 100644
              r?;
              let _: Result<_, _> = shutdown_tx.broadcast(()).await;
          },
-@@ -246,10 +319,14 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
+@@ -246,10 +318,14 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
              // Forcibly shutdown when the cool down expires
              _ = force_exit_future => {
                  tracing::info!("Cool down expired. Shutting down");
@@ -535,7 +534,7 @@ index 93bad254f..209dcf0fe 100644
                  r?;
                  tracing::warn!("Forcibly shutting down!");
                  break;
-@@ -259,3 +336,27 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
+@@ -259,3 +335,27 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
  
      Ok(())
  }

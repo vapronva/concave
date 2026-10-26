@@ -1,5 +1,5 @@
 diff --git a/crates/events/src/usage.rs b/crates/events/src/usage.rs
-index 8ba531f5c..a66254874 100644
+index 580e43cb5..b8e464464 100644
 --- a/crates/events/src/usage.rs
 +++ b/crates/events/src/usage.rs
 @@ -13,6 +13,8 @@ pub enum UdfType {
@@ -19,8 +19,8 @@ index 8ba531f5c..a66254874 100644
 +    pub occ_failed_permanently: bool,
  }
  
- #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-@@ -156,6 +160,8 @@ pub enum UsageEvent {
+ /// One storage call covered by a [`UsageEvent::StorageCall`]. A summary's
+@@ -170,6 +174,8 @@ pub enum UsageEvent {
          egress: u64,
      },
      InsightReadLimit {
@@ -29,7 +29,7 @@ index 8ba531f5c..a66254874 100644
          id: String,
          request_id: String,
          udf_id: String,
-@@ -296,4 +302,4 @@ impl UsageEventLogger for NoOpUsageEventLogger {
+@@ -309,4 +315,4 @@ impl UsageEventLogger for NoOpUsageEventLogger {
      async fn shutdown(&self) -> anyhow::Result<()> {
          Ok(())
      }
@@ -504,12 +504,12 @@ index 000000000..e55ece0c3
 +    }
 +}
 diff --git a/crates/usage_tracking/src/lib.rs b/crates/usage_tracking/src/lib.rs
-index 674c7993e..e21e66507 100644
+index 21724925f..10bd90e91 100644
 --- a/crates/usage_tracking/src/lib.rs
 +++ b/crates/usage_tracking/src/lib.rs
-@@ -5,7 +5,11 @@ use std::{
+@@ -4,7 +4,11 @@ use std::{
+     collections::BTreeMap,
      fmt::Debug,
-     ops::Add,
      sync::Arc,
 -    time::Duration,
 +    time::{
