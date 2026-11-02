@@ -46,6 +46,7 @@ const (
 	streamHealthyAfter      = 30 * time.Second
 	streamIdleTimeout       = 75 * time.Second
 	instancePrefix          = "/instance"
+	maxClientVersionBytes   = 128
 	healthzPath             = "/usher/healthz"
 	readyzPath              = "/usher/readyz"
 	routesPerDeployment     = 2
@@ -424,7 +425,7 @@ func isBlockedAPIPath(p string) bool {
 	for _, candidate := range []string{p, path.Clean("/" + p)} {
 		c := strings.ToLower(candidate)
 		if c == instancePrefix || strings.HasPrefix(c, instancePrefix+"/") || c == "/http" ||
-			strings.HasPrefix(c, "/http/") {
+			strings.HasPrefix(c, "/http/") || c == "/metrics" {
 			return true
 		}
 	}
@@ -439,6 +440,12 @@ func (t *tracker) serveHTTP(w http.ResponseWriter, r *http.Request, site bool) {
 	if !allowedMethod(r.Method) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
+	}
+	for _, v := range r.Header.Values("Convex-Client") {
+		if len(v) > maxClientVersionBytes {
+			http.Error(w, "convex-client header too long", http.StatusBadRequest)
+			return
+		}
 	}
 	if t.maxBodyBytes > 0 {
 		if r.ContentLength > t.maxBodyBytes {

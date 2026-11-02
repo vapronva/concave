@@ -64,6 +64,9 @@ func TestIsBlockedAPIPath(t *testing.T) {
 		"/http/./myaction",
 		"/api/../http/myaction",
 		"/http/../myaction",
+		"/metrics",
+		"/METRICS",
+		"/api/../metrics",
 	}
 	for _, p := range blocked {
 		if !isBlockedAPIPath(p) {
@@ -84,6 +87,41 @@ func TestIsBlockedAPIPath(t *testing.T) {
 	for _, p := range allowed {
 		if isBlockedAPIPath(p) {
 			t.Errorf("path %q should NOT be blocked", p)
+		}
+	}
+}
+
+func TestServeHTTP_RejectsOversizedClientVersion(t *testing.T) {
+	t.Parallel()
+	var hits hitLog
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.add(r.URL.Path)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+	tr := &tracker{host: "convex-dev.localtest.me", client: &http.Client{}, proxyTransport: newProxyTransport()}
+	if !tr.setLeader(upstream.URL) {
+		t.Fatal("setLeader should install the proxy")
+	}
+	for _, c := range []struct {
+		value    string
+		wantCode int
+		wantHit  bool
+	}{
+		{"npm-1.49.0", http.StatusOK, true},
+		{strings.Repeat("-", maxClientVersionBytes), http.StatusOK, true},
+		{strings.Repeat("-", maxClientVersionBytes+1), http.StatusBadRequest, false},
+	} {
+		hits.reset()
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/query", nil)
+		req.Header.Set("Convex-Client", c.value)
+		tr.serveHTTP(rr, req, false)
+		if rr.Code != c.wantCode {
+			t.Errorf("Convex-Client of %d bytes: want status %d, got %d", len(c.value), c.wantCode, rr.Code)
+		}
+		if hit := len(hits.snapshot()) > 0; hit != c.wantHit {
+			t.Errorf("Convex-Client of %d bytes: upstream hit = %v, want %v", len(c.value), hit, c.wantHit)
 		}
 	}
 }
@@ -111,6 +149,7 @@ func TestServeHTTP_RejectsInternalPaths(t *testing.T) {
 		{http.MethodPost, "/http/myaction", http.StatusNotFound, false, ""},
 		{http.MethodPost, "/http/../myaction", http.StatusNotFound, false, ""},
 		{http.MethodPost, "/http%2Fmyaction", http.StatusNotFound, false, ""},
+		{http.MethodGet, "/metrics", http.StatusNotFound, false, ""},
 		{http.MethodGet, "/instance_name", http.StatusOK, true, "upstream-reached"},
 		{http.MethodPost, "/api/mutation", http.StatusOK, true, "upstream-reached"},
 	}
