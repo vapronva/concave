@@ -46,10 +46,11 @@ index e453b597b..a8b8d7c5a 100644
                          usage_stats,
 diff --git a/crates/application/src/ha.rs b/crates/application/src/ha.rs
 new file mode 100644
-index 000000000..aadc3c33a
+index 000000000..c4873bee0
 --- /dev/null
 +++ b/crates/application/src/ha.rs
 @@ -0,0 +1,123 @@
++use ::integrations::LogManager;
 +use database::SCHEMAS_TABLE;
 +use model::initialize_application_system_tables;
 +
@@ -139,12 +140,21 @@ index 000000000..aadc3c33a
 +        self.database
 +            .load_indexes_into_memory(btreeset! { SCHEMAS_TABLE.clone() })
 +            .await?;
++        self.start_log_manager().await?;
++        tracing::info!("[promote] Application::become_leader: starting leader workers");
++        self.start_leader_workers(rw_persistence, preempt_signal, deleted_tablet_receiver)
++            .await?;
++        tracing::info!("[promote] Application::become_leader complete");
++        Ok(())
++    }
++
++    pub(crate) async fn start_log_manager(&self) -> anyhow::Result<()> {
 +        let log_streaming_allowed = {
 +            let mut tx = self.database.begin(Identity::system()).await?;
 +            let mut bi = BackendInfoModel::new(&mut tx);
 +            bi.is_log_streaming_allowed().await?
 +        };
-+        let real_log_manager_client = LogManager::start(
++        let client = LogManager::start(
 +            self.runtime.clone(),
 +            self.database.clone(),
 +            self.fetch_client.clone(),
@@ -155,17 +165,7 @@ index 000000000..aadc3c33a
 +            self.usage_counter.clone(),
 +        )
 +        .await;
-+        self.log_manager_client
-+            .replace_with(&real_log_manager_client);
-+        tracing::info!("[promote] Application::become_leader: starting leader workers");
-+        self.start_leader_workers(
-+            rw_persistence,
-+            real_log_manager_client,
-+            preempt_signal,
-+            deleted_tablet_receiver,
-+        )
-+        .await?;
-+        tracing::info!("[promote] Application::become_leader complete");
++        self.log_manager_client.replace_with(&client);
 +        Ok(())
 +    }
 +
@@ -174,10 +174,22 @@ index 000000000..aadc3c33a
 +    }
 +}
 diff --git a/crates/application/src/lib.rs b/crates/application/src/lib.rs
-index 47a3af88c..e24e8c1ed 100644
+index 093c1f225..37ccdc761 100644
 --- a/crates/application/src/lib.rs
 +++ b/crates/application/src/lib.rs
-@@ -135,6 +135,7 @@ use common::{
+@@ -22,10 +22,7 @@ use std::{
+ };
+ 
+ use ::exports::interface::ExportProvider;
+-use ::integrations::{
+-    LogManager,
+-    LogManagerClient,
+-};
++use ::integrations::LogManagerClient;
+ use airbyte_import::{
+     AirbyteRecord,
+     PrimaryKey,
+@@ -135,6 +132,7 @@ use common::{
          env_var_total_size_limit_met,
          AllowedVisibility,
          AttributionClaims,
@@ -185,7 +197,7 @@ index 47a3af88c..e24e8c1ed 100644
          ConvexOrigin,
          ConvexSite,
          DeploymentMetadata,
-@@ -325,7 +326,6 @@ use model::{
+@@ -322,7 +320,6 @@ use model::{
          types::UdfConfig,
          UdfConfigModel,
      },
@@ -193,7 +205,7 @@ index 47a3af88c..e24e8c1ed 100644
  };
  use node_executor::NodeActions;
  use parking_lot::{
-@@ -390,7 +390,6 @@ use usage_gauges_tracking_worker::UsageGaugesTrackingWorker;
+@@ -387,7 +384,6 @@ use usage_gauges_tracking_worker::UsageGaugesTrackingWorker;
  use usage_limits::{
      UsageLimitNotifier,
      UsageLimitRecorder,
@@ -201,15 +213,15 @@ index 47a3af88c..e24e8c1ed 100644
      UsageMeter,
  };
  use usage_tracking::{
-@@ -447,6 +446,7 @@ pub mod deployment_state;
+@@ -444,6 +440,7 @@ pub mod deployment_state;
  mod execute_query_timestamp;
  mod exports;
  pub mod function_log;
 +mod ha;
- pub mod log_streaming;
+ pub mod integrations;
  pub mod log_visibility;
  mod metrics;
-@@ -462,6 +462,8 @@ mod table_summary_worker;
+@@ -459,6 +456,8 @@ mod table_summary_worker;
  pub mod valid_identifier;
  mod worker_handles;
  
@@ -218,7 +230,7 @@ index 47a3af88c..e24e8c1ed 100644
  pub use crate::{
      cache::QueryCache,
      source_map_cache::SourceMapCache,
-@@ -625,9 +627,10 @@ pub struct Application<RT: Runtime> {
+@@ -622,9 +621,10 @@ pub struct Application<RT: Runtime> {
      usage_counter: UsageCounter,
      usage_event_logger: Arc<dyn UsageEventLogger>,
      usage_meter: Arc<UsageMeter>,
@@ -230,7 +242,7 @@ index 47a3af88c..e24e8c1ed 100644
      log_visibility: Arc<dyn LogVisibility<RT>>,
      system_env_var_names: HashSet<EnvVarName>,
      app_auth: Arc<ApplicationAuth<RT>>,
-@@ -638,6 +641,11 @@ pub struct Application<RT: Runtime> {
+@@ -635,6 +635,11 @@ pub struct Application<RT: Runtime> {
      // and Sentry tag updates that follow them.
      backend_info_write_lock: Arc<tokio::sync::Mutex<()>>,
      oidc_http_client: CachedHttpClient,
@@ -242,7 +254,7 @@ index 47a3af88c..e24e8c1ed 100644
  }
  
  /// Create storage based on the storage type configuration
-@@ -696,39 +704,13 @@ impl<RT: Runtime> Application<RT> {
+@@ -693,39 +698,13 @@ impl<RT: Runtime> Application<RT> {
              storage_type
          };
  
@@ -285,7 +297,7 @@ index 47a3af88c..e24e8c1ed 100644
          runtime: RT,
          database: Database<RT>,
          file_storage: FileStorage<RT>,
-@@ -742,7 +724,7 @@ impl<RT: Runtime> Application<RT> {
+@@ -739,7 +718,7 @@ impl<RT: Runtime> Application<RT> {
          convex_site: ConvexSite,
          searcher: Arc<dyn Searcher>,
          segment_term_metadata_fetcher: Arc<dyn SegmentTermMetadataFetcher>,
@@ -294,45 +306,19 @@ index 47a3af88c..e24e8c1ed 100644
          node_actions: NodeActions<RT>,
          log_visibility: Arc<dyn LogVisibility<RT>>,
          app_auth: Arc<ApplicationAuth<RT>>,
-@@ -770,6 +752,151 @@ impl<RT: Runtime> Application<RT> {
+@@ -759,13 +738,118 @@ impl<RT: Runtime> Application<RT> {
+         let usage_event_logger: Arc<dyn UsageEventLogger> =
+             UsageLimitRecorder::new(runtime.clone(), usage_meter.clone(), usage_event_logger);
+ 
+-        let deployment_name = deployment.name.clone();
+-        let deployment_region = deployment.region.clone();
+         let default_system_env_vars = btreemap! {
+             CONVEX_ORIGIN.clone() => convex_origin.parse()?,
              CONVEX_SITE.clone() => convex_site.parse()?
          };
  
 +        let usage_counter = UsageCounter::new(usage_event_logger.clone());
-+        // If local_log_sink is passed in, this is a local instance, so we enable log
-+        // streaming by default. Otherwise, it's hard to grant the
-+        // entitlement in testing and in load generator. If not local, we
-+        // read the entitlement from the database.
-+        let log_manager_client = if role.is_leader() {
-+            let log_streaming_allowed = match local_log_sink {
-+                Some(path) => {
-+                    add_local_log_sink_on_startup(database.clone(), path).await?;
-+                    true
-+                },
-+                _ => {
-+                    let mut tx = database.begin(Identity::system()).await?;
-+                    let mut bi = BackendInfoModel::new(&mut tx);
-+                    bi.is_log_streaming_allowed().await?
-+                },
-+            };
-+            LogManager::start(
-+                runtime.clone(),
-+                database.clone(),
-+                fetch_client.clone(),
-+                sentry_transport.clone(),
-+                deployment_name.clone(),
-+                deployment_region.as_ref().map(|r| r.to_string()),
-+                log_streaming_allowed,
-+                usage_counter.clone(),
-+            )
-+            .await
-+        } else {
-+            tracing::info!(
-+                "[backend-role] follower: using no-op LogManagerClient (log streaming disabled, \
-+                 no DB writes)"
-+            );
-+            LogManagerClient::noop()
-+        };
++        let log_manager_client = LogManagerClient::noop();
 +        let firehose_stream_name = {
 +            let mut tx = database.begin(Identity::system()).await?;
 +            AuditLogConfigModel::new(&mut tx)
@@ -406,13 +392,9 @@ index 47a3af88c..e24e8c1ed 100644
 +        if role.is_leader() {
 +            let persistence =
 +                persistence.context("leader requires a read-write Persistence handle")?;
++            application.start_log_manager().await?;
 +            application
-+                .start_leader_workers(
-+                    persistence,
-+                    log_manager_client,
-+                    lease_lost_shutdown,
-+                    deleted_tablet_receiver,
-+                )
++                .start_leader_workers(persistence, lease_lost_shutdown, deleted_tablet_receiver)
 +                .await?;
 +        } else {
 +            tracing::info!(
@@ -426,7 +408,6 @@ index 47a3af88c..e24e8c1ed 100644
 +    pub(crate) async fn start_leader_workers(
 +        &self,
 +        persistence: Arc<dyn Persistence>,
-+        log_manager_client: LogManagerClient,
 +        lease_lost_shutdown: ShutdownSignal,
 +        deleted_tablet_receiver: tokio::sync::mpsc::Receiver<TabletId>,
 +    ) -> anyhow::Result<()> {
@@ -446,7 +427,7 @@ index 47a3af88c..e24e8c1ed 100644
          let mut index_worker = Arc::new(Mutex::new(None));
          if *ENABLE_INDEX_BACKFILL {
              let index_worker_fut = IndexWorker::new(
-@@ -794,12 +921,12 @@ impl<RT: Runtime> Application<RT> {
+@@ -790,12 +874,12 @@ impl<RT: Runtime> Application<RT> {
              database.clone(),
              persistence.reader(),
              application_storage.search_storage.clone(),
@@ -462,22 +443,13 @@ index 47a3af88c..e24e8c1ed 100644
          let table_summary_worker = TableSummaryWorker::start(
              runtime.clone(),
              database.clone(),
-@@ -821,91 +948,7 @@ impl<RT: Runtime> Application<RT> {
+@@ -817,82 +901,7 @@ impl<RT: Runtime> Application<RT> {
              runtime.spawn("system_table_cleanup_worker", system_table_cleanup_worker),
          ));
  
--        // If local_log_sink is passed in, this is a local instance, so we enable log
--        // streaming by default. Otherwise, it's hard to grant the
--        // entitlement in testing and in load generator. If not local, we
--        // read the entitlement from the database.
 -        let mut tx = database.begin(Identity::system()).await?;
 -        let mut bi = BackendInfoModel::new(&mut tx);
--        let log_streaming_allowed = if let Some(path) = local_log_sink {
--            add_local_log_sink_on_startup(database.clone(), path).await?;
--            true
--        } else {
--            bi.is_log_streaming_allowed().await?
--        };
+-        let log_streaming_allowed = bi.is_log_streaming_allowed().await?;
 -
 -        let usage_counter = UsageCounter::new(usage_event_logger.clone());
 -        let log_manager_client = LogManager::start(
@@ -555,7 +527,7 @@ index 47a3af88c..e24e8c1ed 100644
  
          let scheduled_job_runner = ScheduledJobRunner::start(
              runtime.clone(),
-@@ -930,7 +973,7 @@ impl<RT: Runtime> Application<RT> {
+@@ -917,7 +926,7 @@ impl<RT: Runtime> Application<RT> {
              runtime.clone(),
              database.clone(),
              deployment_name.clone(),
@@ -564,7 +536,7 @@ index 47a3af88c..e24e8c1ed 100644
              usage_counter.clone(),
          );
          let s3_export_worker = Arc::new(Mutex::new(Some(
-@@ -942,7 +985,7 @@ impl<RT: Runtime> Application<RT> {
+@@ -929,7 +938,7 @@ impl<RT: Runtime> Application<RT> {
              database.clone(),
              application_storage.exports_storage.clone(),
              application_storage.files_storage.clone(),
@@ -573,7 +545,12 @@ index 47a3af88c..e24e8c1ed 100644
              usage_counter.clone(),
              deployment_name.clone(),
          );
-@@ -979,7 +1022,7 @@ impl<RT: Runtime> Application<RT> {
+@@ -962,11 +971,11 @@ impl<RT: Runtime> Application<RT> {
+             runtime.clone(),
+             database.clone(),
+             usage_event_logger.clone(),
+-            Arc::new(log_manager_client.clone()),
++            Arc::new(self.log_manager_client.clone()),
              deployment_name.clone(),
          )?;
  
@@ -582,7 +559,7 @@ index 47a3af88c..e24e8c1ed 100644
              usage_gauges_tracking_worker,
              scheduled_job_runner,
              cron_job_executor,
-@@ -995,31 +1038,10 @@ impl<RT: Runtime> Application<RT> {
+@@ -982,31 +991,10 @@ impl<RT: Runtime> Application<RT> {
              system_table_cleanup_worker,
              migration_worker,
              usage_limit_worker,
@@ -617,7 +594,7 @@ index 47a3af88c..e24e8c1ed 100644
      }
  
      pub fn usage_meter(&self) -> &Arc<UsageMeter> {
-@@ -1692,9 +1714,11 @@ impl<RT: Runtime> Application<RT> {
+@@ -1679,9 +1667,11 @@ impl<RT: Runtime> Application<RT> {
          identity.require_operation(DeploymentOp::CreateBackups)?;
          ensure_export_file_storage_within_limit(
              format,
@@ -632,7 +609,7 @@ index 47a3af88c..e24e8c1ed 100644
          )?;
          if let Some(expiration_ts_ns) = expiration_ts_ns {
              let now = SystemTime::now()
-@@ -4006,7 +4030,10 @@ impl<RT: Runtime> Application<RT> {
+@@ -3993,7 +3983,10 @@ impl<RT: Runtime> Application<RT> {
      }
  
      pub async fn shutdown(&self) -> anyhow::Result<()> {
@@ -690,12 +667,12 @@ index e9c59929b..501b4939f 100644
                  let state = match &completion.outcome.result {
                      Ok(_) => ScheduledJobState::Success,
                      Err(e) => ScheduledJobState::Failed(e.to_string()),
-diff --git a/crates/log_streaming/src/lib.rs b/crates/log_streaming/src/lib.rs
-index 29d7838f1..6ada46c81 100644
---- a/crates/log_streaming/src/lib.rs
-+++ b/crates/log_streaming/src/lib.rs
-@@ -101,6 +101,11 @@ use crate::sinks::{
- /// See `log_streaming/README.md` for more info.
+diff --git a/crates/integrations/src/lib.rs b/crates/integrations/src/lib.rs
+index cc9a72e13..4e13a84af 100644
+--- a/crates/integrations/src/lib.rs
++++ b/crates/integrations/src/lib.rs
+@@ -101,6 +101,11 @@ use crate::integrations::{
+ /// See `integrations/README.md` for more info.
  #[derive(Clone)]
  pub struct LogManagerClient {
 +    inner: Arc<RwLock<LogManagerClientInner>>,
@@ -705,7 +682,7 @@ index 29d7838f1..6ada46c81 100644
 +struct LogManagerClientInner {
      handle: Arc<Mutex<Option<Box<dyn SpawnHandle>>>>,
      event_sender: mpsc::Sender<Arc<LogEvent>>,
-     active_sinks_count: Arc<AtomicUsize>,
+     active_integrations_count: Arc<AtomicUsize>,
 @@ -108,12 +113,28 @@ pub struct LogManagerClient {
  }
  
@@ -715,7 +692,7 @@ index 29d7838f1..6ada46c81 100644
 +        LogManagerClient::from(LogManagerClientInner {
 +            handle: Arc::new(Mutex::new(None)),
 +            event_sender,
-+            active_sinks_count: Arc::new(AtomicUsize::new(0)),
++            active_integrations_count: Arc::new(AtomicUsize::new(0)),
 +            entitlement_enabled: Arc::new(AtomicBool::new(false)),
 +        })
 +    }
@@ -736,7 +713,7 @@ index 29d7838f1..6ada46c81 100644
                  Err(mpsc::error::TrySendError::Full(_)) => {
                      dropped += 1;
                  },
-@@ -140,15 +161,21 @@ impl LogManagerClient {
+@@ -140,15 +161,24 @@ impl LogManagerClient {
      }
  
      pub fn set_entitlement_enabled(&self, enabled: bool) {
@@ -747,9 +724,12 @@ index 29d7838f1..6ada46c81 100644
 +            .store(enabled, Ordering::Relaxed)
      }
  
-     fn get_active_sinks_count(&self) -> usize {
--        self.active_sinks_count.load(Ordering::Relaxed)
-+        self.inner.read().active_sinks_count.load(Ordering::Relaxed)
+     fn get_active_integrations_count(&self) -> usize {
+-        self.active_integrations_count.load(Ordering::Relaxed)
++        self.inner
++            .read()
++            .active_integrations_count
++            .load(Ordering::Relaxed)
      }
  
      pub fn is_entitlement_enabled(&self) -> bool {
@@ -761,7 +741,7 @@ index 29d7838f1..6ada46c81 100644
      }
  
      fn is_active(&self) -> bool {
-@@ -156,10 +183,18 @@ impl LogManagerClient {
+@@ -156,10 +186,18 @@ impl LogManagerClient {
      }
  }
  
@@ -781,7 +761,7 @@ index 29d7838f1..6ada46c81 100644
          if let Some(handle) = handle {
              shutdown_and_join(handle).await?;
          }
-@@ -286,12 +321,12 @@ impl<RT: Runtime> LogManager<RT> {
+@@ -286,12 +324,12 @@ impl<RT: Runtime> LogManager<RT> {
  
          let handle = Arc::new(Mutex::new(Some(runtime.spawn("log_manager", worker.go()))));
          let entitlement_enabled = Arc::new(AtomicBool::new(entitlement_enabled));
@@ -789,7 +769,7 @@ index 29d7838f1..6ada46c81 100644
 +        LogManagerClient::from(LogManagerClientInner {
              handle,
              event_sender: req_tx,
-             active_sinks_count,
+             active_integrations_count,
              entitlement_enabled,
 -        }
 +        })

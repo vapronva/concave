@@ -74,7 +74,7 @@ index dfe80d124..0b1f0aa5e 100644
 +    }
 +}
 diff --git a/crates/local_backend/src/lib.rs b/crates/local_backend/src/lib.rs
-index 3422eb840..2c314658b 100644
+index bea81d960..ba0d21aa2 100644
 --- a/crates/local_backend/src/lib.rs
 +++ b/crates/local_backend/src/lib.rs
 @@ -35,7 +35,6 @@ use common::{
@@ -101,14 +101,14 @@ index 3422eb840..2c314658b 100644
  pub mod custom_headers;
  pub mod dashboard;
  pub mod deploy_config;
-@@ -101,6 +100,7 @@ pub mod deployment_jwks;
- pub mod deployment_state;
+@@ -102,6 +101,7 @@ pub mod deployment_state;
  pub mod environment_variables;
  pub mod http_actions;
+ pub mod integrations;
 +pub mod leadership;
- pub mod log_sinks;
  pub mod logs;
  pub mod node_action_callbacks;
+ pub mod parse;
 @@ -116,10 +116,9 @@ pub mod storage;
  pub mod streaming_export;
  pub mod streaming_import;
@@ -281,7 +281,7 @@ index 3422eb840..2c314658b 100644
          node_actions,
          Arc::new(RedactLogsToClient::new(config.redact_logs_to_client)),
          Arc::new(ApplicationAuth::new(
-@@ -291,7 +337,7 @@ pub async fn make_app(
+@@ -290,7 +336,7 @@ pub async fn make_app(
      let origin = config.convex_origin_url()?;
      let instance_name = config.name();
  
@@ -290,7 +290,7 @@ index 3422eb840..2c314658b 100644
          let beacon_future = beacon::start_beacon(
              runtime.clone(),
              database.clone(),
-@@ -305,10 +351,22 @@ pub async fn make_app(
+@@ -304,10 +350,22 @@ pub async fn make_app(
          origin,
          site_origin: config.convex_site_url()?,
          instance_name,

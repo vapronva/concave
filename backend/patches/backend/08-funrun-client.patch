@@ -11,7 +11,7 @@ index bbdcaec82..9db9f167f 100644
      module_paths::CanonicalizedComponentModulePath,
      reference::Reference,
 diff --git a/crates/common/src/http/mod.rs b/crates/common/src/http/mod.rs
-index 463fe0ce2..40814392a 100644
+index 15fb45e78..305a3da30 100644
 --- a/crates/common/src/http/mod.rs
 +++ b/crates/common/src/http/mod.rs
 @@ -212,8 +212,7 @@ impl From<HttpRequest> for HttpRequestStream {
@@ -44,7 +44,7 @@ index 463fe0ce2..40814392a 100644
  
  pub struct ExtractRequestId(pub RequestId);
  
-@@ -1330,23 +1333,6 @@ impl<T: fmt::Display> fmt::Display for LogOptFmt<T> {
+@@ -1296,23 +1299,6 @@ impl<T: fmt::Display> fmt::Display for LogOptFmt<T> {
      }
  }
  
@@ -1590,10 +1590,10 @@ index 0207fcf03..4ba10c5ad 100644
          let mut total = IsolateHeapStats::default();
          for handle in self.handles.lock().iter() {
 diff --git a/crates/keybroker/src/broker.rs b/crates/keybroker/src/broker.rs
-index 45dafe076..e9a7a3033 100644
+index 752175547..1a81e9bb4 100644
 --- a/crates/keybroker/src/broker.rs
 +++ b/crates/keybroker/src/broker.rs
-@@ -1196,8 +1196,15 @@ impl KeyBroker {
+@@ -1204,8 +1204,15 @@ impl KeyBroker {
      }
  
      pub fn issue_action_token(&self, component_id: ComponentId) -> ActionCallbackToken {

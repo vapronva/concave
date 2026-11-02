@@ -1,5 +1,5 @@
 diff --git a/crates/local_backend/src/config.rs b/crates/local_backend/src/config.rs
-index 578b19dad..730d70d96 100644
+index 4512444b7..c9a338c21 100644
 --- a/crates/local_backend/src/config.rs
 +++ b/crates/local_backend/src/config.rs
 @@ -10,6 +10,7 @@ use clap::{
@@ -20,7 +20,7 @@ index 578b19dad..730d70d96 100644
      /// Host interface to bind to
      #[clap(short, long, default_value = "0.0.0.0")]
      pub interface: ::std::net::Ipv4Addr,
-@@ -259,5 +263,4 @@ impl LocalConfig {
+@@ -254,5 +258,4 @@ impl LocalConfig {
              }
          }
      }
@@ -768,7 +768,7 @@ index 000000000..37b3aacbc
 +    }
 +}
 diff --git a/crates/local_backend/src/router.rs b/crates/local_backend/src/router.rs
-index ae8bad2b7..55c18f300 100644
+index 608ff8589..99a95e01b 100644
 --- a/crates/local_backend/src/router.rs
 +++ b/crates/local_backend/src/router.rs
 @@ -1,6 +1,9 @@

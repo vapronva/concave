@@ -1,5 +1,5 @@
 diff --git a/crates/database/src/committer.rs b/crates/database/src/committer.rs
-index e90cec310..3d682a18b 100644
+index 5c0035658..7362ddbb4 100644
 --- a/crates/database/src/committer.rs
 +++ b/crates/database/src/committer.rs
 @@ -309,6 +309,7 @@ impl<RT: Runtime> Committer<RT> {
@@ -19,7 +19,7 @@ index e90cec310..3d682a18b 100644
          }
      }
  
-@@ -1499,10 +1500,6 @@ pub struct CommitterClient {
+@@ -1502,10 +1503,6 @@ pub struct CommitterClient {
  }
  
  impl CommitterClient {
