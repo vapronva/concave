@@ -134,11 +134,11 @@ func (d *deploymentRows) push(r Row, ringCap int) {
 func (i *Insights) rows(deployment string, fromMs, toMs int64) ([]Row, ReadLimits) {
 	i.memMu.Lock()
 	defer i.memMu.Unlock()
-	var out []Row
 	dep := i.mem[deployment]
 	if dep == nil {
 		return nil, ReadLimits{}
 	}
+	out := make([]Row, 0, len(dep.rows))
 	for n := range len(dep.rows) {
 		r := dep.rows[(dep.start+n)%len(dep.rows)]
 		ms := r.TS.UnixMilli()

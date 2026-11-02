@@ -71,6 +71,7 @@ type deploymentState struct {
 	discoveryDown             bool
 	failback                  failbackState
 	transitioningSeen         map[string]time.Time
+	promoteAttempts           map[string]time.Time
 }
 
 func New(cfg Config, k8s *k8sclient.Client, b *backend.Client, reg *registry.Registry, log *slog.Logger) *Controller {
@@ -174,6 +175,7 @@ func (c *Controller) reconcile(ctx context.Context, name string) {
 	dec := decide(obs, decideParams{
 		incumbent:            st.incumbentPod,
 		leaseUnverifiedGrace: c.cfg.LeaseUnverifiedGrace,
+		attempted:            st.promoteAttempts,
 		failback: failbackParams{
 			enabled:         c.cfg.FailbackEnabled,
 			stabilityWindow: c.cfg.FailbackStability,
@@ -240,6 +242,21 @@ func (c *Controller) markTransitioning(st *deploymentState, pod string) {
 	st.rememberTransition(pod, time.Now())
 }
 
+func (c *Controller) recordPromoteAttempt(st *deploymentState, pod string, at time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if st.promoteAttempts == nil {
+		st.promoteAttempts = make(map[string]time.Time)
+	}
+	st.promoteAttempts[pod] = at
+}
+
+func (c *Controller) restartFailbackClock(st *deploymentState, at time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	st.failback.eligibleSince = at
+}
+
 func (c *Controller) commitState(st *deploymentState, dec decision, emptyList bool, now time.Time) (int, int, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -254,6 +271,7 @@ func (c *Controller) commitState(st *deploymentState, dec decision, emptyList bo
 		switch {
 		case dec.liveLeaderCount > 0:
 			st.leaderlessStreak = 0
+			st.promoteAttempts = nil
 		case !dec.hasTransitioning:
 			st.leaderlessStreak++
 		}

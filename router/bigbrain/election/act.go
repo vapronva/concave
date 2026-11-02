@@ -41,6 +41,7 @@ func (c *Controller) actFailback(
 	if !c.tryAcquirePromote(st, pollStart) {
 		return
 	}
+	c.restartFailbackClock(st, pollStart)
 	base := context.WithoutCancel(ctx)
 	c.actGo(name, func() {
 		defer c.release(&st.promoting)
@@ -102,6 +103,7 @@ func (c *Controller) actLeaderless(
 	}
 	c.setLeader(name, st, "", "")
 	target := *d.promoteTarget
+	c.recordPromoteAttempt(st, target.be.Pod, pollStart)
 	base := context.WithoutCancel(ctx)
 	c.actGo(name, func() {
 		defer c.release(&st.promoting)

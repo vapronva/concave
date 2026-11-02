@@ -6,6 +6,7 @@ import (
 
 	"git.horse/vapronva/concave/router/bigbrain/backend"
 	"git.horse/vapronva/concave/router/bigbrain/k8sclient"
+	"git.horse/vapronva/concave/router/bigbrain/registry"
 )
 
 const (
@@ -234,6 +235,30 @@ func TestDecide_Leaderless_PromotesHighestPriorityNotWarmest(t *testing.T) {
 	}
 	if d.promoteTarget.be.Pod != "primary" {
 		t.Fatalf("leaderless must promote highest-PRIORITY pod 'primary', got %q", d.promoteTarget.be.Pod)
+	}
+}
+
+func TestDecide_Leaderless_RotatesToLeastRecentlyAttempted(t *testing.T) {
+	t.Parallel()
+	in := []observation{
+		withPriority(obs("primary", false, 120, -1), 100),
+		withPriority(obs("standby", false, 120, -1), 0),
+	}
+	t0 := time.Unix(1000, 0)
+	d := decide(in, decideParams{attempted: map[string]time.Time{"primary": t0}})
+	if d.promoteTarget == nil || d.promoteTarget.be.Pod != "standby" {
+		t.Fatalf("after an attempt on 'primary' the untried 'standby' must be next, got %+v", d.promoteTarget)
+	}
+	d = decide(in, decideParams{attempted: map[string]time.Time{"primary": t0, "standby": t0.Add(time.Second)}})
+	if d.promoteTarget == nil || d.promoteTarget.be.Pod != "primary" {
+		t.Fatalf("once both were attempted the least recent must be next, got %+v", d.promoteTarget)
+	}
+	c := New(DefaultConfig(), nil, nil, registry.New(), quietLogger())
+	st := c.deploymentState("dev")
+	c.recordPromoteAttempt(st, "primary", t0)
+	c.commitState(st, decision{liveLeaderCount: 1}, false, t0)
+	if st.promoteAttempts != nil {
+		t.Fatalf("a credited leader must clear the attempt record, got %v", st.promoteAttempts)
 	}
 }
 

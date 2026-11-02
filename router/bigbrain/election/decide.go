@@ -109,18 +109,26 @@ func leaseOf(o observation) (uint64, bool) {
 	return *o.status.LeaseTS, true
 }
 
-func bestCandidate(obs []observation) (observation, bool) {
+func bestCandidate(obs []observation, attempted map[string]time.Time) (observation, bool) {
 	var best observation
 	var found bool
 	for _, o := range obs {
 		if !isPromotable(o) {
 			continue
 		}
-		if !found || morePreferredCandidate(o, best) {
+		if !found || lessRecentlyAttempted(o, best, attempted) {
 			best, found = o, true
 		}
 	}
 	return best, found
+}
+
+func lessRecentlyAttempted(a, b observation, attempted map[string]time.Time) bool {
+	at, bt := attempted[a.be.Pod], attempted[b.be.Pod]
+	if !at.Equal(bt) {
+		return at.Before(bt)
+	}
+	return morePreferredCandidate(a, b)
 }
 
 func morePreferredCandidate(a, b observation) bool {
@@ -145,6 +153,7 @@ type failbackParams struct {
 type decideParams struct {
 	incumbent            string
 	leaseUnverifiedGrace time.Duration
+	attempted            map[string]time.Time
 	failback             failbackParams
 }
 
@@ -160,7 +169,7 @@ func decide(obs []observation, p decideParams) decision {
 		if d.hasTransitioning {
 			return d
 		}
-		if cand, ok := bestCandidate(obs); ok {
+		if cand, ok := bestCandidate(obs, p.attempted); ok {
 			d.promoteTarget = &cand
 		}
 		return d
