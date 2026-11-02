@@ -81,7 +81,7 @@ nodeAffinity:
           - key: kubernetes.io/hostname
             operator: In
             values:
-              - {{ . }}
+              - {{ . | quote }}
   {{- end }}
   {{- with .nodes }}
   requiredDuringSchedulingIgnoredDuringExecution:
@@ -91,7 +91,7 @@ nodeAffinity:
             operator: In
             values:
               {{- range . }}
-              - {{ . }}
+              - {{ . | quote }}
               {{- end }}
   {{- end }}
 {{- end }}

@@ -41,6 +41,9 @@ app.kubernetes.io/component: {{ .component }}
 
 {{- define "convex.ckicCors" -}}
 {{- $regexp := printf "^(?:%s)$" (required "ingress.ckic.cors.<host>.originRegexp is required when cors is set for a host" .originRegexp) -}}
+{{- if regexMatch "\\s" $regexp -}}
+{{- fail "ingress.ckic.cors.<host>.originRegexp must not contain whitespace: it is rendered as one Caddy token" -}}
+{{- end -}}
 @cors_origin header_regexp Origin {{ $regexp }}
 @cors_preflight {
   method OPTIONS
@@ -103,6 +106,10 @@ imagePullSecrets:
 {{- splitList ":" . | last -}}
 {{- end -}}
 
+{{- define "convex.set" -}}
+{{- if not (or (kindIs "invalid" .) (eq (toString .) "")) -}}1{{- end -}}
+{{- end -}}
+
 {{- define "convex.podScheduling" -}}
 {{- $out := list -}}
 {{- with .nodeSelector -}}
@@ -127,7 +134,7 @@ nodeAffinity:
             operator: In
             values:
               {{- range . }}
-              - {{ . }}
+              - {{ . | quote }}
               {{- end }}
 {{- end }}
 {{- end -}}
@@ -324,46 +331,46 @@ seccompProfile:
 {{- end -}}
 
 {{- define "convex.sharedTunableEnv" -}}
-{{- with .Values.sizeLimits.writeBytes }}
+{{- if include "convex.set" .Values.sizeLimits.writeBytes }}
 - name: TRANSACTION_MAX_USER_WRITE_SIZE_BYTES
-  value: {{ int64 . | quote }}
+  value: {{ int64 .Values.sizeLimits.writeBytes | quote }}
 {{- end }}
-{{- with .Values.sizeLimits.readBytes }}
+{{- if include "convex.set" .Values.sizeLimits.readBytes }}
 - name: TRANSACTION_MAX_READ_SIZE_BYTES
-  value: {{ int64 . | quote }}
+  value: {{ int64 .Values.sizeLimits.readBytes | quote }}
 {{- end }}
-{{- with .Values.allocator.arenaMax }}
+{{- if include "convex.set" .Values.allocator.arenaMax }}
 - name: MALLOC_ARENA_MAX
-  value: {{ int64 . | quote }}
+  value: {{ int64 .Values.allocator.arenaMax | quote }}
 {{- end }}
 - name: V8_ACTION_USER_TIMEOUT_SECS
   value: {{ .Values.backend.actionUserTimeoutSeconds | default 600 | int64 | quote }}
 {{- end -}}
 
 {{- define "convex.backendTunableEnv" -}}
-{{- with .Values.backend.concurrency.queries }}
+{{- if include "convex.set" .Values.backend.concurrency.queries }}
 - name: APPLICATION_MAX_CONCURRENT_QUERIES
-  value: {{ int64 . | quote }}
+  value: {{ int64 .Values.backend.concurrency.queries | quote }}
 {{- end }}
-{{- with .Values.backend.concurrency.mutations }}
+{{- if include "convex.set" .Values.backend.concurrency.mutations }}
 - name: APPLICATION_MAX_CONCURRENT_MUTATIONS
-  value: {{ int64 . | quote }}
+  value: {{ int64 .Values.backend.concurrency.mutations | quote }}
 {{- end }}
-{{- with .Values.backend.concurrency.v8Actions }}
+{{- if include "convex.set" .Values.backend.concurrency.v8Actions }}
 - name: APPLICATION_MAX_CONCURRENT_V8_ACTIONS
-  value: {{ int64 . | quote }}
+  value: {{ int64 .Values.backend.concurrency.v8Actions | quote }}
 {{- end }}
-{{- with .Values.backend.httpTimeoutSeconds }}
+{{- if include "convex.set" .Values.backend.httpTimeoutSeconds }}
 - name: HTTP_SERVER_TIMEOUT_SECONDS
-  value: {{ int64 . | quote }}
+  value: {{ int64 .Values.backend.httpTimeoutSeconds | quote }}
 {{- end }}
-{{- with .Values.backend.maxConcurrentRequests }}
+{{- if include "convex.set" .Values.backend.maxConcurrentRequests }}
 - name: HTTP_SERVER_MAX_CONCURRENT_REQUESTS
-  value: {{ int64 . | quote }}
+  value: {{ int64 .Values.backend.maxConcurrentRequests | quote }}
 {{- end }}
-{{- with .Values.backend.committerQueueSize }}
+{{- if include "convex.set" .Values.backend.committerQueueSize }}
 - name: COMMITTER_QUEUE_SIZE
-  value: {{ int64 . | quote }}
+  value: {{ int64 .Values.backend.committerQueueSize | quote }}
 {{- end }}
 {{- if .Values.backend.redactLogsToClient }}
 - name: REDACT_LOGS_TO_CLIENT
@@ -372,52 +379,52 @@ seccompProfile:
 {{- end -}}
 
 {{- define "convex.funrunTunableEnv" -}}
-{{- with .Values.funrun.isolate.maxWorkers }}
+{{- if include "convex.set" .Values.funrun.isolate.maxWorkers }}
 - name: MAX_ISOLATE_WORKERS
-  value: {{ int64 . | quote }}
+  value: {{ int64 .Values.funrun.isolate.maxWorkers | quote }}
 {{- end }}
-{{- with .Values.funrun.isolate.preloadWorkers }}
+{{- if include "convex.set" .Values.funrun.isolate.preloadWorkers }}
 - name: ISOLATE_PRELOAD_WORKERS
-  value: {{ int64 . | quote }}
+  value: {{ int64 .Values.funrun.isolate.preloadWorkers | quote }}
 {{- end }}
-{{- with .Values.funrun.isolate.heapUserMiB }}
+{{- if include "convex.set" .Values.funrun.isolate.heapUserMiB }}
 - name: ISOLATE_MAX_USER_HEAP_SIZE
-  value: {{ mul (int64 .) 1048576 | quote }}
+  value: {{ mul (int64 .Values.funrun.isolate.heapUserMiB) 1048576 | quote }}
 {{- end }}
-{{- with .Values.funrun.isolate.heapExtraMiB }}
+{{- if include "convex.set" .Values.funrun.isolate.heapExtraMiB }}
 - name: ISOLATE_MAX_HEAP_EXTRA_SIZE
-  value: {{ mul (int64 .) 1048576 | quote }}
+  value: {{ mul (int64 .Values.funrun.isolate.heapExtraMiB) 1048576 | quote }}
 {{- end }}
-{{- with .Values.funrun.isolate.arrayBufferMiB }}
+{{- if include "convex.set" .Values.funrun.isolate.arrayBufferMiB }}
 - name: ISOLATE_MAX_ARRAY_BUFFER_TOTAL_SIZE
-  value: {{ mul (int64 .) 1048576 | quote }}
+  value: {{ mul (int64 .Values.funrun.isolate.arrayBufferMiB) 1048576 | quote }}
 {{- end }}
-{{- with .Values.funrun.isolate.queueSize }}
+{{- if include "convex.set" .Values.funrun.isolate.queueSize }}
 - name: ISOLATE_QUEUE_SIZE
-  value: {{ int64 . | quote }}
+  value: {{ int64 .Values.funrun.isolate.queueSize | quote }}
 {{- end }}
-{{- with .Values.funrun.isolate.activeThreads }}
+{{- if include "convex.set" .Values.funrun.isolate.activeThreads }}
 - name: FUNRUN_ISOLATE_ACTIVE_THREADS
-  value: {{ int64 . | quote }}
+  value: {{ int64 .Values.funrun.isolate.activeThreads | quote }}
 {{- end }}
-{{- with .Values.funrun.isolate.queueIdleTimeoutMs }}
+{{- if include "convex.set" .Values.funrun.isolate.queueIdleTimeoutMs }}
 - name: ISOLATE_QUEUE_IDLE_TIMEOUT_MS
-  value: {{ int64 . | quote }}
+  value: {{ int64 .Values.funrun.isolate.queueIdleTimeoutMs | quote }}
 {{- end }}
-{{- with .Values.funrun.isolate.queueCongestedTimeoutMs }}
+{{- if include "convex.set" .Values.funrun.isolate.queueCongestedTimeoutMs }}
 - name: ISOLATE_QUEUE_CONGESTED_TIMEOUT_MS
-  value: {{ int64 . | quote }}
+  value: {{ int64 .Values.funrun.isolate.queueCongestedTimeoutMs | quote }}
 {{- end }}
-{{- with .Values.funrun.cache.indexBytes }}
+{{- if include "convex.set" .Values.funrun.cache.indexBytes }}
 - name: FUNRUN_INDEX_CACHE_SIZE
-  value: {{ int64 . | quote }}
+  value: {{ int64 .Values.funrun.cache.indexBytes | quote }}
 {{- end }}
-{{- with .Values.funrun.cache.codeBytes }}
+{{- if include "convex.set" .Values.funrun.cache.codeBytes }}
 - name: FUNRUN_CODE_CACHE_SIZE
-  value: {{ int64 . | quote }}
+  value: {{ int64 .Values.funrun.cache.codeBytes | quote }}
 {{- end }}
-{{- with .Values.funrun.cache.moduleBytes }}
+{{- if include "convex.set" .Values.funrun.cache.moduleBytes }}
 - name: FUNRUN_MODULE_CACHE_SIZE
-  value: {{ int64 . | quote }}
+  value: {{ int64 .Values.funrun.cache.moduleBytes | quote }}
 {{- end }}
 {{- end -}}

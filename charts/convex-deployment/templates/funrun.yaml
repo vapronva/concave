@@ -1,4 +1,7 @@
 {{- if .Values.funrun.enabled }}
+{{- if eq (include "convex.listenPort" .Values.funrun.listen) (include "convex.listenPort" .Values.funrun.healthListen) }}
+{{- fail "funrun.listen and funrun.healthListen must use different ports" }}
+{{- end }}
 {{- $funrunDrainSet := not (or (kindIs "invalid" .Values.funrun.drainDelaySeconds) (eq (toString .Values.funrun.drainDelaySeconds) "")) }}
 {{- $funrunDrainDelay := ternary (int .Values.funrun.drainDelaySeconds) 8 $funrunDrainSet }}
 {{- $funrunActionBudget := int (.Values.backend.actionUserTimeoutSeconds | default 600) }}
