@@ -1,35 +1,16 @@
 diff --git a/crates/events/src/usage.rs b/crates/events/src/usage.rs
-index 580e43cb5..b8e464464 100644
+index 405e31e9c..eb0e1c078 100644
 --- a/crates/events/src/usage.rs
 +++ b/crates/events/src/usage.rs
-@@ -13,6 +13,8 @@ pub enum UdfType {
- 
- #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
- pub struct FunctionCallUsageFields {
-+    #[serde(default)]
-+    pub timestamp: i64,
-     /// The ExecutionId of a particular UDF
-     pub id: String,
-     /// The RequestId of a particular UDF
-@@ -60,6 +62,8 @@ pub struct FunctionCallUsageFields {
-     pub occ_write_source: Option<String>,
+@@ -41,6 +41,7 @@ pub struct FunctionCallUsageFields {
+     pub occ_table_name: Option<String>,
      /// The retry number of the OCC. Only set if is_occ is true.
      pub occ_retry_count: Option<u64>,
-+    #[serde(default)]
 +    pub occ_failed_permanently: bool,
- }
  
- /// One storage call covered by a [`UsageEvent::StorageCall`]. A summary's
-@@ -170,6 +174,8 @@ pub enum UsageEvent {
-         egress: u64,
-     },
-     InsightReadLimit {
-+        #[serde(default)]
-+        timestamp: i64,
-         id: String,
-         request_id: String,
-         udf_id: String,
-@@ -309,4 +315,4 @@ impl UsageEventLogger for NoOpUsageEventLogger {
+     /// Executions this event covers.
+     pub calls: u64,
+@@ -337,4 +338,4 @@ impl UsageEventLogger for NoOpUsageEventLogger {
      async fn shutdown(&self) -> anyhow::Result<()> {
          Ok(())
      }
@@ -38,17 +19,23 @@ index 580e43cb5..b8e464464 100644
 +}
 diff --git a/crates/local_backend/src/usage_forwarder.rs b/crates/local_backend/src/usage_forwarder.rs
 new file mode 100644
-index 000000000..e55ece0c3
+index 000000000..d955552f9
 --- /dev/null
 +++ b/crates/local_backend/src/usage_forwarder.rs
-@@ -0,0 +1,461 @@
-+use std::sync::{
-+    atomic::{
-+        AtomicBool,
-+        AtomicU64,
-+        Ordering,
+@@ -0,0 +1,543 @@
++use std::{
++    sync::{
++        atomic::{
++            AtomicBool,
++            AtomicU64,
++            Ordering,
++        },
++        Arc,
 +    },
-+    Arc,
++    time::{
++        SystemTime,
++        UNIX_EPOCH,
++    },
 +};
 +
 +use anyhow::Context;
@@ -102,6 +89,8 @@ index 000000000..e55ece0c3
 +const USAGE_FORWARDER_MAX_POST_BYTES: usize = 4 << 20;
 +const SELF_HOSTED_USAGE_QUERY_PATH: &str = "/api/dashboard/teams/0/usage/query";
 +
++type Batch = Vec<serde_json::Value>;
++
 +register_convex_counter!(
 +    USAGE_FORWARDER_DROPPED_BATCHES_TOTAL,
 +    "Usage-event batches dropped because the forwarder channel was full or closed"
@@ -129,6 +118,25 @@ index 000000000..e55ece0c3
 +        | UsageEvent::CurrentDocumentCounts { .. }
 +        | UsageEvent::CurrentBackendState { .. } => false,
 +    }
++}
++
++fn now_millis() -> i64 {
++    let millis = SystemTime::now()
++        .duration_since(UNIX_EPOCH)
++        .unwrap_or_default()
++        .as_millis();
++    i64::try_from(millis).unwrap_or(i64::MAX)
++}
++
++fn stamp(event: UsageEvent, timestamp: i64) -> Option<serde_json::Value> {
++    let mut value = serde_json::to_value(event).ok()?;
++    let inner = value
++        .as_object_mut()?
++        .values_mut()
++        .next()?
++        .as_object_mut()?;
++    inner.insert("timestamp".to_string(), timestamp.into());
++    Some(value)
 +}
 +
 +fn usage_sink_token() -> Option<String> {
@@ -162,7 +170,7 @@ index 000000000..e55ece0c3
 +
 +#[derive(Debug)]
 +pub struct HttpUsageForwarder {
-+    tx: mpsc::Sender<Vec<UsageEvent>>,
++    tx: mpsc::Sender<Batch>,
 +    shutdown_tx: Mutex<Option<oneshot::Sender<()>>>,
 +    worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
 +    dropping: AtomicBool,
@@ -176,14 +184,14 @@ index 000000000..e55ece0c3
 +    deployment: String,
 +}
 +
-+fn json_len(events: &[UsageEvent]) -> usize {
++fn json_len(events: &[serde_json::Value]) -> usize {
 +    serde_json::to_vec(events).map_or(usize::MAX, |body| body.len())
 +}
 +
 +fn coalesce_batches(
-+    rx: &mut mpsc::Receiver<Vec<UsageEvent>>,
-+    mut events: Vec<UsageEvent>,
-+) -> (Vec<UsageEvent>, u64, Option<Vec<UsageEvent>>) {
++    rx: &mut mpsc::Receiver<Batch>,
++    mut events: Batch,
++) -> (Batch, u64, Option<Batch>) {
 +    let mut batches: u64 = 1;
 +    let mut bytes = json_len(&events);
 +    while batches < USAGE_FORWARDER_MAX_BATCHES_PER_POST as u64 {
@@ -202,7 +210,7 @@ index 000000000..e55ece0c3
 +}
 +
 +impl Sink {
-+    async fn post(&self, events: Vec<UsageEvent>, batches: u64) {
++    async fn post(&self, events: Batch, batches: u64) {
 +        if events.is_empty() {
 +            return;
 +        }
@@ -247,17 +255,17 @@ index 000000000..e55ece0c3
 +
 +    async fn post_coalesced(
 +        &self,
-+        rx: &mut mpsc::Receiver<Vec<UsageEvent>>,
-+        events: Vec<UsageEvent>,
++        rx: &mut mpsc::Receiver<Batch>,
++        events: Batch,
 +        outstanding: &AtomicU64,
-+    ) -> Option<Vec<UsageEvent>> {
++    ) -> Option<Batch> {
 +        let (events, batches, carry) = coalesce_batches(rx, events);
 +        self.post(events, batches).await;
 +        outstanding.fetch_sub(batches, Ordering::Relaxed);
 +        carry
 +    }
 +
-+    async fn drain(&self, rx: &mut mpsc::Receiver<Vec<UsageEvent>>, outstanding: &AtomicU64) {
++    async fn drain(&self, rx: &mut mpsc::Receiver<Batch>, outstanding: &AtomicU64) {
 +        let mut carry = None;
 +        loop {
 +            let events = match carry.take().or_else(|| rx.try_recv().ok()) {
@@ -284,12 +292,12 @@ index 000000000..e55ece0c3
 +            token,
 +            deployment,
 +        };
-+        let (tx, mut rx) = mpsc::channel::<Vec<UsageEvent>>(USAGE_FORWARDER_CHANNEL_CAPACITY);
++        let (tx, mut rx) = mpsc::channel::<Batch>(USAGE_FORWARDER_CHANNEL_CAPACITY);
 +        let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
 +        let outstanding = Arc::new(AtomicU64::new(0));
 +        let worker_outstanding = outstanding.clone();
 +        let worker = tokio::spawn(async move {
-+            let mut carry: Option<Vec<UsageEvent>> = None;
++            let mut carry: Option<Batch> = None;
 +            loop {
 +                let events = match carry.take() {
 +                    Some(events) => events,
@@ -321,18 +329,24 @@ index 000000000..e55ece0c3
 +#[async_trait]
 +impl UsageEventLogger for HttpUsageForwarder {
 +    async fn record_async(&self, events: Vec<UsageEvent>) {
-+        let events: Vec<UsageEvent> = events.into_iter().filter(is_insight).collect();
++        let timestamp = now_millis();
++        let events: Batch = events
++            .into_iter()
++            .filter(is_insight)
++            .filter_map(|event| stamp(event, timestamp))
++            .collect();
 +        if events.is_empty() {
 +            return;
 +        }
++        self.outstanding.fetch_add(1, Ordering::Relaxed);
 +        match self.tx.try_send(events) {
 +            Ok(()) => {
-+                self.outstanding.fetch_add(1, Ordering::Relaxed);
 +                if self.dropping.swap(false, Ordering::Relaxed) {
 +                    tracing::info!("usage forwarder accepting Insights events again");
 +                }
 +            },
 +            Err(e) => {
++                self.outstanding.fetch_sub(1, Ordering::Relaxed);
 +                let state = match e {
 +                    mpsc::error::TrySendError::Full(_) => "full",
 +                    mpsc::error::TrySendError::Closed(_) => "closed",
@@ -481,7 +495,56 @@ index 000000000..e55ece0c3
 +
 +#[cfg(test)]
 +mod tests {
-+    use super::build_insights_url;
++    use events::usage::{
++        FunctionCallSample,
++        FunctionCallUsageFields,
++        UsageEvent,
++    };
++
++    use super::{
++        build_insights_url,
++        stamp,
++    };
++
++    #[test]
++    fn stamped_occ_event_keeps_the_insight_fields_flat() {
++        let event = UsageEvent::FunctionCall {
++            fields: FunctionCallUsageFields {
++                component_path: None,
++                udf_id: "messages:send".to_string(),
++                udf_id_type: "function".to_string(),
++                tag: "mutation".to_string(),
++                environment: "isolate".to_string(),
++                is_tracked: true,
++                is_occ: true,
++                occ_table_name: Some("messages".to_string()),
++                occ_retry_count: Some(3),
++                occ_failed_permanently: true,
++                calls: 1,
++                duration_millis: 7,
++                user_execution_millis: None,
++                compute_mb_ms: 0,
++                user_compute_mb_ms: None,
++                sample: FunctionCallSample {
++                    id: "exec".to_string(),
++                    request_id: "req".to_string(),
++                    memory_megabytes: 0,
++                    occ_document_id: Some("doc".to_string()),
++                    occ_write_source: Some("messages:send".to_string()),
++                    status: "failure".to_string(),
++                    response_sha256: None,
++                },
++            },
++        };
++        let value = stamp(event, 1_700_000_000_000).unwrap();
++        let inner = &value["FunctionCall"];
++        assert_eq!(inner["timestamp"], 1_700_000_000_000_i64);
++        assert_eq!(inner["is_occ"], true);
++        assert_eq!(inner["occ_failed_permanently"], true);
++        assert_eq!(inner["occ_retry_count"], 3);
++        assert_eq!(inner["occ_document_id"], "doc");
++        assert_eq!(inner["udf_id"], "messages:send");
++    }
 +
 +    #[test]
 +    fn insights_url_pins_deployment_name() {
@@ -504,38 +567,10 @@ index 000000000..e55ece0c3
 +    }
 +}
 diff --git a/crates/usage_tracking/src/lib.rs b/crates/usage_tracking/src/lib.rs
-index 21724925f..10bd90e91 100644
+index 9e5bbd10e..750da4006 100644
 --- a/crates/usage_tracking/src/lib.rs
 +++ b/crates/usage_tracking/src/lib.rs
-@@ -4,7 +4,11 @@ use std::{
-     collections::BTreeMap,
-     fmt::Debug,
-     sync::Arc,
--    time::Duration,
-+    time::{
-+        Duration,
-+        SystemTime,
-+        UNIX_EPOCH,
-+    },
- };
- 
- use anyhow::Context;
-@@ -50,6 +54,14 @@ use value::{
- 
- mod metrics;
- 
-+fn event_timestamp_millis() -> i64 {
-+    let millis = SystemTime::now()
-+        .duration_since(UNIX_EPOCH)
-+        .unwrap_or_default()
-+        .as_millis();
-+    i64::try_from(millis).unwrap_or(i64::MAX)
-+}
-+
- /// The core usage stats aggregator that is cheaply cloneable
- #[derive(Clone, Debug)]
- pub struct UsageCounter {
-@@ -85,6 +97,7 @@ pub enum CallType {
+@@ -86,6 +86,7 @@ pub enum CallType {
          user_execution_time: Option<Duration>,
          memory_in_mb: u64,
          occ_info: Option<OccInfo>,
@@ -543,7 +578,7 @@ index 21724925f..10bd90e91 100644
      },
      Import,
      CloudBackup,
-@@ -151,6 +164,16 @@ impl CallType {
+@@ -152,6 +153,16 @@ impl CallType {
          }
      }
  
@@ -560,27 +595,11 @@ index 21724925f..10bd90e91 100644
      fn memory_megabytes(&self) -> u64 {
          match self {
              CallType::UncachedQuery { memory_in_mb, .. }
-@@ -251,6 +274,7 @@ impl UsageCounter {
-         let (component_path, udf_id) = udf_path.clone().into_component_and_udf_path();
-         usage_metrics.push(UsageEvent::FunctionCall {
-             fields: FunctionCallUsageFields {
-+                timestamp: event_timestamp_millis(),
-                 id: execution_id.to_string(),
-                 request_id: request_id.to_string(),
-                 status: if success { "success" } else { "failure" }.to_string(),
-@@ -269,6 +293,7 @@ impl UsageCounter {
-                 occ_document_id: call_type.occ_document_id(),
-                 occ_write_source: call_type.occ_write_source(),
+@@ -263,6 +274,7 @@ impl UsageCounter {
+                 is_occ: call_type.is_occ(),
+                 occ_table_name: call_type.occ_table_name(),
                  occ_retry_count: call_type.occ_retry_count(),
 +                occ_failed_permanently: call_type.occ_failed_permanently(),
-             },
-         });
- 
-@@ -449,6 +474,7 @@ impl UsageCounter {
-                 }
- 
-                 usage_metrics.push(UsageEvent::InsightReadLimit {
-+                    timestamp: event_timestamp_millis(),
-                     id: execution_id.to_string(),
-                     request_id: request_id.to_string(),
-                     udf_id: udf_id.clone(),
+                 calls: 1,
+                 duration_millis: call_type.duration_millis(),
+                 user_execution_millis,
