@@ -1,8 +1,22 @@
 diff --git a/Cargo.lock b/Cargo.lock
-index 81ba4d4ae..570cee276 100644
+index 96b4aee7d..316d8ad35 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
-@@ -4363,7 +4363,7 @@ dependencies = [
+@@ -4130,11 +4130,10 @@ dependencies = [
+ 
+ [[package]]
+ name = "event-listener"
+-version = "5.3.1"
++version = "5.4.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "6032be9bd27023a771701cc49f9f053c751055f71efb2e0ae5c15809093675ba"
++checksum = "5a23add41df1562121a9393cb065eab5146a1242410f23a644851e90cfd669d2"
+ dependencies = [
+- "concurrent-queue",
+  "parking",
+  "pin-project-lite",
+ ]
+@@ -4399,7 +4398,7 @@ dependencies = [
   "fxhash",
   "maplit",
   "proptest",
@@ -11,16 +25,7 @@ index 81ba4d4ae..570cee276 100644
   "prost-types",
   "tonic",
   "tonic-prost",
-@@ -4395,7 +4395,7 @@ dependencies = [
-  "pretty_assertions",
-  "proptest",
-  "proptest-derive",
-- "prost 0.14.3",
-+ "prost 0.14.4",
-  "prost-types",
-  "reqwest 0.13.4",
-  "serde",
-@@ -4427,7 +4427,7 @@ dependencies = [
+@@ -4429,7 +4428,7 @@ dependencies = [
   "pretty_assertions",
   "proptest",
   "proptest-derive",
@@ -29,7 +34,7 @@ index 81ba4d4ae..570cee276 100644
   "prost-types",
   "rand 0.9.4",
   "reqwest 0.13.4",
-@@ -4607,6 +4607,8 @@ dependencies = [
+@@ -4609,6 +4608,8 @@ dependencies = [
   "anyhow",
   "async-trait",
   "async_lru",
@@ -38,7 +43,7 @@ index 81ba4d4ae..570cee276 100644
   "common",
   "convex_sync_types",
   "database",
-@@ -4621,17 +4623,64 @@ dependencies = [
+@@ -4623,19 +4624,66 @@ dependencies = [
   "model",
   "moka",
   "parking_lot",
@@ -49,16 +54,16 @@ index 81ba4d4ae..570cee276 100644
   "rand 0.9.4",
   "runtime",
 + "search",
-+ "storage",
-+ "tokio",
-+ "tokio-stream",
+  "storage",
+  "tokio",
+  "tokio-stream",
 + "tonic",
 + "tracing",
-+ "udf",
-+ "usage_tracking",
-+ "value",
-+]
-+
+  "udf",
+  "usage_tracking",
+  "value",
+ ]
+ 
 +[[package]]
 +name = "funrun_server"
 +version = "0.1.0"
@@ -91,31 +96,33 @@ index 81ba4d4ae..570cee276 100644
 + "search",
 + "serde",
 + "serde_json",
-  "storage",
-  "tokio",
-  "tokio-stream",
++ "storage",
++ "tokio",
++ "tokio-stream",
 + "tonic",
 + "tracing",
-  "udf",
-  "usage_tracking",
-  "value",
++ "udf",
++ "usage_tracking",
++ "value",
 + "vector",
- ]
- 
++]
++
  [[package]]
-@@ -4995,9 +5044,9 @@ dependencies = [
+ name = "funty"
+ version = "2.0.0"
+@@ -4997,9 +5045,9 @@ dependencies = [
  
  [[package]]
  name = "h2"
--version = "0.4.12"
+-version = "0.4.16"
 +version = "0.4.19"
  source = "registry+https://github.com/rust-lang/crates.io-index"
--checksum = "f3c0b69cfcb4e1b9f1bf2f53f95f766e4661169728ec61cd3fe5a0166f2d1386"
+-checksum = "a9f37a958b41b3b19ee2707c06439c0e9e547e847223eb791ecb0cb821c65e27"
 +checksum = "ef8e5e5a340588f4452631496976cf8636d4a7ecf600239fdc27615d2530bc16"
  dependencies = [
   "atomic-waker",
   "bytes",
-@@ -6349,7 +6398,7 @@ dependencies = [
+@@ -6380,7 +6428,7 @@ dependencies = [
   "pretty_assertions",
   "proptest",
   "proptest-derive",
@@ -124,7 +131,7 @@ index 81ba4d4ae..570cee276 100644
   "rand 0.9.4",
   "rsa",
   "runtime",
-@@ -6724,7 +6773,10 @@ dependencies = [
+@@ -6755,7 +6803,10 @@ dependencies = [
   "moka",
   "node_executor",
   "parking_lot",
@@ -135,7 +142,7 @@ index 81ba4d4ae..570cee276 100644
   "reqwest 0.13.4",
   "roles",
   "runtime",
-@@ -6734,6 +6786,7 @@ dependencies = [
+@@ -6765,6 +6816,7 @@ dependencies = [
   "serde_json",
   "serde_with",
   "shape_inference",
@@ -143,7 +150,7 @@ index 81ba4d4ae..570cee276 100644
   "storage",
   "streaming_export",
   "sync",
-@@ -8247,7 +8300,7 @@ dependencies = [
+@@ -8248,7 +8300,7 @@ dependencies = [
   "pb_build",
   "pb_extras",
   "proptest",
@@ -152,7 +159,7 @@ index 81ba4d4ae..570cee276 100644
   "prost-reflect",
   "prost-types",
   "tonic",
-@@ -8259,7 +8312,7 @@ dependencies = [
+@@ -8260,7 +8312,7 @@ dependencies = [
  name = "pb_build"
  version = "0.1.0"
  dependencies = [
@@ -161,7 +168,7 @@ index 81ba4d4ae..570cee276 100644
   "tonic-prost-build",
  ]
  
-@@ -8269,7 +8322,7 @@ version = "0.1.0"
+@@ -8270,7 +8322,7 @@ version = "0.1.0"
  dependencies = [
   "pb",
   "pb_build",
@@ -170,7 +177,7 @@ index 81ba4d4ae..570cee276 100644
   "prost-reflect",
  ]
  
-@@ -8873,19 +8926,19 @@ dependencies = [
+@@ -8874,27 +8926,27 @@ dependencies = [
  
  [[package]]
  name = "prost"
@@ -194,8 +201,9 @@ index 81ba4d4ae..570cee276 100644
 +checksum = "03da047801ff44bb6a4d407d4860c05fd70bb81714e6b2f3812603d5b145b042"
  dependencies = [
   "heck",
-  "itertools 0.14.0",
-@@ -8893,7 +8946,7 @@ dependencies = [
+- "itertools 0.14.0",
++ "itertools 0.10.5",
+  "log",
   "multimap",
   "petgraph 0.8.3",
   "prettyplease 0.2.37",
@@ -204,7 +212,7 @@ index 81ba4d4ae..570cee276 100644
   "prost-types",
   "pulldown-cmark",
   "pulldown-cmark-to-cmark",
-@@ -8917,9 +8970,9 @@ dependencies = [
+@@ -8918,12 +8970,12 @@ dependencies = [
  
  [[package]]
  name = "prost-derive"
@@ -215,8 +223,12 @@ index 81ba4d4ae..570cee276 100644
 +checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
  dependencies = [
   "anyhow",
-  "itertools 0.14.0",
-@@ -8936,17 +8989,17 @@ checksum = "b89455ef41ed200cafc47c76c552ee7792370ac420497e551f16123a9135f76e"
+- "itertools 0.14.0",
++ "itertools 0.10.5",
+  "proc-macro2",
+  "quote",
+  "syn 2.0.118",
+@@ -8937,17 +8989,17 @@ checksum = "b89455ef41ed200cafc47c76c552ee7792370ac420497e551f16123a9135f76e"
  dependencies = [
   "logos",
   "miette",
@@ -238,43 +250,7 @@ index 81ba4d4ae..570cee276 100644
  ]
  
  [[package]]
-@@ -9734,9 +9787,9 @@ dependencies = [
- 
- [[package]]
- name = "rtrb"
--version = "0.3.2"
-+version = "0.3.5"
- source = "registry+https://github.com/rust-lang/crates.io-index"
--checksum = "ad8388ea1a9e0ea807e442e8263a699e7edcb320ecbcd21b4fa8ff859acce3ba"
-+checksum = "fae8ee26b0371a29a77d2b2d6b3ae13aa81def6f9bf1b1b92a32d279a5e709b7"
- 
- [[package]]
- name = "runtime"
-@@ -9842,9 +9895,9 @@ dependencies = [
- 
- [[package]]
- name = "rustls"
--version = "0.23.35"
-+version = "0.23.46"
- source = "registry+https://github.com/rust-lang/crates.io-index"
--checksum = "533f54bc6a7d4f647e46ad909549eda97bf5afc1585190ef692b4286b198bd8f"
-+checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
- dependencies = [
-  "aws-lc-rs",
-  "log",
-@@ -9929,9 +9982,9 @@ checksum = "f87165f0995f63a9fbeea62b64d10b4d9d8e78ec6d7d51fb2125fda7bb36788f"
- 
- [[package]]
- name = "rustls-webpki"
--version = "0.103.13"
-+version = "0.103.16"
- source = "registry+https://github.com/rust-lang/crates.io-index"
--checksum = "61c429a8649f110dddef65e2a5ad240f747e85f7758a6bccc7e5777bd33f756e"
-+checksum = "4443b1b6d39d7c663139942cc4558262562d2c84123bb6282ef177009ca8b281"
- dependencies = [
-  "aws-lc-rs",
-  "ring",
-@@ -11149,7 +11202,7 @@ dependencies = [
+@@ -11149,7 +11201,7 @@ dependencies = [
   "fastrace",
   "keybroker",
   "pb_data_sync",
@@ -283,7 +259,7 @@ index 81ba4d4ae..570cee276 100644
   "table_iteration",
   "tracing",
   "usage_tracking",
-@@ -12079,9 +12132,9 @@ dependencies = [
+@@ -12080,9 +12132,9 @@ dependencies = [
  
  [[package]]
  name = "tonic"
@@ -295,7 +271,7 @@ index 81ba4d4ae..570cee276 100644
  dependencies = [
   "async-trait",
   "axum",
-@@ -12111,9 +12164,9 @@ dependencies = [
+@@ -12112,9 +12164,9 @@ dependencies = [
  
  [[package]]
  name = "tonic-build"
@@ -307,7 +283,7 @@ index 81ba4d4ae..570cee276 100644
  dependencies = [
   "prettyplease 0.2.37",
   "proc-macro2",
-@@ -12127,7 +12180,7 @@ version = "0.14.5"
+@@ -12128,7 +12180,7 @@ version = "0.14.5"
  source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "f4ff0636fef47afb3ec02818f5bceb4377b8abb9d6a386aeade18bd6212f8eb7"
  dependencies = [
@@ -316,7 +292,7 @@ index 81ba4d4ae..570cee276 100644
   "tokio",
   "tokio-stream",
   "tonic",
-@@ -12148,20 +12201,20 @@ dependencies = [
+@@ -12149,20 +12201,20 @@ dependencies = [
  
  [[package]]
  name = "tonic-prost"
@@ -343,10 +319,10 @@ index 81ba4d4ae..570cee276 100644
   "prettyplease 0.2.37",
   "proc-macro2",
 diff --git a/crates/local_backend/Cargo.toml b/crates/local_backend/Cargo.toml
-index 8b906ffd6..5fc10b49b 100644
+index dcd71ff34..20df0a6cc 100644
 --- a/crates/local_backend/Cargo.toml
 +++ b/crates/local_backend/Cargo.toml
-@@ -81,6 +81,9 @@ model = { workspace = true }
+@@ -80,6 +80,9 @@ model = { workspace = true }
  moka = { workspace = true }
  node_executor = { workspace = true }
  parking_lot = { workspace = true }
@@ -356,7 +332,7 @@ index 8b906ffd6..5fc10b49b 100644
  reqwest = { workspace = true }
  roles = { workspace = true }
  runtime = { workspace = true }
-@@ -116,6 +119,7 @@ vergen = { workspace = true, features = ["git", "gitcl"] }
+@@ -115,6 +118,7 @@ vergen = { workspace = true, features = ["git", "gitcl"] }
  
  [dev-dependencies]
  application = { workspace = true, features = ["testing"] }
@@ -365,12 +341,12 @@ index 8b906ffd6..5fc10b49b 100644
  clusters = { workspace = true, features = ["testing"] }
  common = { workspace = true, features = ["testing"] }
 diff --git a/rust-toolchain b/rust-toolchain
-index 1ba2c04ca..05d6fd204 100644
+index 1ba2c04ca..6ab5e8b97 100644
 --- a/rust-toolchain
 +++ b/rust-toolchain
 @@ -1,3 +1,4 @@
  [toolchain]
 -channel = "nightly-2026-06-28"
-+channel = "nightly-2026-10-26"
++channel = "nightly-2026-10-31"
  targets = ["wasm32-wasip1"]
 +components = ["rustfmt"]
