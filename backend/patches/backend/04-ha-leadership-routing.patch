@@ -1,16 +1,17 @@
 diff --git a/crates/local_backend/src/config.rs b/crates/local_backend/src/config.rs
-index 4512444b7..c9a338c21 100644
+index 4512444b7..2f5702384 100644
 --- a/crates/local_backend/src/config.rs
 +++ b/crates/local_backend/src/config.rs
-@@ -10,6 +10,7 @@ use clap::{
- };
- use clusters::DbDriverTag;
- use common::types::{
-+    BackendRole,
-     ConvexOrigin,
-     ConvexSite,
- };
-@@ -34,6 +35,9 @@ pub struct LocalConfig {
+@@ -23,6 +23,8 @@ use model::database_globals::types::StorageTagInitializer;
+ use serde_json::Value as JsonValue;
+ use url::Url;
+ 
++use crate::leadership::BackendRole;
++
+ #[derive(Parser, Clone)]
+ #[clap(version = &**SERVER_VERSION_STR, author = "Convex, Inc. <no-reply@convex.dev>", group(clap::ArgGroup::new("storage").multiple(false)))]
+ pub struct LocalConfig {
+@@ -34,6 +36,9 @@ pub struct LocalConfig {
      #[clap(short, long, value_enum, default_value_t = DbDriverTag::Sqlite)]
      pub db: DbDriverTag,
  
@@ -20,7 +21,7 @@ index 4512444b7..c9a338c21 100644
      /// Host interface to bind to
      #[clap(short, long, default_value = "0.0.0.0")]
      pub interface: ::std::net::Ipv4Addr,
-@@ -254,5 +258,4 @@ impl LocalConfig {
+@@ -254,5 +259,4 @@ impl LocalConfig {
              }
          }
      }
@@ -85,10 +86,10 @@ index 000000000..d2e634c3f
 +}
 diff --git a/crates/local_backend/src/leadership.rs b/crates/local_backend/src/leadership.rs
 new file mode 100644
-index 000000000..37b3aacbc
+index 000000000..4ae6b1148
 --- /dev/null
 +++ b/crates/local_backend/src/leadership.rs
-@@ -0,0 +1,678 @@
+@@ -0,0 +1,681 @@
 +use std::{
 +    sync::{
 +        Arc,
@@ -128,10 +129,7 @@ index 000000000..37b3aacbc
 +    },
 +    runtime::Runtime,
 +    shutdown::ShutdownSignal,
-+    types::{
-+        BackendRole,
-+        Timestamp,
-+    },
++    types::Timestamp,
 +};
 +use db_connection::{
 +    connect_persistence,
@@ -225,6 +223,18 @@ index 000000000..37b3aacbc
 +            RolePersistence::Leader(_) => BackendRole::Leader,
 +            RolePersistence::Follower(_) => BackendRole::Follower,
 +        }
++    }
++}
++
++#[derive(Copy, Clone, Debug, clap::ValueEnum)]
++pub enum BackendRole {
++    Leader,
++    Follower,
++}
++
++impl BackendRole {
++    pub fn is_leader(&self) -> bool {
++        matches!(self, BackendRole::Leader)
 +    }
 +}
 +
@@ -368,12 +378,6 @@ index 000000000..37b3aacbc
 +                preempt,
 +            )
 +            .await?;
-+            anyhow::ensure!(
-+                persistence.supports_lease(),
-+                "HA promotion requires a lease-capable persistence backend (Postgres); this \
-+                 backend does not support the lease primitive, so single-writer fencing would be \
-+                 a no-op"
-+            );
 +            Ok(persistence)
 +        })
 +    })
@@ -402,8 +406,8 @@ index 000000000..37b3aacbc
 +    let Some(rw_persistence) = st.role.rw_persistence() else {
 +        return;
 +    };
-+    if !rw_persistence.supports_lease() {
-+        tracing::info!("[concave] no lease primitive; skipping lease-watch (commit-time fencing)");
++    if rw_persistence.lease_ts().is_none() {
++        tracing::info!("[concave] no lease; skipping lease-watch (commit-time fencing)");
 +        return;
 +    }
 +    st.application

@@ -74,7 +74,7 @@ index dfe80d124..0b1f0aa5e 100644
 +    }
 +}
 diff --git a/crates/local_backend/src/lib.rs b/crates/local_backend/src/lib.rs
-index bea81d960..ba0d21aa2 100644
+index bea81d960..28b10ed76 100644
 --- a/crates/local_backend/src/lib.rs
 +++ b/crates/local_backend/src/lib.rs
 @@ -35,7 +35,6 @@ use common::{
@@ -126,7 +126,7 @@ index bea81d960..ba0d21aa2 100644
      // Name of the instance. (e.g. crazy-giraffe-123)
      pub instance_name: String,
 +    pub role: Arc<crate::leadership::RoleState>,
-+    pub configured_role: common::types::BackendRole,
++    pub configured_role: crate::leadership::BackendRole,
 +    pub persistence_factory: crate::leadership::PersistenceFactory,
 +    pub control_plane_token: Option<Arc<String>>,
 +    pub insights_proxy: Option<crate::usage_forwarder::InsightsProxy>,
@@ -218,7 +218,7 @@ index bea81d960..ba0d21aa2 100644
  
      let file_storage = FileStorage {
          transactional_file_storage: TransactionalFileStorage::new(
-@@ -232,21 +258,41 @@ pub async fn make_app(
+@@ -232,19 +258,38 @@ pub async fn make_app(
          reqwest::redirect::Policy::default(),
      );
      let function_runner: Arc<dyn FunctionRunner<ProdRuntime>> =
@@ -268,11 +268,8 @@ index bea81d960..ba0d21aa2 100644
 +        };
  
      let application = Application::new(
-+        boot_role,
          runtime.clone(),
-         database.clone(),
-         file_storage.clone(),
-@@ -264,7 +310,7 @@ pub async fn make_app(
+@@ -264,7 +309,7 @@ pub async fn make_app(
          config.convex_site_url()?,
          searcher.clone(),
          segment_metadata_fetcher,
@@ -281,7 +278,7 @@ index bea81d960..ba0d21aa2 100644
          node_actions,
          Arc::new(RedactLogsToClient::new(config.redact_logs_to_client)),
          Arc::new(ApplicationAuth::new(
-@@ -290,7 +336,7 @@ pub async fn make_app(
+@@ -290,7 +335,7 @@ pub async fn make_app(
      let origin = config.convex_origin_url()?;
      let instance_name = config.name();
  
@@ -290,7 +287,7 @@ index bea81d960..ba0d21aa2 100644
          let beacon_future = beacon::start_beacon(
              runtime.clone(),
              database.clone(),
-@@ -304,10 +350,22 @@ pub async fn make_app(
+@@ -304,10 +349,22 @@ pub async fn make_app(
          origin,
          site_origin: config.convex_site_url()?,
          instance_name,
@@ -315,7 +312,7 @@ index bea81d960..ba0d21aa2 100644
  }
  
 diff --git a/crates/local_backend/src/main.rs b/crates/local_backend/src/main.rs
-index 93bad254f..372c73253 100644
+index 93bad254f..80b4167b0 100644
 --- a/crates/local_backend/src/main.rs
 +++ b/crates/local_backend/src/main.rs
 @@ -1,5 +1,6 @@
@@ -325,15 +322,7 @@ index 93bad254f..372c73253 100644
  use clap::Parser;
  use cmd_util::env::{
      config_service,
-@@ -13,6 +14,7 @@ use common::{
-     sentry::set_sentry_tags,
-     shutdown::ShutdownSignal,
-     types::{
-+        BackendRole,
-         DeploymentId,
-         MemberId,
-     },
-@@ -20,6 +22,7 @@ use common::{
+@@ -20,6 +21,7 @@ use common::{
  };
  use db_connection::{
      connect_persistence,
@@ -341,13 +330,14 @@ index 93bad254f..372c73253 100644
      ConnectPersistenceFlags,
  };
  use futures::{
-@@ -40,11 +43,14 @@ use local_backend::{
+@@ -40,11 +42,15 @@ use local_backend::{
          LocalConfig,
          Subcommand,
      },
 +    leadership::{
 +        follower_router,
 +        postgres_database_initialized,
++        BackendRole,
 +        RolePersistence,
 +    },
      make_app,

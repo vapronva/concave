@@ -1,8 +1,8 @@
 diff --git a/crates/application/src/cron_jobs/mod.rs b/crates/application/src/cron_jobs/mod.rs
-index ca3979923..9e3479253 100644
+index 982a61b8e..828744cc4 100644
 --- a/crates/application/src/cron_jobs/mod.rs
 +++ b/crates/application/src/cron_jobs/mod.rs
-@@ -686,7 +686,28 @@ impl<RT: Runtime> CronJobContext<RT> {
+@@ -683,7 +683,26 @@ impl<RT: Runtime> CronJobContext<RT> {
                          context.clone(),
                          PermitTimeout::WaitIndefinitely,
                      )
@@ -22,9 +22,7 @@ index ca3979923..9e3479253 100644
 +                            CronModel::new(&mut tx, component)
 +                                .update_job_state(job.cron_next_run())
 +                                .await?;
-+                            self.database
-+                                .commit_with_write_source(tx, "cron_action_rejected")
-+                                .await?;
++                            self.database.commit(tx, "cron_action_rejected").await?;
 +                        }
 +                        return Err(error);
 +                    },
@@ -33,7 +31,7 @@ index ca3979923..9e3479253 100644
                  let truncated_log_lines = self.truncate_log_lines(completion.log_lines.clone());
  
 diff --git a/crates/application/src/function_log.rs b/crates/application/src/function_log.rs
-index e453b597b..a8b8d7c5a 100644
+index f8211a9d8..29b00b1c4 100644
 --- a/crates/application/src/function_log.rs
 +++ b/crates/application/src/function_log.rs
 @@ -917,6 +917,7 @@ impl<RT: Runtime> FunctionExecutionLog<RT> {
@@ -174,7 +172,7 @@ index 000000000..c4873bee0
 +    }
 +}
 diff --git a/crates/application/src/lib.rs b/crates/application/src/lib.rs
-index 093c1f225..37ccdc761 100644
+index b0f2b9294..930f6f878 100644
 --- a/crates/application/src/lib.rs
 +++ b/crates/application/src/lib.rs
 @@ -22,10 +22,7 @@ use std::{
@@ -189,15 +187,7 @@ index 093c1f225..37ccdc761 100644
  use airbyte_import::{
      AirbyteRecord,
      PrimaryKey,
-@@ -135,6 +132,7 @@ use common::{
-         env_var_total_size_limit_met,
-         AllowedVisibility,
-         AttributionClaims,
-+        BackendRole,
-         ConvexOrigin,
-         ConvexSite,
-         DeploymentMetadata,
-@@ -322,7 +320,6 @@ use model::{
+@@ -323,7 +320,6 @@ use model::{
          types::UdfConfig,
          UdfConfigModel,
      },
@@ -205,7 +195,7 @@ index 093c1f225..37ccdc761 100644
  };
  use node_executor::NodeActions;
  use parking_lot::{
-@@ -387,7 +384,6 @@ use usage_gauges_tracking_worker::UsageGaugesTrackingWorker;
+@@ -388,7 +384,6 @@ use usage_gauges_tracking_worker::UsageGaugesTrackingWorker;
  use usage_limits::{
      UsageLimitNotifier,
      UsageLimitRecorder,
@@ -213,7 +203,7 @@ index 093c1f225..37ccdc761 100644
      UsageMeter,
  };
  use usage_tracking::{
-@@ -444,6 +440,7 @@ pub mod deployment_state;
+@@ -445,6 +440,7 @@ pub mod deployment_state;
  mod execute_query_timestamp;
  mod exports;
  pub mod function_log;
@@ -221,7 +211,7 @@ index 093c1f225..37ccdc761 100644
  pub mod integrations;
  pub mod log_visibility;
  mod metrics;
-@@ -459,6 +456,8 @@ mod table_summary_worker;
+@@ -460,6 +456,8 @@ mod table_summary_worker;
  pub mod valid_identifier;
  mod worker_handles;
  
@@ -230,7 +220,7 @@ index 093c1f225..37ccdc761 100644
  pub use crate::{
      cache::QueryCache,
      source_map_cache::SourceMapCache,
-@@ -622,9 +621,10 @@ pub struct Application<RT: Runtime> {
+@@ -624,9 +622,10 @@ pub struct Application<RT: Runtime> {
      usage_counter: UsageCounter,
      usage_event_logger: Arc<dyn UsageEventLogger>,
      usage_meter: Arc<UsageMeter>,
@@ -242,7 +232,7 @@ index 093c1f225..37ccdc761 100644
      log_visibility: Arc<dyn LogVisibility<RT>>,
      system_env_var_names: HashSet<EnvVarName>,
      app_auth: Arc<ApplicationAuth<RT>>,
-@@ -635,6 +635,11 @@ pub struct Application<RT: Runtime> {
+@@ -637,6 +636,11 @@ pub struct Application<RT: Runtime> {
      // and Sentry tag updates that follow them.
      backend_info_write_lock: Arc<tokio::sync::Mutex<()>>,
      oidc_http_client: CachedHttpClient,
@@ -254,7 +244,7 @@ index 093c1f225..37ccdc761 100644
  }
  
  /// Create storage based on the storage type configuration
-@@ -693,39 +698,13 @@ impl<RT: Runtime> Application<RT> {
+@@ -693,36 +697,9 @@ impl<RT: Runtime> Application<RT> {
              storage_type
          };
  
@@ -293,11 +283,7 @@ index 093c1f225..37ccdc761 100644
      }
  
      pub async fn new(
-+        role: BackendRole,
-         runtime: RT,
-         database: Database<RT>,
-         file_storage: FileStorage<RT>,
-@@ -739,7 +718,7 @@ impl<RT: Runtime> Application<RT> {
+@@ -739,7 +716,7 @@ impl<RT: Runtime> Application<RT> {
          convex_site: ConvexSite,
          searcher: Arc<dyn Searcher>,
          segment_term_metadata_fetcher: Arc<dyn SegmentTermMetadataFetcher>,
@@ -306,7 +292,7 @@ index 093c1f225..37ccdc761 100644
          node_actions: NodeActions<RT>,
          log_visibility: Arc<dyn LogVisibility<RT>>,
          app_auth: Arc<ApplicationAuth<RT>>,
-@@ -759,13 +738,118 @@ impl<RT: Runtime> Application<RT> {
+@@ -759,13 +736,122 @@ impl<RT: Runtime> Application<RT> {
          let usage_event_logger: Arc<dyn UsageEventLogger> =
              UsageLimitRecorder::new(runtime.clone(), usage_meter.clone(), usage_event_logger);
  
@@ -389,9 +375,7 @@ index 093c1f225..37ccdc761 100644
 +            fetch_client: fetch_client.clone(),
 +            sentry_transport,
 +        };
-+        if role.is_leader() {
-+            let persistence =
-+                persistence.context("leader requires a read-write Persistence handle")?;
++        if let Some(persistence) = persistence {
 +            application.start_log_manager().await?;
 +            application
 +                .start_leader_workers(persistence, lease_lost_shutdown, deleted_tablet_receiver)
@@ -424,17 +408,16 @@ index 093c1f225..37ccdc761 100644
 +        let runner = &self.runner;
 +        let file_storage = &self.file_storage;
 +        let deployment_name = self.deployment.name.clone();
++        let searcher = self.searcher.clone();
++        let segment_term_metadata_fetcher = self.segment_term_metadata_fetcher.clone();
++        let export_provider = self.export_provider.clone();
++        let key_broker = &self.key_broker;
++        let log_manager_client = &self.log_manager_client;
++        let usage_limit_notifier = self.usage_limit_notifier.clone();
          let mut index_worker = Arc::new(Mutex::new(None));
          if *ENABLE_INDEX_BACKFILL {
              let index_worker_fut = IndexWorker::new(
-@@ -790,12 +874,12 @@ impl<RT: Runtime> Application<RT> {
-             database.clone(),
-             persistence.reader(),
-             application_storage.search_storage.clone(),
--            searcher,
--            segment_term_metadata_fetcher,
-+            self.searcher.clone(),
-+            self.segment_term_metadata_fetcher.clone(),
+@@ -795,7 +881,7 @@ impl<RT: Runtime> Application<RT> {
          );
          let search_worker = Arc::new(Mutex::new(search_worker));
          let search_and_vector_bootstrap_worker =
@@ -443,7 +426,7 @@ index 093c1f225..37ccdc761 100644
          let table_summary_worker = TableSummaryWorker::start(
              runtime.clone(),
              database.clone(),
-@@ -817,82 +901,7 @@ impl<RT: Runtime> Application<RT> {
+@@ -817,82 +903,7 @@ impl<RT: Runtime> Application<RT> {
              runtime.spawn("system_table_cleanup_worker", system_table_cleanup_worker),
          ));
  
@@ -527,30 +510,7 @@ index 093c1f225..37ccdc761 100644
  
          let scheduled_job_runner = ScheduledJobRunner::start(
              runtime.clone(),
-@@ -917,7 +926,7 @@ impl<RT: Runtime> Application<RT> {
-             runtime.clone(),
-             database.clone(),
-             deployment_name.clone(),
--            export_provider.clone(),
-+            self.export_provider.clone(),
-             usage_counter.clone(),
-         );
-         let s3_export_worker = Arc::new(Mutex::new(Some(
-@@ -929,7 +938,7 @@ impl<RT: Runtime> Application<RT> {
-             database.clone(),
-             application_storage.exports_storage.clone(),
-             application_storage.files_storage.clone(),
--            export_provider,
-+            self.export_provider.clone(),
-             usage_counter.clone(),
-             deployment_name.clone(),
-         );
-@@ -962,11 +971,11 @@ impl<RT: Runtime> Application<RT> {
-             runtime.clone(),
-             database.clone(),
-             usage_event_logger.clone(),
--            Arc::new(log_manager_client.clone()),
-+            Arc::new(self.log_manager_client.clone()),
+@@ -967,7 +978,7 @@ impl<RT: Runtime> Application<RT> {
              deployment_name.clone(),
          )?;
  
@@ -559,12 +519,9 @@ index 093c1f225..37ccdc761 100644
              usage_gauges_tracking_worker,
              scheduled_job_runner,
              cron_job_executor,
-@@ -982,31 +991,10 @@ impl<RT: Runtime> Application<RT> {
-             system_table_cleanup_worker,
-             migration_worker,
+@@ -985,29 +996,8 @@ impl<RT: Runtime> Application<RT> {
              usage_limit_worker,
--            usage_limit_notifier,
-+            usage_limit_notifier: self.usage_limit_notifier.clone(),
+             usage_limit_notifier,
          };
 -
 -        Ok(Self {
@@ -594,7 +551,7 @@ index 093c1f225..37ccdc761 100644
      }
  
      pub fn usage_meter(&self) -> &Arc<UsageMeter> {
-@@ -1679,9 +1667,11 @@ impl<RT: Runtime> Application<RT> {
+@@ -1679,9 +1669,11 @@ impl<RT: Runtime> Application<RT> {
          identity.require_operation(DeploymentOp::CreateBackups)?;
          ensure_export_file_storage_within_limit(
              format,
@@ -609,7 +566,7 @@ index 093c1f225..37ccdc761 100644
          )?;
          if let Some(expiration_ts_ns) = expiration_ts_ns {
              let now = SystemTime::now()
-@@ -3993,7 +3983,10 @@ impl<RT: Runtime> Application<RT> {
+@@ -4020,7 +4012,10 @@ impl<RT: Runtime> Application<RT> {
      }
  
      pub async fn shutdown(&self) -> anyhow::Result<()> {
@@ -622,7 +579,7 @@ index 093c1f225..37ccdc761 100644
          self.runner.shutdown().await?;
          self.database.shutdown().await?;
 diff --git a/crates/application/src/scheduled_jobs/mod.rs b/crates/application/src/scheduled_jobs/mod.rs
-index e9c59929b..501b4939f 100644
+index 33922824f..3a00adcb4 100644
 --- a/crates/application/src/scheduled_jobs/mod.rs
 +++ b/crates/application/src/scheduled_jobs/mod.rs
 @@ -200,8 +200,7 @@ pub struct ScheduledJobContext<RT: Runtime> {
@@ -635,7 +592,7 @@ index e9c59929b..501b4939f 100644
  
  impl<RT: Runtime> ScheduledJobExecutor<RT> {
      pub async fn run(
-@@ -994,7 +993,30 @@ impl<RT: Runtime> ScheduledJobContext<RT> {
+@@ -992,7 +991,28 @@ impl<RT: Runtime> ScheduledJobContext<RT> {
                          context.clone(),
                          PermitTimeout::WaitIndefinitely,
                      )
@@ -657,9 +614,7 @@ index e9c59929b..501b4939f 100644
 +                            SchedulerModel::new(&mut tx, namespace)
 +                                .replace(job_id, job)
 +                                .await?;
-+                            self.database
-+                                .commit_with_write_source(tx, "scheduled_job_rejected")
-+                                .await?;
++                            self.database.commit(tx, "scheduled_job_rejected").await?;
 +                        }
 +                        return Err(error);
 +                    },
@@ -668,7 +623,7 @@ index e9c59929b..501b4939f 100644
                      Ok(_) => ScheduledJobState::Success,
                      Err(e) => ScheduledJobState::Failed(e.to_string()),
 diff --git a/crates/integrations/src/lib.rs b/crates/integrations/src/lib.rs
-index cc9a72e13..4e13a84af 100644
+index 35fe06ff0..e6f335c8f 100644
 --- a/crates/integrations/src/lib.rs
 +++ b/crates/integrations/src/lib.rs
 @@ -101,6 +101,11 @@ use crate::integrations::{

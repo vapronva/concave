@@ -1,31 +1,23 @@
 diff --git a/crates/common/src/persistence/mod.rs b/crates/common/src/persistence/mod.rs
-index 5169e3264..43e1d0601 100644
+index 0527f7553..b3e1bad79 100644
 --- a/crates/common/src/persistence/mod.rs
 +++ b/crates/common/src/persistence/mod.rs
-@@ -439,6 +439,22 @@ pub trait Persistence: Sync + Send + 'static {
+@@ -440,6 +440,14 @@ pub trait Persistence: Sync + Send + 'static {
      async fn finish_loading(&self) -> anyhow::Result<()> {
          Ok(())
      }
-+
-+    fn supports_lease(&self) -> bool {
-+        false
-+    }
 +
 +    fn lease_ts(&self) -> Option<u64> {
 +        None
 +    }
 +
 +    async fn lease_held(&self) -> anyhow::Result<bool> {
-+        anyhow::ensure!(
-+            !self.supports_lease(),
-+            "lease-capable persistence must implement lease_held"
-+        );
 +        Ok(true)
 +    }
  }
  
  #[derive(Debug, Clone, Copy)]
-@@ -725,7 +741,6 @@ pub trait PersistenceReader: Send + Sync + 'static {
+@@ -726,7 +734,6 @@ pub trait PersistenceReader: Send + Sync + 'static {
      async fn table_size_stats(&self) -> anyhow::Result<Vec<PersistenceTableSize>> {
          Ok(vec![])
      }
@@ -133,7 +125,7 @@ index 000000000..6de807a48
 +    }
 +}
 diff --git a/crates/postgres/src/lib.rs b/crates/postgres/src/lib.rs
-index 96af1f23e..d20e5fa69 100644
+index 96af1f23e..22f1ca99f 100644
 --- a/crates/postgres/src/lib.rs
 +++ b/crates/postgres/src/lib.rs
 @@ -2,6 +2,7 @@
@@ -166,14 +158,10 @@ index 96af1f23e..d20e5fa69 100644
          Ok(Self {
              newly_created: newly_created.into(),
              lease,
-@@ -511,6 +515,18 @@ impl Persistence for PostgresPersistence {
+@@ -511,6 +515,14 @@ impl Persistence for PostgresPersistence {
          })
      }
  
-+    fn supports_lease(&self) -> bool {
-+        true
-+    }
-+
 +    fn lease_ts(&self) -> Option<u64> {
 +        Some(self.lease.lease_ts() as u64)
 +    }
@@ -185,7 +173,7 @@ index 96af1f23e..d20e5fa69 100644
      #[fastrace::trace]
      async fn write<'a>(
          &self,
-@@ -1750,8 +1766,8 @@ struct Lease {
+@@ -1750,8 +1762,8 @@ struct Lease {
  }
  
  impl Lease {
@@ -196,7 +184,7 @@ index 96af1f23e..d20e5fa69 100644
      async fn acquire(
          pool: Arc<ConvexPgPool>,
          schema: &SchemaName,
-@@ -1770,29 +1786,30 @@ impl Lease {
+@@ -1770,29 +1782,30 @@ impl Lease {
              .as_nanos() as i64;
  
          tracing::info!("attempting to acquire lease");
