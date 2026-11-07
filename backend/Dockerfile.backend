@@ -34,9 +34,9 @@ rm /tmp/just.tar.gz
 just --version
 EOF
 
-ARG UV_VERSION=0.13.6
+ARG UV_VERSION=0.13.7
 
-ARG UV_SHA256=f29c3e94ffabd7e6f3ba521dba169a9b7ec12100bf3257087f0f24f6123f3645
+ARG UV_SHA256=c5221ff41b7892bfc223543883600125f6a47fe845093e0f5bdff4f359196d83
 
 RUN <<EOF
 set -o errexit -o nounset -o xtrace
