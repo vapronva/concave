@@ -116,10 +116,10 @@ index 5c1665f6f..c94be5c4b 100644
  #[async_trait]
 diff --git a/crates/function_runner/src/proto.rs b/crates/function_runner/src/proto.rs
 new file mode 100644
-index 000000000..f2c8bf562
+index 000000000..34a5cbdde
 --- /dev/null
 +++ b/crates/function_runner/src/proto.rs
-@@ -0,0 +1,246 @@
+@@ -0,0 +1,369 @@
 +use std::{
 +    collections::BTreeMap,
 +    str::FromStr,
@@ -129,6 +129,7 @@ index 000000000..f2c8bf562
 +use common::{
 +    bootstrap_model::index::database_index::IndexedFields,
 +    interval::IntervalSet,
++    query::FilterValue,
 +    types::TabletIndexName,
 +};
 +use database::{
@@ -140,7 +141,11 @@ index 000000000..f2c8bf562
 +    UploadedFileUpload,
 +};
 +use search::{
-+    query::funrun_proto::QueryReadsProto,
++    query::{
++        FilterConditionRead,
++        TextQueryTerm,
++        TextQueryTermRead,
++    },
 +    QueryReads as SearchQueryReads,
 +};
 +use sync_types::Timestamp;
@@ -180,10 +185,7 @@ index 000000000..f2c8bf562
 +            .collect();
 +        let search = search_reads
 +            .map(|(index_name, query_reads)| {
-+                let QueryReadsProto {
-+                    text_queries,
-+                    filter_conditions,
-+                } = query_reads.into();
++                let (text_queries, filter_conditions) = query_reads_to_proto(query_reads);
 +                pb::funrun::SearchReads {
 +                    index_name: index_name.to_string(),
 +                    text_queries,
@@ -246,10 +248,7 @@ index 000000000..f2c8bf562
 +        {
 +            let index_name = TabletIndexName::from_str(&index_name)
 +                .with_context(|| format!("Invalid search index name {index_name}"))?;
-+            let query_reads = SearchQueryReads::try_from(QueryReadsProto {
-+                text_queries,
-+                filter_conditions,
-+            })?;
++            let query_reads = query_reads_from_proto(text_queries, filter_conditions)?;
 +            search_map.insert(index_name, query_reads);
 +        }
 +        let reads = ReadSet::new(indexed_map, search_map);
@@ -366,12 +365,136 @@ index 000000000..f2c8bf562
 +        })
 +    }
 +}
++
++fn text_query_term_to_proto(term: TextQueryTerm) -> pb::funrun::TextQueryTerm {
++    let term = match term {
++        TextQueryTerm::Exact(token) => pb::funrun::text_query_term::Term::Exact(token),
++        TextQueryTerm::Prefix(token) => pb::funrun::text_query_term::Term::Prefix(token),
++    };
++    pb::funrun::TextQueryTerm { term: Some(term) }
++}
++
++fn text_query_term_from_proto(value: pb::funrun::TextQueryTerm) -> anyhow::Result<TextQueryTerm> {
++    Ok(
++        match value.term.context("Missing `term` in TextQueryTerm")? {
++            pb::funrun::text_query_term::Term::Exact(token) => TextQueryTerm::Exact(token),
++            pb::funrun::text_query_term::Term::Prefix(token) => TextQueryTerm::Prefix(token),
++        },
++    )
++}
++
++fn text_query_term_read_to_proto(read: TextQueryTermRead) -> pb::funrun::TextQueryTermRead {
++    pb::funrun::TextQueryTermRead {
++        field_path: Some(read.field_path.into()),
++        term: Some(text_query_term_to_proto(read.term)),
++    }
++}
++
++fn text_query_term_read_from_proto(
++    value: pb::funrun::TextQueryTermRead,
++) -> anyhow::Result<TextQueryTermRead> {
++    Ok(TextQueryTermRead {
++        field_path: value
++            .field_path
++            .context("Missing `field_path` in TextQueryTermRead")?
++            .try_into()?,
++        term: text_query_term_from_proto(
++            value.term.context("Missing `term` in TextQueryTermRead")?,
++        )?,
++    })
++}
++
++fn filter_condition_read_to_proto(read: FilterConditionRead) -> pb::funrun::FilterConditionRead {
++    let FilterConditionRead::Must(field_path, value) = read;
++    pb::funrun::FilterConditionRead {
++        field_path: Some(field_path.into()),
++        value: Vec::<u8>::from(value),
++    }
++}
++
++fn filter_condition_read_from_proto(
++    value: pb::funrun::FilterConditionRead,
++) -> anyhow::Result<FilterConditionRead> {
++    Ok(FilterConditionRead::Must(
++        value
++            .field_path
++            .context("Missing `field_path` in FilterConditionRead")?
++            .try_into()?,
++        FilterValue::from(value.value),
++    ))
++}
++
++fn query_reads_to_proto(
++    reads: SearchQueryReads,
++) -> (
++    Vec<pb::funrun::TextQueryTermRead>,
++    Vec<pb::funrun::FilterConditionRead>,
++) {
++    (
++        Vec::from(reads.text_queries)
++            .into_iter()
++            .map(text_query_term_read_to_proto)
++            .collect(),
++        Vec::from(reads.filter_conditions)
++            .into_iter()
++            .map(filter_condition_read_to_proto)
++            .collect(),
++    )
++}
++
++fn query_reads_from_proto(
++    text_queries: Vec<pb::funrun::TextQueryTermRead>,
++    filter_conditions: Vec<pb::funrun::FilterConditionRead>,
++) -> anyhow::Result<SearchQueryReads> {
++    let text_queries: Vec<TextQueryTermRead> = text_queries
++        .into_iter()
++        .map(text_query_term_read_from_proto)
++        .collect::<anyhow::Result<_>>()?;
++    let filter_conditions: Vec<FilterConditionRead> = filter_conditions
++        .into_iter()
++        .map(filter_condition_read_from_proto)
++        .collect::<anyhow::Result<_>>()?;
++    Ok(SearchQueryReads::new(
++        text_queries.into(),
++        filter_conditions.into(),
++    ))
++}
++
++#[cfg(test)]
++mod tests {
++    use value::ConvexValue;
++
++    use super::*;
++
++    #[test]
++    fn query_reads_proto_roundtrip() {
++        let field = FieldPath::from_str("body").unwrap();
++        let filter_field = FieldPath::from_str("channel").unwrap();
++        let reads = SearchQueryReads::new(
++            vec![
++                TextQueryTermRead::new(field.clone(), TextQueryTerm::Exact("hello".to_string())),
++                TextQueryTermRead::new(field.clone(), TextQueryTerm::Prefix("wor".to_string())),
++            ]
++            .into(),
++            vec![FilterConditionRead::Must(
++                filter_field,
++                FilterValue::from_search_value(Some(&ConvexValue::from(7.0))),
++            )]
++            .into(),
++        );
++        let (text_queries, filter_conditions) = query_reads_to_proto(reads.clone());
++        assert_eq!(text_queries.len(), 2);
++        assert_eq!(filter_conditions.len(), 1);
++        let decoded = query_reads_from_proto(text_queries, filter_conditions).unwrap();
++        assert_eq!(reads, decoded);
++    }
++}
 diff --git a/crates/function_runner/src/remote.rs b/crates/function_runner/src/remote.rs
 new file mode 100644
-index 000000000..be9354ff8
+index 000000000..6c11f0925
 --- /dev/null
 +++ b/crates/function_runner/src/remote.rs
-@@ -0,0 +1,925 @@
+@@ -0,0 +1,926 @@
 +use std::{
 +    collections::{
 +        BTreeMap,
@@ -576,7 +699,8 @@ index 000000000..be9354ff8
 +        .connect_timeout(FUNRUN_CONNECT_TIMEOUT)
 +        .http2_keep_alive_interval(FUNRUN_KEEPALIVE_INTERVAL)
 +        .keep_alive_timeout(FUNRUN_KEEPALIVE_TIMEOUT)
-+        .keep_alive_while_idle(true))
++        .keep_alive_while_idle(true)
++        .http2_max_local_error_reset_streams(None))
 +}
 +
 +fn spawn_endpoint_refresher<RT: Runtime>(
@@ -706,7 +830,7 @@ index 000000000..be9354ff8
 +            .error_metadata()
 +            .is_some_and(|metadata| metadata.is_rejected_before_execution());
 +        match udf_type {
-+            UdfType::Query | UdfType::Mutation => {
++            UdfType::Query | UdfType::Mutation | UdfType::Init => {
 +                matches!(
 +                    status.code(),
 +                    tonic::Code::Unavailable | tonic::Code::Cancelled | tonic::Code::Unknown
@@ -879,7 +1003,7 @@ index 000000000..be9354ff8
 +            context,
 +        )?;
 +        let max_attempts = FUNRUN_CLIENT_MAX_RETRIES.saturating_add(1);
-+        let has_deadline = matches!(udf_type, UdfType::Query | UdfType::Mutation);
++        let has_deadline = matches!(udf_type, UdfType::Query | UdfType::Mutation | UdfType::Init);
 +        let mut attempt: u32 = 0;
 +        let result = 'attempts: loop {
 +            let last_attempt = attempt + 1 >= max_attempts;
@@ -1298,7 +1422,7 @@ index 000000000..be9354ff8
 +    fn set_action_callbacks(&self, _action_callbacks: Arc<dyn ActionCallbacks>) {}
 +}
 diff --git a/crates/function_runner/src/server.rs b/crates/function_runner/src/server.rs
-index 3756ee776..8c08cf68b 100644
+index df117586c..d6ae15458 100644
 --- a/crates/function_runner/src/server.rs
 +++ b/crates/function_runner/src/server.rs
 @@ -196,6 +196,13 @@ impl<RT: Runtime> StorageForDeployment<RT> for DeploymentStorage {
@@ -1590,10 +1714,10 @@ index 0207fcf03..4ba10c5ad 100644
          let mut total = IsolateHeapStats::default();
          for handle in self.handles.lock().iter() {
 diff --git a/crates/keybroker/src/broker.rs b/crates/keybroker/src/broker.rs
-index 752175547..1a81e9bb4 100644
+index 3dedf205c..c95bb1148 100644
 --- a/crates/keybroker/src/broker.rs
 +++ b/crates/keybroker/src/broker.rs
-@@ -1204,8 +1204,15 @@ impl KeyBroker {
+@@ -1213,8 +1213,15 @@ impl KeyBroker {
      }
  
      pub fn issue_action_token(&self, component_id: ComponentId) -> ActionCallbackToken {
@@ -1798,202 +1922,3 @@ index 132770c3d..86e1b0d74 100644
      legacy_encryptor::LegacyEncryptor,
      operations::{
          bad_admin_key_error,
-diff --git a/crates/search/src/query.rs b/crates/search/src/query.rs
-index 3a6b0a5c4..5b237068d 100644
---- a/crates/search/src/query.rs
-+++ b/crates/search/src/query.rs
-@@ -45,6 +45,8 @@ use crate::{
-     metrics,
- };
- 
-+pub mod funrun_proto;
-+
- /// A search query compiled against a particular `SearchIndexSchema`.
- #[derive(Debug, Clone)]
- pub struct CompiledQuery {
-@@ -265,12 +267,8 @@ impl TextQueryTermRead {
- // code.
- #[derive(Debug, Clone, PartialEq, Eq)]
- pub enum TextQueryTerm {
--    Exact(
--        String,
--    ),
--    Prefix(
--        String,
--    ),
-+    Exact(String),
-+    Prefix(String),
- }
- 
- impl TextQueryTerm {
-diff --git a/crates/search/src/query/funrun_proto.rs b/crates/search/src/query/funrun_proto.rs
-new file mode 100644
-index 000000000..fbabce96a
---- /dev/null
-+++ b/crates/search/src/query/funrun_proto.rs
-@@ -0,0 +1,165 @@
-+use anyhow::Context;
-+use common::query::FilterValue;
-+
-+use crate::query::{
-+    FilterConditionRead,
-+    QueryReads,
-+    TextQueryTerm,
-+    TextQueryTermRead,
-+};
-+
-+pub struct QueryReadsProto {
-+    pub text_queries: Vec<pb::funrun::TextQueryTermRead>,
-+    pub filter_conditions: Vec<pb::funrun::FilterConditionRead>,
-+}
-+
-+impl From<TextQueryTerm> for pb::funrun::TextQueryTerm {
-+    fn from(term: TextQueryTerm) -> Self {
-+        let term = match term {
-+            TextQueryTerm::Exact(token) => pb::funrun::text_query_term::Term::Exact(token),
-+            TextQueryTerm::Prefix(token) => pb::funrun::text_query_term::Term::Prefix(token),
-+        };
-+        pb::funrun::TextQueryTerm { term: Some(term) }
-+    }
-+}
-+
-+impl TryFrom<pb::funrun::TextQueryTerm> for TextQueryTerm {
-+    type Error = anyhow::Error;
-+
-+    fn try_from(value: pb::funrun::TextQueryTerm) -> anyhow::Result<Self> {
-+        Ok(
-+            match value.term.context("Missing `term` in TextQueryTerm")? {
-+                pb::funrun::text_query_term::Term::Exact(token) => TextQueryTerm::Exact(token),
-+                pb::funrun::text_query_term::Term::Prefix(token) => TextQueryTerm::Prefix(token),
-+            },
-+        )
-+    }
-+}
-+
-+impl From<TextQueryTermRead> for pb::funrun::TextQueryTermRead {
-+    fn from(read: TextQueryTermRead) -> Self {
-+        pb::funrun::TextQueryTermRead {
-+            field_path: Some(read.field_path.into()),
-+            term: Some(read.term.into()),
-+        }
-+    }
-+}
-+
-+impl TryFrom<pb::funrun::TextQueryTermRead> for TextQueryTermRead {
-+    type Error = anyhow::Error;
-+
-+    fn try_from(value: pb::funrun::TextQueryTermRead) -> anyhow::Result<Self> {
-+        Ok(TextQueryTermRead {
-+            field_path: value
-+                .field_path
-+                .context("Missing `field_path` in TextQueryTermRead")?
-+                .try_into()?,
-+            term: value
-+                .term
-+                .context("Missing `term` in TextQueryTermRead")?
-+                .try_into()?,
-+        })
-+    }
-+}
-+
-+impl From<FilterConditionRead> for pb::funrun::FilterConditionRead {
-+    fn from(read: FilterConditionRead) -> Self {
-+        let FilterConditionRead::Must(field_path, value) = read;
-+        pb::funrun::FilterConditionRead {
-+            field_path: Some(field_path.into()),
-+            value: Vec::<u8>::from(value),
-+        }
-+    }
-+}
-+
-+impl TryFrom<pb::funrun::FilterConditionRead> for FilterConditionRead {
-+    type Error = anyhow::Error;
-+
-+    fn try_from(value: pb::funrun::FilterConditionRead) -> anyhow::Result<Self> {
-+        Ok(FilterConditionRead::Must(
-+            value
-+                .field_path
-+                .context("Missing `field_path` in FilterConditionRead")?
-+                .try_into()?,
-+            FilterValue::from(value.value),
-+        ))
-+    }
-+}
-+
-+impl From<QueryReads> for QueryReadsProto {
-+    fn from(reads: QueryReads) -> Self {
-+        QueryReadsProto {
-+            text_queries: Vec::from(reads.text_queries)
-+                .into_iter()
-+                .map(pb::funrun::TextQueryTermRead::from)
-+                .collect(),
-+            filter_conditions: Vec::from(reads.filter_conditions)
-+                .into_iter()
-+                .map(pb::funrun::FilterConditionRead::from)
-+                .collect(),
-+        }
-+    }
-+}
-+
-+impl TryFrom<QueryReadsProto> for QueryReads {
-+    type Error = anyhow::Error;
-+
-+    fn try_from(proto: QueryReadsProto) -> anyhow::Result<Self> {
-+        let text_queries: Vec<TextQueryTermRead> = proto
-+            .text_queries
-+            .into_iter()
-+            .map(TextQueryTermRead::try_from)
-+            .collect::<anyhow::Result<_>>()?;
-+        let filter_conditions: Vec<FilterConditionRead> = proto
-+            .filter_conditions
-+            .into_iter()
-+            .map(FilterConditionRead::try_from)
-+            .collect::<anyhow::Result<_>>()?;
-+        Ok(QueryReads::new(
-+            text_queries.into(),
-+            filter_conditions.into(),
-+        ))
-+    }
-+}
-+
-+#[cfg(test)]
-+mod tests {
-+    use std::str::FromStr;
-+
-+    use common::query::FilterValue;
-+    use value::{
-+        ConvexValue,
-+        FieldPath,
-+    };
-+
-+    use super::QueryReadsProto;
-+    use crate::query::{
-+        FilterConditionRead,
-+        QueryReads,
-+        TextQueryTerm,
-+        TextQueryTermRead,
-+    };
-+
-+    #[test]
-+    fn query_reads_proto_roundtrip() {
-+        let field = FieldPath::from_str("body").unwrap();
-+        let filter_field = FieldPath::from_str("channel").unwrap();
-+        let reads = QueryReads::new(
-+            vec![
-+                TextQueryTermRead::new(field.clone(), TextQueryTerm::Exact("hello".to_string())),
-+                TextQueryTermRead::new(field.clone(), TextQueryTerm::Prefix("wor".to_string())),
-+            ]
-+            .into(),
-+            vec![FilterConditionRead::Must(
-+                filter_field,
-+                FilterValue::from_search_value(Some(&ConvexValue::from(7.0))),
-+            )]
-+            .into(),
-+        );
-+        let proto = QueryReadsProto::from(reads.clone());
-+        assert_eq!(proto.text_queries.len(), 2);
-+        assert_eq!(proto.filter_conditions.len(), 1);
-+        let decoded = QueryReads::try_from(proto).unwrap();
-+        assert_eq!(reads, decoded);
-+    }
-+}

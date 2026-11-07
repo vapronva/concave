@@ -282,7 +282,7 @@ index 156289c91..88f1f64f9 100644
 +    }
 +}
 diff --git a/crates/pb/src/lib.rs b/crates/pb/src/lib.rs
-index 0a2d279b4..30da5ac90 100644
+index e23221de2..b40ff32fd 100644
 --- a/crates/pb/src/lib.rs
 +++ b/crates/pb/src/lib.rs
 @@ -27,6 +27,9 @@ pub mod convex_query_journal {
@@ -292,6 +292,6 @@ index 0a2d279b4..30da5ac90 100644
 +pub mod funrun {
 +    include!(concat!(env!("OUT_DIR"), "/funrun.rs"));
 +}
- pub mod outcome {
-     include!(concat!(env!("OUT_DIR"), "/outcome.rs"));
+ pub mod managed_export {
+     include!(concat!(env!("OUT_DIR"), "/managed_export.rs"));
  }

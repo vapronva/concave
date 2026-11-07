@@ -752,10 +752,10 @@ index 000000000..dad12bc23
 +}
 diff --git a/crates/funrun_server/src/main.rs b/crates/funrun_server/src/main.rs
 new file mode 100644
-index 000000000..7c1ea5680
+index 000000000..194c95bdd
 --- /dev/null
 +++ b/crates/funrun_server/src/main.rs
-@@ -0,0 +1,278 @@
+@@ -0,0 +1,279 @@
 +#![recursion_limit = "256"]
 +
 +use std::sync::{
@@ -813,7 +813,8 @@ index 000000000..7c1ea5680
 +    spawn_pod_deletion_cost_updater(&runtime, registry.clone());
 +    let mut builder = tonic::transport::Server::builder()
 +        .http2_keepalive_interval(Some(std::time::Duration::from_secs(30)))
-+        .http2_keepalive_timeout(Some(std::time::Duration::from_secs(10)));
++        .http2_keepalive_timeout(Some(std::time::Duration::from_secs(10)))
++        .http2_max_local_error_reset_streams(None);
 +    let shutting_down = Arc::new(AtomicBool::new(false));
 +    let (shutdown_tx, shutdown_rx) = watch::channel(false);
 +    {
@@ -1036,10 +1037,10 @@ index 000000000..7c1ea5680
 +}
 diff --git a/crates/funrun_server/src/metrics.rs b/crates/funrun_server/src/metrics.rs
 new file mode 100644
-index 000000000..7b902cd7e
+index 000000000..7e370458a
 --- /dev/null
 +++ b/crates/funrun_server/src/metrics.rs
-@@ -0,0 +1,63 @@
+@@ -0,0 +1,58 @@
 +use metrics::{
 +    log_counter,
 +    log_counter_with_labels,
@@ -1071,11 +1072,6 @@ index 000000000..7b902cd7e
 +);
 +pub(crate) fn log_snapshot_cold_load() {
 +    log_counter(&SNAPSHOT_COLD_LOAD_TOTAL, 1);
-+}
-+
-+register_convex_counter!(SNAPSHOT_REQUESTS_TOTAL, "Funrun snapshot_inputs calls");
-+pub(crate) fn log_snapshot_request() {
-+    log_counter(&SNAPSHOT_REQUESTS_TOTAL, 1);
 +}
 +
 +register_convex_gauge!(
@@ -1751,10 +1747,10 @@ index 000000000..3a019d9c5
 +}
 diff --git a/crates/funrun_server/src/snapshot.rs b/crates/funrun_server/src/snapshot.rs
 new file mode 100644
-index 000000000..4e86ff28b
+index 000000000..7f1763c81
 --- /dev/null
 +++ b/crates/funrun_server/src/snapshot.rs
-@@ -0,0 +1,407 @@
+@@ -0,0 +1,421 @@
 +use std::{
 +    sync::{
 +        Arc,
@@ -1769,7 +1765,9 @@ index 000000000..4e86ff28b
 +use common::{
 +    knobs::MAX_ISOLATE_WORKERS,
 +    persistence::{
++        index_scan_attribution::IndexScanCaller,
 +        PersistenceReader,
++        PersistenceSnapshot,
 +        RepeatablePersistence,
 +        RetentionValidator,
 +    },
@@ -1797,7 +1795,10 @@ index 000000000..4e86ff28b
 +};
 +use futures::FutureExt;
 +use indexing::{
-+    index_reader::IndexReader,
++    index_reader::{
++        AttributedIndexReader,
++        IndexReader,
++    },
 +    index_registry::IndexRegistry,
 +};
 +use keybroker::FunctionRunnerKeyBroker;
@@ -1824,7 +1825,6 @@ index 000000000..4e86ff28b
 +    metrics::{
 +        log_snapshot_cold,
 +        log_snapshot_cold_load,
-+        log_snapshot_request,
 +        log_snapshot_warm_hit,
 +    },
 +};
@@ -2051,7 +2051,6 @@ index 000000000..4e86ff28b
 +    }
 +
 +    pub async fn snapshot_inputs(&self, ts: RepeatableTimestamp) -> anyhow::Result<SnapshotInputs> {
-+        log_snapshot_request();
 +        let prepare = self.prepare_snapshot_inputs(ts).fuse();
 +        let deadline = self.rt.wait(*FUNRUN_SNAPSHOT_WAIT_TIMEOUT).fuse();
 +        futures::pin_mut!(prepare, deadline);
@@ -2080,14 +2079,19 @@ index 000000000..4e86ff28b
 +        }
 +        let persistence =
 +            RepeatablePersistence::new(self.reader.clone(), ts, self.retention_validator.clone());
-+        let index_reader: Arc<dyn IndexReader> = Arc::new(persistence.read_snapshot(ts)?);
++        let persistence_snapshot = persistence.read_snapshot(ts)?;
 +        match self.database.snapshot(ts) {
 +            Ok(snapshot) => {
 +                let counts = snapshot
 +                    .table_counts
 +                    .context("follower snapshot has no table counts")?;
 +                Ok(SnapshotInputs {
-+                    index_reader,
++                    index_reader: Arc::new(AttributedIndexReader::new(
++                        persistence_snapshot,
++                        IndexScanCaller::FunctionRunner,
++                        Some(snapshot.index_registry.clone()),
++                        Some(snapshot.table_registry.table_mapping().clone()),
++                    )),
 +                    bootstrap_metadata: self.database.bootstrap_metadata.clone(),
 +                    table_count_snapshot: Arc::new(Some(counts)),
 +                    text_index_snapshot: self
@@ -2095,7 +2099,8 @@ index 000000000..4e86ff28b
 +                })
 +            },
 +            Err(error) if error.is_out_of_retention() => {
-+                self.full_cold_snapshot_inputs(ts, index_reader).await
++                self.full_cold_snapshot_inputs(ts, persistence_snapshot)
++                    .await
 +            },
 +            Err(error) => Err(error),
 +        }
@@ -2104,7 +2109,7 @@ index 000000000..4e86ff28b
 +    async fn full_cold_snapshot_inputs(
 +        &self,
 +        ts: RepeatableTimestamp,
-+        index_reader: Arc<dyn IndexReader>,
++        persistence_snapshot: PersistenceSnapshot,
 +    ) -> anyhow::Result<SnapshotInputs> {
 +        log_snapshot_cold_load();
 +        let mut snapshot = DatabaseSnapshot::load(
@@ -2118,7 +2123,12 @@ index 000000000..4e86ff28b
 +        snapshot.load_table_summaries().await?;
 +        snapshot.load_search_indexes().await?;
 +        Ok(SnapshotInputs {
-+            index_reader,
++            index_reader: Arc::new(AttributedIndexReader::new(
++                persistence_snapshot,
++                IndexScanCaller::FunctionRunner,
++                Some(snapshot.snapshot.index_registry.clone()),
++                Some(snapshot.snapshot.table_registry.table_mapping().clone()),
++            )),
 +            bootstrap_metadata: snapshot.bootstrap_metadata,
 +            table_count_snapshot: Arc::new(snapshot.snapshot.table_counts),
 +            text_index_snapshot: self.text_snapshot(
