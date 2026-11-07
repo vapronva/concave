@@ -105,6 +105,46 @@ func TestCommitState_EmptyDiscoveryDoesNotRestartUnreachableGrace(t *testing.T) 
 	}
 }
 
+func TestCommitState_CreditedBlipDoesNotRestartUnreachableGrace(t *testing.T) {
+	t.Parallel()
+	c := New(
+		withConfig(func(c *Config) { c.UnreachableLeaderGrace = 60 * time.Second }),
+		nil,
+		nil,
+		registry.New(),
+		quietLogger(),
+	)
+	st := c.deploymentState("dev")
+	c.setLeader("dev", st, "backend-0", "http://10.0.0.1:3210")
+	base := time.Now()
+	unreachable := decision{liveLeaderCount: 0, incumbentUnreachable: true}
+	credited := decision{liveLeaderCount: 1, leaderPod: "backend-0"}
+	if _, _, retain := c.commitState(st, unreachable, false, base); !retain {
+		t.Fatal("grace must start on the first unreachable observation")
+	}
+	c.commitState(st, credited, false, base.Add(58*time.Second))
+	if _, _, retain := c.commitState(st, unreachable, false, base.Add(61*time.Second)); retain {
+		t.Fatal("one credited claim inside the window must not restart the grace")
+	}
+	c.commitState(st, credited, false, base.Add(70*time.Second))
+	c.commitState(st, decision{liveLeaderCount: 0}, true, base.Add(100*time.Second))
+	c.commitState(st, credited, false, base.Add(131*time.Second))
+	if _, _, retain := c.commitState(st, unreachable, false, base.Add(133*time.Second)); retain {
+		t.Fatal("an empty discovery between credited claims must not count as continuous credit")
+	}
+	c.commitState(st, credited, false, base.Add(140*time.Second))
+	c.setDiscoveryDown(st, true)
+	c.commitState(st, credited, false, base.Add(201*time.Second))
+	if _, _, retain := c.commitState(st, unreachable, false, base.Add(203*time.Second)); retain {
+		t.Fatal("a discovery error between credited claims must not count as continuous credit")
+	}
+	c.commitState(st, credited, false, base.Add(210*time.Second))
+	c.commitState(st, credited, false, base.Add(271*time.Second))
+	if _, _, retain := c.commitState(st, unreachable, false, base.Add(273*time.Second)); !retain {
+		t.Fatal("a full grace of continuous credit must end the episode and grant a fresh window")
+	}
+}
+
 func TestCommitState_EmptyListResetsStreakOnlyPastDebounce(t *testing.T) {
 	t.Parallel()
 	const debounce = 3

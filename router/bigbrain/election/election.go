@@ -66,6 +66,7 @@ type deploymentState struct {
 	emptyStreak               int
 	incumbentPod              string
 	incumbentUnreachableSince time.Time
+	incumbentLiveSince        time.Time
 	promoting                 bool
 	demoting                  bool
 	discoveryDown             bool
@@ -197,6 +198,7 @@ func (c *Controller) setDiscoveryDown(st *deploymentState, down bool) bool {
 	defer c.mu.Unlock()
 	if down {
 		st.failback = failbackState{}
+		st.incumbentLiveSince = time.Time{}
 	}
 	if st.discoveryDown == down {
 		return false
@@ -277,13 +279,24 @@ func (c *Controller) commitState(st *deploymentState, dec decision, emptyList bo
 		}
 	}
 	retain := false
-	if dec.incumbentUnreachable {
+	switch {
+	case dec.incumbentUnreachable:
+		st.incumbentLiveSince = time.Time{}
 		if st.incumbentUnreachableSince.IsZero() {
 			st.incumbentUnreachableSince = now
 		}
 		retain = now.Sub(st.incumbentUnreachableSince) < c.cfg.UnreachableLeaderGrace
-	} else if !emptyList {
-		st.incumbentUnreachableSince = time.Time{}
+	case emptyList:
+		st.incumbentLiveSince = time.Time{}
+	case dec.liveLeaderCount > 0 && dec.leaderPod == st.incumbentPod:
+		if st.incumbentLiveSince.IsZero() {
+			st.incumbentLiveSince = now
+		}
+		if now.Sub(st.incumbentLiveSince) >= c.cfg.UnreachableLeaderGrace {
+			st.incumbentUnreachableSince = time.Time{}
+		}
+	default:
+		st.incumbentUnreachableSince, st.incumbentLiveSince = time.Time{}, time.Time{}
 	}
 	return st.leaderlessStreak, st.emptyStreak, retain
 }
