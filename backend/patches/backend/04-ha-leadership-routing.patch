@@ -90,10 +90,10 @@ index 000000000..2c11800e0
 +}
 diff --git a/crates/local_backend/src/leadership.rs b/crates/local_backend/src/leadership.rs
 new file mode 100644
-index 000000000..0a84189c1
+index 000000000..80ff28575
 --- /dev/null
 +++ b/crates/local_backend/src/leadership.rs
-@@ -0,0 +1,1111 @@
+@@ -0,0 +1,1130 @@
 +use std::{
 +    convert::Infallible,
 +    future::Future,
@@ -192,6 +192,7 @@ index 000000000..0a84189c1
 +use value::TableNamespace;
 +
 +use crate::{
++    beacon::BuildRevision,
 +    config::LocalConfig,
 +    make_app,
 +    new_rate_limiter,
@@ -392,6 +393,7 @@ index 000000000..0a84189c1
 +    searcher: Arc<InProcessSearcher<ProdRuntime>>,
 +    app: OnceLock<LocalAppState>,
 +    router: Arc<OnceLock<Router>>,
++    build_revision: BuildRevision,
 +}
 +
 +pub async fn boot(
@@ -399,6 +401,7 @@ index 000000000..0a84189c1
 +    config: LocalConfig,
 +    zombify_rx: async_broadcast::Receiver<()>,
 +    preempt_signal: ShutdownSignal,
++    build_revision: BuildRevision,
 +) -> anyhow::Result<Arc<HaNode>> {
 +    let configured_role = BackendRole::from_env()?;
 +    let control_plane_token = control_plane_token_from_env();
@@ -481,24 +484,15 @@ index 000000000..0a84189c1
 +        searcher: searcher.clone(),
 +        app: OnceLock::new(),
 +        router: Arc::default(),
++        build_revision,
 +    });
 +    let Some(rw_persistence) = rw_persistence else {
 +        preflight(&runtime, &config, &database).await?;
 +        return Ok(node);
 +    };
 +    node.start_lease_watch(rw_persistence.clone());
-+    let app = make_app(
-+        runtime,
-+        config,
-+        rw_persistence.clone(),
-+        database,
-+        searcher,
-+        deleted_tablet_receiver,
-+        zombify_rx,
-+        preempt_signal,
-+    )
-+    .await?;
-+    node.install_leader(app, rw_persistence)?;
++    node.build_leader(rw_persistence, deleted_tablet_receiver)
++        .await?;
 +    Ok(node)
 +}
 +
@@ -536,6 +530,15 @@ index 000000000..0a84189c1
 +                self.config.name(),
 +            )
 +            .await?;
++        self.build_leader(rw_persistence, deleted_tablet_receiver)
++            .await
++    }
++
++    async fn build_leader(
++        self: &Arc<Self>,
++        rw_persistence: Arc<dyn Persistence>,
++        deleted_tablet_receiver: tokio::sync::mpsc::Receiver<value::TabletId>,
++    ) -> anyhow::Result<()> {
 +        let app = make_app(
 +            self.runtime.clone(),
 +            self.config.clone(),
@@ -545,9 +548,10 @@ index 000000000..0a84189c1
 +            deleted_tablet_receiver,
 +            self.zombify_rx.clone(),
 +            self.role.preempt_signal.clone(),
++            self.build_revision,
 +        )
 +        .await?;
-+        tracing::info!("[promote] leader app built");
++        tracing::info!("[concave] leader app built");
 +        self.install_leader(app, rw_persistence)
 +    }
 +
@@ -775,6 +779,21 @@ index 000000000..0a84189c1
 +    }
 +}
 +
++pub async fn or_sigterm(ctrl_c: impl Future<Output = std::io::Result<()>>) -> std::io::Result<()> {
++    #[cfg(unix)]
++    {
++        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
++        tokio::select! {
++            r = ctrl_c => r,
++            _ = term.recv() => Ok(()),
++        }
++    }
++    #[cfg(not(unix))]
++    {
++        ctrl_c.await
++    }
++}
++
 +pub fn http_service(node: &Arc<HaNode>) -> RoleRouter {
 +    let follower = match node.router.get() {
 +        Some(_) => Router::new(),
@@ -864,7 +883,7 @@ index 000000000..0a84189c1
 +        .get(CONTROL_PLANE_TOKEN_HEADER)
 +        .map(|v| v.as_bytes())
 +        .unwrap_or_default();
-+    if keybroker::constant_time_eq_sha256(presented, expected.as_bytes()) {
++    if keybroker::funrun_auth::constant_time_eq_sha256(presented, expected.as_bytes()) {
 +        return next.run(req).await;
 +    }
 +    tracing::warn!(

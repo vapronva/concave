@@ -22,10 +22,10 @@ index 982a61b8e..14a073fc8 100644
  
 diff --git a/crates/application/src/cron_jobs/rejected.rs b/crates/application/src/cron_jobs/rejected.rs
 new file mode 100644
-index 000000000..9ccf87cd6
+index 000000000..e78766da9
 --- /dev/null
 +++ b/crates/application/src/cron_jobs/rejected.rs
-@@ -0,0 +1,31 @@
+@@ -0,0 +1,42 @@
 +use super::*;
 +use crate::function_log::ActionCompletion;
 +
@@ -40,28 +40,39 @@ index 000000000..9ccf87cd6
 +            Ok(completion) => return Ok(completion),
 +            Err(error) => error,
 +        };
-+        if error.is_rejected_before_execution()
-+            && let Some(mut tx) = self
-+                .new_transaction_for_job_state(updated_job, FunctionUsageTracker::new())
-+                .await?
-+        {
-+            let component = tx
-+                .table_mapping()
-+                .tablet_namespace(job.id.tablet_id)?
-+                .into();
-+            CronModel::new(&mut tx, component)
-+                .update_job_state(job.cron_next_run())
-+                .await?;
-+            self.database.commit(tx, "cron_action_rejected").await?;
++        if error.is_rejected_before_execution() {
++            let mut backoff = Backoff::new(INITIAL_BACKOFF, MAX_BACKOFF);
++            while let Err(mut err) = self.reset_rejected(job, updated_job).await {
++                let delay = backoff.fail(&mut self.rt.rng());
++                tracing::error!(
++                    "[concave] failed to requeue a rejected action, sleeping {delay:?}"
++                );
++                report_error(&mut err).await;
++                self.rt.wait(delay).await;
++            }
 +        }
 +        Err(error)
 +    }
++
++    async fn reset_rejected(&self, job: &CronJob, updated_job: &CronJob) -> anyhow::Result<()> {
++        let Some(mut tx) = self
++            .new_transaction_for_job_state(updated_job, FunctionUsageTracker::new())
++            .await?
++        else {
++            return Ok(());
++        };
++        CronModel::new(&mut tx, job.component)
++            .update_job_state(job.cron_next_run())
++            .await?;
++        self.database.commit(tx, "cron_action_rejected").await?;
++        Ok(())
++    }
 +}
 diff --git a/crates/application/src/lib.rs b/crates/application/src/lib.rs
-index b0f2b9294..e6494d6ed 100644
+index f9f3585c6..b68e74837 100644
 --- a/crates/application/src/lib.rs
 +++ b/crates/application/src/lib.rs
-@@ -323,7 +323,6 @@ use model::{
+@@ -324,7 +324,6 @@ use model::{
          types::UdfConfig,
          UdfConfigModel,
      },
@@ -69,7 +80,7 @@ index b0f2b9294..e6494d6ed 100644
  };
  use node_executor::NodeActions;
  use parking_lot::{
-@@ -388,7 +387,6 @@ use usage_gauges_tracking_worker::UsageGaugesTrackingWorker;
+@@ -389,7 +388,6 @@ use usage_gauges_tracking_worker::UsageGaugesTrackingWorker;
  use usage_limits::{
      UsageLimitNotifier,
      UsageLimitRecorder,
@@ -77,7 +88,7 @@ index b0f2b9294..e6494d6ed 100644
      UsageMeter,
  };
  use usage_tracking::{
-@@ -842,26 +840,7 @@ impl<RT: Runtime> Application<RT> {
+@@ -841,26 +839,7 @@ impl<RT: Runtime> Application<RT> {
          )
          .await?;
  
@@ -129,10 +140,10 @@ index 33922824f..08fba08dd 100644
                      Err(e) => ScheduledJobState::Failed(e.to_string()),
 diff --git a/crates/application/src/scheduled_jobs/rejected.rs b/crates/application/src/scheduled_jobs/rejected.rs
 new file mode 100644
-index 000000000..be97897e8
+index 000000000..67fd6e721
 --- /dev/null
 +++ b/crates/application/src/scheduled_jobs/rejected.rs
-@@ -0,0 +1,29 @@
+@@ -0,0 +1,49 @@
 +use super::*;
 +use crate::function_log::ActionCompletion;
 +
@@ -147,18 +158,38 @@ index 000000000..be97897e8
 +            Ok(completion) => return Ok(completion),
 +            Err(error) => error,
 +        };
-+        if error.is_rejected_before_execution()
-+            && let Some((mut tx, mut job)) = self
-+                .new_transaction_for_job_state(job_id, updated_job, FunctionUsageTracker::new())
-+                .await?
-+        {
-+            let namespace = tx.table_mapping().tablet_namespace(job_id.tablet_id)?;
-+            job.state = ScheduledJobState::Pending;
-+            SchedulerModel::new(&mut tx, namespace)
-+                .replace(job_id, job)
-+                .await?;
-+            self.database.commit(tx, "scheduled_job_rejected").await?;
++        if error.is_rejected_before_execution() {
++            let mut backoff =
++                Backoff::new(*SCHEDULED_JOB_INITIAL_BACKOFF, *SCHEDULED_JOB_MAX_BACKOFF);
++            while let Err(mut err) = self.reset_rejected(job_id, updated_job).await {
++                let delay = backoff.fail(&mut self.rt.rng());
++                tracing::error!(
++                    "[concave] failed to requeue a rejected action, sleeping {delay:?}"
++                );
++                report_error(&mut err).await;
++                self.rt.wait(delay).await;
++            }
 +        }
 +        Err(error)
++    }
++
++    async fn reset_rejected(
++        &self,
++        job_id: ResolvedDocumentId,
++        updated_job: &ScheduledJobMetadata,
++    ) -> anyhow::Result<()> {
++        let Some((mut tx, mut job)) = self
++            .new_transaction_for_job_state(job_id, updated_job, FunctionUsageTracker::new())
++            .await?
++        else {
++            return Ok(());
++        };
++        let namespace = tx.table_mapping().tablet_namespace(job_id.tablet_id)?;
++        job.state = ScheduledJobState::Pending;
++        SchedulerModel::new(&mut tx, namespace)
++            .replace(job_id, job)
++            .await?;
++        self.database.commit(tx, "scheduled_job_rejected").await?;
++        Ok(())
 +    }
 +}

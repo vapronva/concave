@@ -43,10 +43,10 @@ index dfe80d124..3fdf03bd1 100644
      }
  }
 diff --git a/crates/local_backend/src/lib.rs b/crates/local_backend/src/lib.rs
-index bea81d960..608e7b12c 100644
+index 322609819..621b2ff05 100644
 --- a/crates/local_backend/src/lib.rs
 +++ b/crates/local_backend/src/lib.rs
-@@ -52,7 +52,6 @@ use common::{
+@@ -53,7 +53,6 @@ use common::{
  };
  use config::LocalConfig;
  use database::Database;
@@ -54,7 +54,7 @@ index bea81d960..608e7b12c 100644
  use exports::interface::InProcessExportProvider;
  use file_storage::{
      FileStorage,
-@@ -91,6 +90,7 @@ pub mod authentication;
+@@ -92,6 +91,7 @@ pub mod authentication;
  pub mod beacon;
  pub mod canonical_urls;
  pub mod config;
@@ -62,7 +62,7 @@ index bea81d960..608e7b12c 100644
  pub mod custom_headers;
  pub mod dashboard;
  pub mod deploy_config;
-@@ -102,6 +102,7 @@ pub mod deployment_state;
+@@ -103,6 +103,7 @@ pub mod deployment_state;
  pub mod environment_variables;
  pub mod http_actions;
  pub mod integrations;
@@ -70,7 +70,7 @@ index bea81d960..608e7b12c 100644
  pub mod logs;
  pub mod node_action_callbacks;
  pub mod parse;
-@@ -116,6 +117,7 @@ pub mod storage;
+@@ -117,6 +118,7 @@ pub mod storage;
  pub mod streaming_export;
  pub mod streaming_import;
  pub mod subs;
@@ -78,7 +78,7 @@ index bea81d960..608e7b12c 100644
  pub mod usage_limits;
  
  pub const MAX_CONCURRENT_REQUESTS: usize = 128;
-@@ -128,6 +130,7 @@ pub struct LocalAppState {
+@@ -129,6 +131,7 @@ pub struct LocalAppState {
      pub site_origin: ConvexSite,
      // Name of the instance. (e.g. crazy-giraffe-123)
      pub instance_name: String,
@@ -86,7 +86,7 @@ index bea81d960..608e7b12c 100644
      pub application: Application<ProdRuntime>,
      pub zombify_rx: async_broadcast::Receiver<()>,
  }
-@@ -157,31 +160,17 @@ pub async fn make_app(
+@@ -158,32 +161,18 @@ pub async fn make_app(
      runtime: ProdRuntime,
      config: LocalConfig,
      persistence: Arc<dyn Persistence>,
@@ -95,6 +95,7 @@ index bea81d960..608e7b12c 100644
 +    deleted_tablet_receiver: tokio::sync::mpsc::Receiver<value::TabletId>,
      zombify_rx: async_broadcast::Receiver<()>,
      preempt_tx: ShutdownSignal,
+     build_revision: BuildRevision,
  ) -> anyhow::Result<LocalAppState> {
      let key_broker = config.key_broker()?;
 -    let in_process_searcher = Arc::new(InProcessSearcher::new(runtime.clone())?);
@@ -122,7 +123,7 @@ index bea81d960..608e7b12c 100644
      initialize_application_system_tables(&database).await?;
      let application_storage = Application::initialize_storage(
          runtime.clone(),
-@@ -245,6 +234,8 @@ pub async fn make_app(
+@@ -247,6 +236,8 @@ pub async fn make_app(
              database.clone(),
              fetch_client.clone(),
          )?);
@@ -131,7 +132,7 @@ index bea81d960..608e7b12c 100644
  
      let application = Application::new(
          runtime.clone(),
-@@ -304,6 +295,7 @@ pub async fn make_app(
+@@ -307,6 +298,7 @@ pub async fn make_app(
          origin,
          site_origin: config.convex_site_url()?,
          instance_name,
@@ -140,7 +141,7 @@ index bea81d960..608e7b12c 100644
          zombify_rx,
      };
 diff --git a/crates/local_backend/src/main.rs b/crates/local_backend/src/main.rs
-index 93bad254f..383474041 100644
+index a149c7cc7..9e26f7740 100644
 --- a/crates/local_backend/src/main.rs
 +++ b/crates/local_backend/src/main.rs
 @@ -7,21 +7,12 @@ use cmd_util::env::{
@@ -166,7 +167,7 @@ index 93bad254f..383474041 100644
  use futures::{
      future::{
          self,
-@@ -40,11 +31,8 @@ use local_backend::{
+@@ -41,11 +32,8 @@ use local_backend::{
          LocalConfig,
          Subcommand,
      },
@@ -179,29 +180,7 @@ index 93bad254f..383474041 100644
  };
  use runtime::prod::ProdRuntime;
  use tokio::{
-@@ -54,6 +42,21 @@ use tokio::{
-     sync::oneshot,
- };
- 
-+async fn shutdown_signal() -> std::io::Result<()> {
-+    #[cfg(unix)]
-+    {
-+        let mut term = signal::unix::signal(signal::unix::SignalKind::terminate())?;
-+        tokio::select! {
-+            r = signal::ctrl_c() => r,
-+            _ = term.recv() => Ok(()),
-+        }
-+    }
-+    #[cfg(not(unix))]
-+    {
-+        signal::ctrl_c().await
-+    }
-+}
-+
- fn main() -> Result<(), MainError> {
-     let config = LocalConfig::parse();
-     if let Some(subcommand) = &config.subcommand {
-@@ -145,40 +148,15 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
+@@ -153,41 +141,16 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
      let preempt_signal = ShutdownSignal::new(preempt_tx);
      // Use to signal to the http service to stop.
      let (shutdown_tx, shutdown_rx) = async_broadcast::broadcast(1);
@@ -228,6 +207,7 @@ index 93bad254f..383474041 100644
 -        persistence,
          shutdown_rx.clone(),
          preempt_signal.clone(),
+         BUILD_REVISION,
      )
      .await?;
 -    let router = router(st.clone());
@@ -244,7 +224,7 @@ index 93bad254f..383474041 100644
      let serve_http_future = http_service.serve(config.http_bind_address(), async move {
          let _ = shutdown_rx_.recv().await;
      });
-@@ -194,19 +172,20 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
+@@ -203,19 +166,20 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
      // Start shutdown when we get a manual shutdown signal or with the first
      // ctrl-c.
      let mut force_exit_duration = None;
@@ -263,12 +243,12 @@ index 93bad254f..383474041 100644
          }
 -        r = signal::ctrl_c().fuse() => {
 -            tracing::info!("Received Ctrl-C signal!");
-+        r = shutdown_signal().fuse() => {
++        r = leadership::or_sigterm(signal::ctrl_c()).fuse() => {
 +            tracing::info!("Received shutdown signal!");
              r?;
              let _: Result<_, _> = shutdown_tx.broadcast(()).await;
          },
-@@ -246,10 +225,14 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
+@@ -255,10 +219,14 @@ async fn run_server_inner(runtime: ProdRuntime, config: LocalConfig) -> anyhow::
              // Forcibly shutdown when the cool down expires
              _ = force_exit_future => {
                  tracing::info!("Cool down expired. Shutting down");
@@ -281,28 +261,31 @@ index 93bad254f..383474041 100644
              }
              // Forcibly shutdown with second ctrl-c.
 -            r = signal::ctrl_c().fuse() => {
-+            r = shutdown_signal().fuse() => {
++            r = leadership::or_sigterm(signal::ctrl_c()).fuse() => {
                  r?;
                  tracing::warn!("Forcibly shutting down!");
                  break;
 diff --git a/crates/local_backend/src/node_action_callbacks.rs b/crates/local_backend/src/node_action_callbacks.rs
-index 1b0b4d2a6..a1252c933 100644
+index 1b0b4d2a6..aabba0be2 100644
 --- a/crates/local_backend/src/node_action_callbacks.rs
 +++ b/crates/local_backend/src/node_action_callbacks.rs
-@@ -34,6 +34,12 @@ use common::{
+@@ -27,6 +27,7 @@ use common::{
+         EncodedSpan,
+     },
+     http::{
++        concave::*,
+         extract::{
+             FromMtState,
+             Json,
+@@ -34,6 +35,7 @@ use common::{
          },
          ExtractClientVersion,
          HttpResponseError,
-+        CONVEX_ACTIONS_CALLBACK_TOKEN_HEADER,
-+        CONVEX_ACTION_FUNCTION_NAME_HEADER,
-+        CONVEX_DEFERRED_AUTH_ERROR_HEADER,
-+        CONVEX_EXECUTION_ID_HEADER,
 +        CONVEX_REQUEST_ID_HEADER,
-+        CONVEX_ROOT_REQUEST_HEADER,
      },
      knobs::V8_ACTION_USER_TIMEOUT,
      runtime::UnixTimestamp,
-@@ -90,10 +96,14 @@ use crate::{
+@@ -90,10 +92,14 @@ use crate::{
      LocalAppState,
  };
  
@@ -317,7 +300,7 @@ index 1b0b4d2a6..a1252c933 100644
      pub reference: Option<String>,
      pub function_handle: Option<String>,
      pub args: UdfArgsJson,
-@@ -185,9 +195,10 @@ pub async fn internal_query_post(
+@@ -185,9 +191,10 @@ pub async fn internal_query_post(
  ) -> Result<impl IntoResponse, HttpResponseError> {
      let path = st
          .application
@@ -329,7 +312,7 @@ index 1b0b4d2a6..a1252c933 100644
              req.path,
              req.reference,
              req.function_handle,
-@@ -244,9 +255,10 @@ pub async fn internal_mutation_post(
+@@ -244,9 +251,10 @@ pub async fn internal_mutation_post(
          .transpose()?;
      let path = st
          .application
@@ -341,7 +324,7 @@ index 1b0b4d2a6..a1252c933 100644
              req.path,
              req.reference,
              req.function_handle,
-@@ -303,9 +315,10 @@ pub async fn internal_action_post(
+@@ -303,9 +311,10 @@ pub async fn internal_action_post(
  ) -> Result<impl IntoResponse, HttpResponseError> {
      let path = st
          .application
@@ -353,7 +336,7 @@ index 1b0b4d2a6..a1252c933 100644
              req.path,
              req.reference,
              req.function_handle,
-@@ -349,6 +362,7 @@ pub struct ScheduleJobRequest {
+@@ -349,6 +358,7 @@ pub struct ScheduleJobRequest {
      reference: Option<String>,
      function_handle: Option<String>,
      udf_path: Option<String>,
@@ -361,7 +344,7 @@ index 1b0b4d2a6..a1252c933 100644
      udf_args: UdfArgsJson,
      scheduled_ts: f64,
  }
-@@ -374,9 +388,10 @@ pub async fn schedule_job(
+@@ -374,9 +384,10 @@ pub async fn schedule_job(
      // User might have entered an invalid path, so this is a developer error.
      let path = st
          .application
@@ -373,7 +356,7 @@ index 1b0b4d2a6..a1252c933 100644
              req.udf_path,
              req.reference,
              req.function_handle,
-@@ -432,6 +447,7 @@ pub async fn cancel_developer_job(
+@@ -432,6 +443,7 @@ pub async fn cancel_developer_job(
  #[serde(rename_all = "camelCase")]
  pub struct CreateFunctionHandleRequest {
      udf_path: Option<String>,
@@ -381,7 +364,7 @@ index 1b0b4d2a6..a1252c933 100644
      reference: Option<String>,
  }
  
-@@ -451,9 +467,10 @@ pub async fn create_function_handle(
+@@ -451,9 +463,10 @@ pub async fn create_function_handle(
  ) -> Result<impl IntoResponse, HttpResponseError> {
      let path = st
          .application
@@ -393,7 +376,7 @@ index 1b0b4d2a6..a1252c933 100644
              req.udf_path,
              req.reference,
              None,
-@@ -636,14 +653,12 @@ pub async fn audit_log(
+@@ -636,14 +649,12 @@ pub async fn audit_log(
      .into())
  }
  
@@ -409,7 +392,7 @@ index 1b0b4d2a6..a1252c933 100644
          .context("Missing callback token - is the call from actions?")?;
  
      let token = value
-@@ -713,7 +728,10 @@ where
+@@ -713,7 +724,10 @@ where
          // Validate the auth token based on when the action token was issued. This
          // prevents errors due to auth token expiring in the middle of long action.
          let (issue_time, component_id) = check_actions_token(&st, &parts.headers).await?;
@@ -421,7 +404,7 @@ index 1b0b4d2a6..a1252c933 100644
          st.application
              .validate_component_id(identity.clone(), component_id)
              .await?;
-@@ -735,7 +753,7 @@ impl<S: Sync> FromRequestParts<S> for ExtractActionName {
+@@ -735,7 +749,7 @@ impl<S: Sync> FromRequestParts<S> for ExtractActionName {
      ) -> Result<Self, Self::Rejection> {
          let action_name = parts
              .headers
@@ -430,7 +413,7 @@ index 1b0b4d2a6..a1252c933 100644
              .map(|value| value.to_str())
              .transpose()
              .context("Convex-Action-Function-Name must be a string")?
-@@ -756,7 +774,7 @@ impl<T: Sync> FromRequestParts<T> for ExtractExecutionContext {
+@@ -756,7 +770,7 @@ impl<T: Sync> FromRequestParts<T> for ExtractExecutionContext {
      ) -> Result<Self, Self::Rejection> {
          let request_id: RequestId = parts
              .headers
@@ -439,7 +422,7 @@ index 1b0b4d2a6..a1252c933 100644
              .map(|v| v.to_str())
              .transpose()
              .context("Request id must be a string")?
-@@ -766,7 +784,7 @@ impl<T: Sync> FromRequestParts<T> for ExtractExecutionContext {
+@@ -766,7 +780,7 @@ impl<T: Sync> FromRequestParts<T> for ExtractExecutionContext {
              .unwrap_or(RequestId::new());
          let execution_id: ExecutionId = parts
              .headers
@@ -448,7 +431,7 @@ index 1b0b4d2a6..a1252c933 100644
              .map(|v| v.to_str())
              .transpose()
              .context("Execution id must be a string")?
-@@ -775,7 +793,7 @@ impl<T: Sync> FromRequestParts<T> for ExtractExecutionContext {
+@@ -775,7 +789,7 @@ impl<T: Sync> FromRequestParts<T> for ExtractExecutionContext {
              // For backwards compatibility
              .unwrap_or(ExecutionId::new());
  

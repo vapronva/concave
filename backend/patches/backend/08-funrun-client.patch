@@ -1,11 +1,20 @@
-diff --git a/crates/common/src/http/mod.rs b/crates/common/src/http/mod.rs
-index 15fb45e78..439b48e21 100644
---- a/crates/common/src/http/mod.rs
-+++ b/crates/common/src/http/mod.rs
-@@ -564,6 +564,15 @@ impl ConvexHttpService {
-         self.meta_routes_enabled = enabled;
-     }
- 
+diff --git a/crates/common/src/http/concave.rs b/crates/common/src/http/concave.rs
+new file mode 100644
+index 000000000..c25137b9d
+--- /dev/null
++++ b/crates/common/src/http/concave.rs
+@@ -0,0 +1,20 @@
++use axum::Router;
++
++use super::ConvexHttpService;
++
++pub const CONVEX_ACTIONS_CALLBACK_TOKEN_HEADER: &str = "Convex-Action-Callback-Token";
++pub const CONVEX_EXECUTION_ID_HEADER: &str = "Convex-Execution-Id";
++pub const CONVEX_ROOT_REQUEST_HEADER: &str = "Convex-Root-Request";
++pub const CONVEX_ACTION_FUNCTION_NAME_HEADER: &str = "Convex-Action-Function-Name";
++pub const CONVEX_DEFERRED_AUTH_ERROR_HEADER: &str = "Convex-Deferred-Auth-Error";
++
++impl ConvexHttpService {
 +    pub fn into_router(self) -> Router {
 +        let extra = self.meta_routes();
 +        if self.meta_routes_enabled {
@@ -14,23 +23,20 @@ index 15fb45e78..439b48e21 100644
 +            self.router
 +        }
 +    }
-+
-     /// Routes not handled by the passed-in router.
-     fn meta_routes(&self) -> Router {
-         let version = self.version.clone();
-@@ -1015,6 +1024,11 @@ where
++}
+diff --git a/crates/common/src/http/mod.rs b/crates/common/src/http/mod.rs
+index dafe764d1..189a5dedf 100644
+--- a/crates/common/src/http/mod.rs
++++ b/crates/common/src/http/mod.rs
+@@ -130,6 +130,7 @@ use crate::{
+     RequestMetadata,
+ };
  
- #[allow(clippy::declare_interior_mutable_const)]
- pub const CONVEX_REQUEST_ID_HEADER: HeaderName = HeaderName::from_static("convex-request-id");
-+pub const CONVEX_ACTIONS_CALLBACK_TOKEN_HEADER: &str = "Convex-Action-Callback-Token";
-+pub const CONVEX_EXECUTION_ID_HEADER: &str = "Convex-Execution-Id";
-+pub const CONVEX_ROOT_REQUEST_HEADER: &str = "Convex-Root-Request";
-+pub const CONVEX_ACTION_FUNCTION_NAME_HEADER: &str = "Convex-Action-Function-Name";
-+pub const CONVEX_DEFERRED_AUTH_ERROR_HEADER: &str = "Convex-Deferred-Auth-Error";
- 
- pub struct ExtractRequestId(pub RequestId);
- 
-@@ -1296,23 +1310,6 @@ impl<T: fmt::Display> fmt::Display for LogOptFmt<T> {
++pub mod concave;
+ pub mod extract;
+ pub mod fetch;
+ pub mod fork_of_axum_serve;
+@@ -1331,23 +1332,6 @@ impl<T: fmt::Display> fmt::Display for LogOptFmt<T> {
      }
  }
  
@@ -101,10 +107,10 @@ index 5bc866196..3c9a6076e 100644
  usage_tracking = { workspace = true }
  value = { workspace = true }
 diff --git a/crates/function_runner/src/lib.rs b/crates/function_runner/src/lib.rs
-index 5c1665f6f..55c8b757e 100644
+index 73e4f706d..d1dab2b20 100644
 --- a/crates/function_runner/src/lib.rs
 +++ b/crates/function_runner/src/lib.rs
-@@ -81,6 +81,7 @@ mod in_memory_indexes;
+@@ -79,6 +79,7 @@ mod in_memory_indexes;
  pub mod in_process_function_runner;
  mod metrics;
  mod module_cache;
@@ -114,10 +120,10 @@ index 5c1665f6f..55c8b757e 100644
  #[async_trait]
 diff --git a/crates/function_runner/src/remote.rs b/crates/function_runner/src/remote.rs
 new file mode 100644
-index 000000000..fcd800a10
+index 000000000..7fc407f38
 --- /dev/null
 +++ b/crates/function_runner/src/remote.rs
-@@ -0,0 +1,1065 @@
+@@ -0,0 +1,1081 @@
 +use std::{
 +    collections::{
 +        BTreeMap,
@@ -141,11 +147,9 @@ index 000000000..fcd800a10
 +use cmd_util::env::env_config;
 +use common::{
 +    auth::AuthConfig,
-+    bootstrap_model::components::definition::ComponentDefinitionMetadata,
 +    components::{
 +        ComponentDefinitionPath,
-+        ComponentName,
-+        Resource,
++        ResolvedComponentFunctionPath,
 +    },
 +    errors::JsError,
 +    execution_context::ExecutionContext,
@@ -221,13 +225,13 @@ index 000000000..fcd800a10
 +    Endpoint,
 +};
 +use udf::{
++    validation::ValidatedPathAndArgs,
 +    ActionCallbacks,
 +    EvaluateAppDefinitionsResult,
 +    FunctionOutcome,
 +    HttpActionResponseStreamer,
 +};
 +use usage_tracking::FunctionUsageStats;
-+use value::identifier::Identifier;
 +
 +use self::snapshot_rpc::SnapshotPins;
 +use crate::{
@@ -440,7 +444,7 @@ index 000000000..fcd800a10
 +}
 +
 +fn has_deadline(udf_type: UdfType) -> bool {
-+    matches!(udf_type, UdfType::Query | UdfType::Mutation | UdfType::Init)
++    matches!(udf_type, UdfType::Query | UdfType::Mutation)
 +}
 +
 +fn retry_backoff(attempt: u32) -> Duration {
@@ -717,6 +721,7 @@ index 000000000..fcd800a10
 +            outcome,
 +            final_transaction,
 +            usage_stats,
++            http_route_unmatched: _,
 +        } = result;
 +        let outcome = FunctionOutcome::from_proto(
 +            outcome.context("funrun response missing outcome")?,
@@ -919,13 +924,17 @@ index 000000000..fcd800a10
 +            outcome,
 +            final_transaction: _,
 +            usage_stats,
++            http_route_unmatched,
 +        } = result.context("funrun HttpAction stream ended without a terminal result")?;
-+        let outcome = FunctionOutcome::from_proto(
++        let mut outcome = FunctionOutcome::from_proto(
 +            outcome.context("funrun response missing outcome")?,
 +            None,
 +            Some((http_path_for_outcome, request_head)),
 +            inert_identity,
 +        )?;
++        if http_route_unmatched && let FunctionOutcome::HttpAction(outcome) = &mut outcome {
++            outcome.route.matched = false;
++        }
 +        let usage_stats = usage_stats
 +            .map(FunctionUsageStats::try_from)
 +            .transpose()?
@@ -1024,6 +1033,7 @@ index 000000000..fcd800a10
 +                    udf_type != UdfType::HttpAction,
 +                    "HTTP action requested without http_action_metadata"
 +                );
++                anyhow::ensure!(udf_type != UdfType::Init, "Unexpected init function");
 +                self.run_function_remote(
 +                    udf_type,
 +                    identity,
@@ -1038,6 +1048,34 @@ index 000000000..fcd800a10
 +                .await
 +            },
 +        }
++    }
++
++    #[fastrace::trace]
++    async fn run_component_inits(
++        &self,
++        identity: Identity,
++        ts: RepeatableTimestamp,
++        existing_writes: FunctionWrites,
++        path_and_args: Vec<ValidatedPathAndArgs>,
++        default_system_env_vars: BTreeMap<EnvVarName, EnvVarValue>,
++        in_memory_index_last_modified: BTreeMap<IndexId, Timestamp>,
++        context: ExecutionContext,
++    ) -> anyhow::Result<(
++        FunctionFinalTransaction,
++        BTreeMap<ResolvedComponentFunctionPath, FunctionOutcome>,
++        FunctionUsageStats,
++    )> {
++        self.local
++            .run_component_inits(
++                identity,
++                ts,
++                existing_writes,
++                path_and_args,
++                default_system_env_vars,
++                in_memory_index_last_modified,
++                context,
++            )
++            .await
 +    }
 +
 +    #[fastrace::trace]
@@ -1073,20 +1111,6 @@ index 000000000..fcd800a10
 +    }
 +
 +    #[fastrace::trace]
-+    async fn evaluate_component_initializer(
-+        &self,
-+        evaluated_definitions: BTreeMap<ComponentDefinitionPath, ComponentDefinitionMetadata>,
-+        path: ComponentDefinitionPath,
-+        definition: ModuleConfig,
-+        args: BTreeMap<Identifier, Resource>,
-+        name: ComponentName,
-+    ) -> anyhow::Result<BTreeMap<Identifier, Resource>> {
-+        self.local
-+            .evaluate_component_initializer(evaluated_definitions, path, definition, args, name)
-+            .await
-+    }
-+
-+    #[fastrace::trace]
 +    async fn evaluate_schema(
 +        &self,
 +        schema_bundle: ModuleSource,
@@ -1117,7 +1141,9 @@ index 000000000..fcd800a10
 +            .await
 +    }
 +
-+    fn set_action_callbacks(&self, _action_callbacks: Arc<dyn ActionCallbacks>) {}
++    fn set_action_callbacks(&self, action_callbacks: Arc<dyn ActionCallbacks>) {
++        self.local.set_action_callbacks(action_callbacks);
++    }
 +}
 +
 +#[cfg(test)]
@@ -1131,10 +1157,9 @@ index 000000000..fcd800a10
 +        UdfType,
 +    };
 +
-+    const ALL: [UdfType; 5] = [
++    const ALL: [UdfType; 4] = [
 +        UdfType::Query,
 +        UdfType::Mutation,
-+        UdfType::Init,
 +        UdfType::Action,
 +        UdfType::HttpAction,
 +    ];
@@ -1152,7 +1177,7 @@ index 000000000..fcd800a10
 +            .unwrap_err();
 +        let failure = AttemptFailure::from_status(status);
 +        assert!(matches!(failure, AttemptFailure::NotSent(_)));
-+        assert_eq!(reasons(&failure), vec![Some("not_sent"); 5]);
++        assert_eq!(reasons(&failure), vec![Some("not_sent"); 4]);
 +        let error = failure.into_error("funrun RunFunction failed");
 +        assert!(error
 +            .downcast_ref::<ErrorMetadata>()
@@ -1163,23 +1188,20 @@ index 000000000..fcd800a10
 +    fn mid_flight_failures_keep_at_most_once_for_actions() {
 +        let transport = AttemptFailure::from_status(tonic::Status::unavailable("reset"));
 +        let deadline = Some("transport");
-+        assert_eq!(
-+            reasons(&transport),
-+            vec![deadline, deadline, deadline, None, None]
-+        );
++        assert_eq!(reasons(&transport), vec![deadline, deadline, None, None]);
 +        let rejected = AttemptFailure::from_status(tonic::Status::from_anyhow(
 +            ErrorMetadata::rejected_before_execution("ExpiredInQueue", "queue full").into(),
 +        ));
 +        assert_eq!(
 +            reasons(&rejected),
-+            vec![Some("rejected_before_execution"); 5]
++            vec![Some("rejected_before_execution"); 4]
 +        );
 +        let internal = AttemptFailure::from_status(tonic::Status::internal("boom"));
-+        assert_eq!(reasons(&internal), vec![None; 5]);
++        assert_eq!(reasons(&internal), vec![None; 4]);
 +        let timeout = Some("timeout");
 +        assert_eq!(
 +            reasons(&AttemptFailure::TimedOut),
-+            vec![timeout, timeout, timeout, None, None]
++            vec![timeout, timeout, None, None]
 +        );
 +    }
 +}
@@ -2044,10 +2066,10 @@ index 000000000..f39f28a6f
 +    }
 +}
 diff --git a/crates/function_runner/src/server.rs b/crates/function_runner/src/server.rs
-index df117586c..f0a6b4a2a 100644
+index d26b53947..6852b5753 100644
 --- a/crates/function_runner/src/server.rs
 +++ b/crates/function_runner/src/server.rs
-@@ -196,6 +196,7 @@ impl<RT: Runtime> StorageForDeployment<RT> for DeploymentStorage {
+@@ -204,6 +204,7 @@ impl<RT: Runtime> StorageForDeployment<RT> for DeploymentStorage {
      }
  }
  
@@ -2106,10 +2128,10 @@ index 000000000..edbc5cf2f
 +    }
 +}
 diff --git a/crates/isolate/src/client.rs b/crates/isolate/src/client.rs
-index 0207fcf03..673b34124 100644
+index 107a7e8da..6d30684c2 100644
 --- a/crates/isolate/src/client.rs
 +++ b/crates/isolate/src/client.rs
-@@ -544,6 +544,8 @@ pub fn initialize_v8() {
+@@ -528,6 +528,8 @@ pub fn initialize_v8() {
      });
  }
  
@@ -2118,7 +2140,7 @@ index 0207fcf03..673b34124 100644
  /// The V8 code all expects to run on a single thread, which makes it ineligible
  /// for Tokio's scheduler, which wants the ability to move work across scheduler
  /// threads. Instead, we'll manage our V8 threads ourselves.
-@@ -1166,6 +1168,7 @@ pub struct SharedIsolateScheduler<RT: Runtime, W: IsolateWorker<RT>> {
+@@ -1103,6 +1105,7 @@ pub struct SharedIsolateScheduler<RT: Runtime, W: IsolateWorker<RT>> {
      /// recreated and there will be no penalty for reassigning this worker to a
      /// new client.
      available_workers: HashMap<String, VecDeque<IdleWorkerState>>,
@@ -2126,7 +2148,7 @@ index 0207fcf03..673b34124 100644
      /// Set of futures awaiting a response from an active worker.
      in_progress_workers:
          FuturesUnordered<Join<oneshot::Receiver<IdleWorkerInfo>, Ready<ActiveWorkerState>>>,
-@@ -1212,6 +1215,7 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
+@@ -1149,6 +1152,7 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
              in_progress_count: HashMap::new(),
              active_workers,
              available_workers: HashMap::new(),
@@ -2134,7 +2156,7 @@ index 0207fcf03..673b34124 100644
              max_workers,
              handles,
              max_active_workers_per_client: (max_workers * max_percent_per_client)
-@@ -1266,6 +1270,7 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
+@@ -1203,6 +1207,7 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
          internal_receiver: mpsc::UnboundedReceiver<Request<RT>>,
      ) {
          log_pool_max(self.worker.config().name, self.max_workers);
@@ -2142,7 +2164,7 @@ index 0207fcf03..673b34124 100644
          let mut report_stats = self.rt.wait(*HEAP_WORKER_REPORT_INTERVAL_SECONDS);
          let mut expired_receiver = receiver.expired_receiver();
          let limiter = self.worker.config().limiter.clone();
-@@ -1444,6 +1449,9 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
+@@ -1381,6 +1386,9 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
              // It's possible that one of our own workers will end up being the
              // least-recently-used one.
          }
@@ -2196,27 +2218,25 @@ index 000000000..0df2c129a
 +    }
 +}
 diff --git a/crates/keybroker/src/broker.rs b/crates/keybroker/src/broker.rs
-index 3dedf205c..c95bb1148 100644
+index e80578c71..8708723a0 100644
 --- a/crates/keybroker/src/broker.rs
 +++ b/crates/keybroker/src/broker.rs
-@@ -1213,8 +1213,15 @@ impl KeyBroker {
+@@ -1216,7 +1216,14 @@ impl KeyBroker {
      }
  
      pub fn issue_action_token(&self, component_id: ComponentId) -> ActionCallbackToken {
 -        let now = SystemTime::now();
--        let since_epoch = now
 +        self.issue_action_token_at(component_id, SystemTime::now())
 +    }
 +
 +    pub fn issue_action_token_at(
 +        &self,
 +        component_id: ComponentId,
-+        issued_at: SystemTime,
++        now: SystemTime,
 +    ) -> ActionCallbackToken {
-+        let since_epoch = issued_at
+         let since_epoch = now
              .duration_since(SystemTime::UNIX_EPOCH)
              .expect("Failed to compute seconds since epoch?");
- 
 diff --git a/crates/keybroker/src/funrun_auth.rs b/crates/keybroker/src/funrun_auth.rs
 new file mode 100644
 index 000000000..96936ce89
@@ -2380,7 +2400,7 @@ index 000000000..96936ce89
 +    }
 +}
 diff --git a/crates/keybroker/src/lib.rs b/crates/keybroker/src/lib.rs
-index 132770c3d..033f6e3b1 100644
+index 6ce000057..91b7ecbc5 100644
 --- a/crates/keybroker/src/lib.rs
 +++ b/crates/keybroker/src/lib.rs
 @@ -3,6 +3,7 @@
@@ -2391,11 +2411,3 @@ index 132770c3d..033f6e3b1 100644
  mod legacy_encryptor;
  mod metrics;
  mod operations;
-@@ -36,6 +37,7 @@ pub use self::{
-         Encryptor,
-         RandomEncryptor,
-     },
-+    funrun_auth::constant_time_eq_sha256,
-     legacy_encryptor::LegacyEncryptor,
-     operations::{
-         bad_admin_key_error,

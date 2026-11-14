@@ -59,10 +59,10 @@ index 000000000..b8ca2d733
 +workspace = true
 diff --git a/crates/funrun_server/src/callbacks.rs b/crates/funrun_server/src/callbacks.rs
 new file mode 100644
-index 000000000..14eb9fdd7
+index 000000000..d8eb4e033
 --- /dev/null
 +++ b/crates/funrun_server/src/callbacks.rs
-@@ -0,0 +1,653 @@
+@@ -0,0 +1,655 @@
 +use anyhow::Context;
 +use async_trait::async_trait;
 +use common::{
@@ -77,12 +77,14 @@ index 000000000..14eb9fdd7
 +        RequestId,
 +    },
 +    http::{
-+        CONVEX_ACTIONS_CALLBACK_TOKEN_HEADER,
-+        CONVEX_ACTION_FUNCTION_NAME_HEADER,
-+        CONVEX_DEFERRED_AUTH_ERROR_HEADER,
-+        CONVEX_EXECUTION_ID_HEADER,
++        concave::{
++            CONVEX_ACTIONS_CALLBACK_TOKEN_HEADER,
++            CONVEX_ACTION_FUNCTION_NAME_HEADER,
++            CONVEX_DEFERRED_AUTH_ERROR_HEADER,
++            CONVEX_EXECUTION_ID_HEADER,
++            CONVEX_ROOT_REQUEST_HEADER,
++        },
 +        CONVEX_REQUEST_ID_HEADER,
-+        CONVEX_ROOT_REQUEST_HEADER,
 +    },
 +    runtime::UnixTimestamp,
 +    types::{
@@ -948,7 +950,7 @@ index 000000000..7875397d2
 +}
 diff --git a/crates/funrun_server/src/main.rs b/crates/funrun_server/src/main.rs
 new file mode 100644
-index 000000000..ee1dd8f4e
+index 000000000..c8e673fd4
 --- /dev/null
 +++ b/crates/funrun_server/src/main.rs
 @@ -0,0 +1,286 @@
@@ -1047,7 +1049,7 @@ index 000000000..ee1dd8f4e
 +            config.listen
 +        );
 +        let interceptor = auth_interceptor(grpc_runtime.clone(), config.instance.clone());
-+        let service = FunrunService::new(grpc_runtime, grpc_registry, state)?;
++        let service = FunrunService::new(grpc_runtime, state)?;
 +        let server = pb::funrun::funrun_server::FunrunServer::new(service)
 +            .max_decoding_message_size(usize::MAX);
 +        builder
@@ -1318,10 +1320,10 @@ index 000000000..c54c549d4
 +}
 diff --git a/crates/funrun_server/src/service.rs b/crates/funrun_server/src/service.rs
 new file mode 100644
-index 000000000..308cd8b1f
+index 000000000..2f21c20e5
 --- /dev/null
 +++ b/crates/funrun_server/src/service.rs
-@@ -0,0 +1,652 @@
+@@ -0,0 +1,642 @@
 +use std::{
 +    collections::BTreeMap,
 +    pin::Pin,
@@ -1408,7 +1410,6 @@ index 000000000..308cd8b1f
 +    config::FunrunInstanceConfig,
 +    metrics::log_rejected_before_execution,
 +    snapshot::{
-+        InstanceRegistry,
 +        InstanceState,
 +        SnapshotInputs,
 +    },
@@ -1486,18 +1487,13 @@ index 000000000..308cd8b1f
 +
 +pub struct FunrunService<RT: Runtime> {
 +    rt: RT,
-+    registry: Arc<InstanceRegistry<RT>>,
 +    state: Arc<InstanceState<RT>>,
 +    fetch_client: Arc<dyn common::http::fetch::FetchClient>,
 +    callback_client: reqwest::Client,
 +}
 +
 +impl<RT: Runtime> FunrunService<RT> {
-+    pub fn new(
-+        rt: RT,
-+        registry: Arc<InstanceRegistry<RT>>,
-+        state: Arc<InstanceState<RT>>,
-+    ) -> anyhow::Result<Self> {
++    pub fn new(rt: RT, state: Arc<InstanceState<RT>>) -> anyhow::Result<Self> {
 +        let fetch_client = Arc::new(common::http::fetch::ProxiedFetchClient::new(
 +            None,
 +            "convex-funrun".to_string(),
@@ -1510,18 +1506,10 @@ index 000000000..308cd8b1f
 +            .context("failed to build funrun action callback HTTP client")?;
 +        Ok(Self {
 +            rt,
-+            registry,
 +            state,
 +            fetch_client,
 +            callback_client,
 +        })
-+    }
-+
-+    fn resolve_instance(&self, instance_name: &str) -> Result<Arc<InstanceState<RT>>, Status> {
-+        self.registry
-+            .instance_config(instance_name)
-+            .map_err(|_| Status::unauthenticated(UNAUTHENTICATED_MESSAGE))?;
-+        Ok(self.state.clone())
 +    }
 +
 +    fn decode_common_run_inputs(
@@ -1681,6 +1669,7 @@ index 000000000..308cd8b1f
 +                .map(pb::funrun::FunctionFinalTransaction::try_from)
 +                .transpose()?,
 +            usage_stats: Some(usage_stats.into()),
++            http_route_unmatched: false,
 +        })
 +    }
 +
@@ -1797,10 +1786,13 @@ index 000000000..308cd8b1f
 +        )
 +        .await?;
 +        let (_final_transaction, outcome, usage_stats) = result?;
++        let http_route_unmatched =
++            matches!(&outcome, udf::FunctionOutcome::HttpAction(outcome) if !outcome.route.matched);
 +        Ok(pb::funrun::RunFunctionResult {
 +            outcome: Some(outcome.try_into()?),
 +            final_transaction: None,
 +            usage_stats: Some(usage_stats.into()),
++            http_route_unmatched,
 +        })
 +    }
 +
@@ -1921,7 +1913,7 @@ index 000000000..308cd8b1f
 +        request: Request<pb::funrun::RunFunctionRequest>,
 +    ) -> Result<Response<Self::RunFunctionStream>, Status> {
 +        let req = request.into_inner();
-+        let instance = self.resolve_instance(&req.instance_name)?;
++        let instance = self.state.clone();
 +        let (part_tx, part_rx) = mpsc::channel(RESPONSE_STREAM_BUFFER);
 +        let fetch_client = self.fetch_client.clone();
 +        let callback_client = self.callback_client.clone();
@@ -1950,7 +1942,7 @@ index 000000000..308cd8b1f
 +        request: Request<pb::funrun::RunHttpActionRequest>,
 +    ) -> Result<Response<Self::RunHttpActionStream>, Status> {
 +        let req = request.into_inner();
-+        let instance = self.resolve_instance(&req.instance_name)?;
++        let instance = self.state.clone();
 +        let (part_tx, part_rx) = mpsc::channel(RESPONSE_STREAM_BUFFER);
 +        let fetch_client = self.fetch_client.clone();
 +        let callback_client = self.callback_client.clone();
@@ -1976,10 +1968,10 @@ index 000000000..308cd8b1f
 +}
 diff --git a/crates/funrun_server/src/snapshot.rs b/crates/funrun_server/src/snapshot.rs
 new file mode 100644
-index 000000000..fb1b0cb01
+index 000000000..4074f92a8
 --- /dev/null
 +++ b/crates/funrun_server/src/snapshot.rs
-@@ -0,0 +1,594 @@
+@@ -0,0 +1,561 @@
 +use std::{
 +    sync::{
 +        Arc,
@@ -1990,9 +1982,7 @@ index 000000000..fb1b0cb01
 +
 +use anyhow::Context;
 +use application::create_storage;
-+use async_trait::async_trait;
 +use common::{
-+    document::DocumentUpdate,
 +    knobs::MAX_ISOLATE_WORKERS,
 +    persistence::{
 +        index_scan_attribution::IndexScanCaller,
@@ -2001,10 +1991,6 @@ index 000000000..fb1b0cb01
 +        PersistenceSnapshot,
 +        RepeatablePersistence,
 +        RetentionValidator,
-+    },
-+    query::{
-+        InternalSearch,
-+        SearchVersion,
 +    },
 +    runtime::Runtime,
 +    types::{
@@ -2041,10 +2027,7 @@ index 000000000..fb1b0cb01
 +        AttributedIndexReader,
 +        IndexReader,
 +    },
-+    index_registry::{
-+        Index,
-+        IndexRegistry,
-+    },
++    index_registry::IndexRegistry,
 +};
 +use isolate::client::IsolateClient;
 +use keybroker::{
@@ -2061,7 +2044,6 @@ index 000000000..fb1b0cb01
 +use parking_lot::Mutex;
 +use search::{
 +    searcher::InProcessSearcher,
-+    QueryResults,
 +    TextIndexManager,
 +};
 +use sync_types::backoff::Backoff;
@@ -2142,14 +2124,6 @@ index 000000000..fb1b0cb01
 +
 +    pub fn instance_ready(&self) -> bool {
 +        self.state.get().is_some_and(|state| state.source.ready())
-+    }
-+
-+    pub fn instance_config(&self, instance_name: &str) -> anyhow::Result<&FunrunInstanceConfig> {
-+        anyhow::ensure!(
-+            instance_name == self.instance.instance_name,
-+            "funrun pod is not configured for instance {instance_name:?} (FUNRUN_INSTANCE_NAME)"
-+        );
-+        Ok(&self.instance)
 +    }
 +
 +    pub async fn warm(&self) -> Arc<InstanceState<RT>> {
@@ -2398,7 +2372,7 @@ index 000000000..fb1b0cb01
 +            index_reader: self.index_reader(ts, attribution)?,
 +            bootstrap_metadata,
 +            table_count_snapshot: Arc::new(None::<TableCounts>),
-+            text_index_snapshot: Arc::new(NoActionTextSearch),
++            text_index_snapshot: Arc::new(SearchNotEnabled),
 +        })
 +    }
 +
@@ -2537,21 +2511,6 @@ index 000000000..fb1b0cb01
 +        database.searcher.clone(),
 +        database.search_storage.clone(),
 +    ))
-+}
-+
-+struct NoActionTextSearch;
-+
-+#[async_trait]
-+impl TransactionTextSnapshot for NoActionTextSearch {
-+    async fn search(
-+        &self,
-+        _index: &Index,
-+        _search: &InternalSearch,
-+        _version: SearchVersion,
-+        _pending_updates: &Vec<DocumentUpdate>,
-+    ) -> anyhow::Result<QueryResults> {
-+        anyhow::bail!("text search is not available in an action's own transaction")
-+    }
 +}
 +
 +#[derive(serde::Serialize)]

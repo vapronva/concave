@@ -1,15 +1,8 @@
-diff --git a/.nvmrc b/.nvmrc
-index ce62013c3..229b3ce85 100644
---- a/.nvmrc
-+++ b/.nvmrc
-@@ -1 +1 @@
--24.22.1
-+24.22.3
 diff --git a/Cargo.lock b/Cargo.lock
-index df9f084f5..0efd5cc81 100644
+index cc007b79d..3ac1c399c 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
-@@ -4633,6 +4633,8 @@ dependencies = [
+@@ -4630,6 +4630,8 @@ dependencies = [
   "anyhow",
   "async-trait",
   "async_lru",
@@ -18,7 +11,7 @@ index df9f084f5..0efd5cc81 100644
   "common",
   "convex_sync_types",
   "database",
-@@ -4647,17 +4649,65 @@ dependencies = [
+@@ -4644,17 +4646,65 @@ dependencies = [
   "model",
   "moka",
   "parking_lot",
@@ -84,7 +77,7 @@ index df9f084f5..0efd5cc81 100644
  ]
  
  [[package]]
-@@ -6767,6 +6817,7 @@ dependencies = [
+@@ -6770,6 +6820,7 @@ dependencies = [
   "http_client",
   "hyper-util",
   "indexing",
@@ -92,7 +85,7 @@ index df9f084f5..0efd5cc81 100644
   "jsonschema",
   "keybroker",
   "maplit",
-@@ -6775,7 +6826,10 @@ dependencies = [
+@@ -6778,7 +6829,10 @@ dependencies = [
   "moka",
   "node_executor",
   "parking_lot",
@@ -103,7 +96,7 @@ index df9f084f5..0efd5cc81 100644
   "reqwest 0.13.4",
   "roles",
   "runtime",
-@@ -6785,6 +6839,7 @@ dependencies = [
+@@ -6788,6 +6842,7 @@ dependencies = [
   "serde_json",
   "serde_with",
   "shape_inference",
@@ -142,12 +135,12 @@ index dcd71ff34..397c093a1 100644
  clusters = { workspace = true, features = ["testing"] }
  common = { workspace = true, features = ["testing"] }
 diff --git a/rust-toolchain b/rust-toolchain
-index 1ba2c04ca..1b93760fa 100644
+index 1ba2c04ca..99483eb66 100644
 --- a/rust-toolchain
 +++ b/rust-toolchain
 @@ -1,3 +1,4 @@
  [toolchain]
 -channel = "nightly-2026-06-28"
-+channel = "nightly-2026-11-07"
++channel = "nightly-2026-11-14"
  targets = ["wasm32-wasip1"]
 +components = ["rustfmt"]
