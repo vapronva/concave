@@ -1032,7 +1032,7 @@ func TestServeHTTP_TrickledBodyIsCutWithoutNudge(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 	start := time.Now()
 	_, _ = fmt.Fprint(c, "POST /api/storage/upload HTTP/1.1\r\nHost: api.example\r\nTransfer-Encoding: chunked\r\n\r\n")
 	go func() {
@@ -1080,7 +1080,7 @@ func TestServeHTTP_ResponseStreamingPastBodyDeadlineIsNotCut(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	events := 0
 	sc := bufio.NewScanner(resp.Body)
 	for sc.Scan() {
@@ -1100,7 +1100,7 @@ func TestServeHTTP_TrickledBodyOnRejectedPathIsBounded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 	start := time.Now()
 	_, _ = fmt.Fprint(c, "POST /metrics HTTP/1.1\r\nHost: api.example\r\nTransfer-Encoding: chunked\r\n\r\n")
 	go func() {
