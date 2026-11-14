@@ -1976,10 +1976,10 @@ index 000000000..308cd8b1f
 +}
 diff --git a/crates/funrun_server/src/snapshot.rs b/crates/funrun_server/src/snapshot.rs
 new file mode 100644
-index 000000000..ea4f8f116
+index 000000000..fb1b0cb01
 --- /dev/null
 +++ b/crates/funrun_server/src/snapshot.rs
-@@ -0,0 +1,603 @@
+@@ -0,0 +1,594 @@
 +use std::{
 +    sync::{
 +        Arc,
@@ -2097,13 +2097,7 @@ index 000000000..ea4f8f116
 +    instance: FunrunInstanceConfig,
 +    isolate_client: IsolateClient<RT>,
 +    state: OnceLock<Arc<InstanceState<RT>>>,
-+    load_error: Mutex<Option<InstanceLoadError>>,
-+}
-+
-+#[derive(Clone)]
-+struct InstanceLoadError {
-+    message: String,
-+    unix_ts: u64,
++    load_error_ts: Mutex<Option<u64>>,
 +}
 +
 +impl<RT: Runtime> InstanceRegistry<RT> {
@@ -2125,7 +2119,7 @@ index 000000000..ea4f8f116
 +            instance: config.instance.clone(),
 +            isolate_client,
 +            state: OnceLock::new(),
-+            load_error: Mutex::new(None),
++            load_error_ts: Mutex::new(None),
 +        })
 +    }
 +
@@ -2169,10 +2163,10 @@ index 000000000..ea4f8f116
 +                self.isolate_client.clone(),
 +            )
 +            .await;
-+            *self.load_error.lock() = loaded.as_ref().err().map(|e| InstanceLoadError {
-+                message: format!("{e:#}"),
-+                unix_ts: self.rt.unix_timestamp().as_secs(),
-+            });
++            *self.load_error_ts.lock() = loaded
++                .as_ref()
++                .err()
++                .map(|_| self.rt.unix_timestamp().as_secs());
 +            match loaded {
 +                Ok(state) => return self.state.get_or_init(|| Arc::new(state)).clone(),
 +                Err(e) => {
@@ -2188,15 +2182,13 @@ index 000000000..ea4f8f116
 +    }
 +
 +    pub fn health_report(&self) -> HealthReport {
-+        let load_error = self.load_error.lock().clone();
 +        HealthReport {
 +            healthy: self.healthy(),
 +            mode: self.mode,
 +            instance: InstanceHealth {
 +                name: self.instance.instance_name.clone(),
 +                ready: self.instance_ready(),
-+                last_load_error: load_error.as_ref().map(|e| e.message.clone()),
-+                last_load_error_unix_ts: load_error.map(|e| e.unix_ts),
++                last_load_error_unix_ts: *self.load_error_ts.lock(),
 +            },
 +        }
 +    }
@@ -2573,7 +2565,6 @@ index 000000000..ea4f8f116
 +pub struct InstanceHealth {
 +    pub name: String,
 +    pub ready: bool,
-+    pub last_load_error: Option<String>,
 +    pub last_load_error_unix_ts: Option<u64>,
 +}
 +

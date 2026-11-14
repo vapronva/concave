@@ -54,6 +54,19 @@ index 15fb45e78..439b48e21 100644
  /// Platform APIs dont' accept cookies so there's minimal risk (and plenty of
  /// convenience) from allowing browsers to make these requests.
  pub fn platform_api_cors() -> CorsLayer {
+diff --git a/crates/common/src/log_lines.rs b/crates/common/src/log_lines.rs
+index ca716137f..1ff737b10 100644
+--- a/crates/common/src/log_lines.rs
++++ b/crates/common/src/log_lines.rs
+@@ -208,7 +208,7 @@ impl LogLineStructured {
+         let mut truncated_messages: Vec<String> = vec![];
+         for message in messages {
+             let remaining_space = MAX_LOG_LINE_LENGTH - total_length;
+-            if message.len() <= remaining_space {
++            if message.len() < remaining_space {
+                 total_length += message.len() + 1;
+                 truncated_messages.push(message);
+             } else {
 diff --git a/crates/function_runner/Cargo.toml b/crates/function_runner/Cargo.toml
 index 5bc866196..3c9a6076e 100644
 --- a/crates/function_runner/Cargo.toml
