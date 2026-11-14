@@ -56,6 +56,28 @@ func TestDecide_Leaderless_UnhealthyTailerIsNotACandidate(t *testing.T) {
 	}
 }
 
+func TestDecide_UnpublishedTreatsUnreachablePodAsPossibleIncumbent(t *testing.T) {
+	t.Parallel()
+	refused := unreachable("backend-0")
+	refused.refused = true
+	cases := []struct {
+		name      string
+		in        []observation
+		published bool
+		want      bool
+	}{
+		{"fresh bigbrain, timed-out pod", []observation{unreachable("backend-0")}, false, true},
+		{"fresh bigbrain, refused pod", []observation{refused}, false, false},
+		{"published leaderless", []observation{unreachable("backend-0")}, true, false},
+	}
+	for _, tc := range cases {
+		d := decide(tc.in, decideParams{published: tc.published})
+		if d.incumbentUnreachable != tc.want {
+			t.Errorf("%s: incumbentUnreachable = %v, want %v", tc.name, d.incumbentUnreachable, tc.want)
+		}
+	}
+}
+
 func sticky(incumbent string) decideParams {
 	return decideParams{incumbent: incumbent}
 }
@@ -118,16 +140,16 @@ func TestDecide_Leaderless_PromotesWarmest(t *testing.T) {
 func TestDecide_TransitioningPodExcludedFromPromotion(t *testing.T) {
 	t.Parallel()
 	in := []observation{
-		withPriority(obs("draining", false, 200, 500), 100),
+		promoting(withPriority(obs("primary", false, 200, 500), 100)),
 		withPriority(obs("standby", false, 120, -1), 0),
 	}
-	d := decide(in, sticky("draining"))
+	d := decide(in, sticky("primary"))
 	if !d.hasTransitioning {
-		t.Fatalf("a reachable lease-holding non-leader must mark the decision transitioning")
+		t.Fatalf("a reachable promoting pod that already holds its lease must mark the decision transitioning")
 	}
 	if d.promoteTarget != nil {
 		t.Fatalf(
-			"no promotion may happen while a pod is mid-drain (steal-mid-drain), got %+v",
+			"no promotion may happen while a pod is mid-promotion, got %+v",
 			d.promoteTarget,
 		)
 	}
@@ -159,15 +181,15 @@ func withUnverified(o observation, secs uint64) observation {
 	return o
 }
 
-func withRole(o observation, role string) observation {
-	o.status.Role = role
+func promoting(o observation) observation {
+	o.status.Role = "promoting"
 	return o
 }
 
 func TestDecide_PromotingRoleFreezesPromotion(t *testing.T) {
 	t.Parallel()
 	in := []observation{
-		withRole(obs("backend-0", false, 100, -1), "promoting"),
+		promoting(obs("backend-0", false, 100, -1)),
 		obs("backend-1", false, 100, -1),
 	}
 	d := decide(in, sticky(""))
@@ -254,8 +276,8 @@ func TestDecide_Leaderless_RotatesToLeastRecentlyAttempted(t *testing.T) {
 		t.Fatalf("once both were attempted the least recent must be next, got %+v", d.promoteTarget)
 	}
 	c := New(DefaultConfig(), nil, nil, registry.New(), quietLogger())
-	st := c.deploymentState("dev")
-	c.recordPromoteAttempt(st, "primary", t0)
+	st := &deploymentState{}
+	st.recordPromoteAttempt("primary", t0)
 	c.commitState(st, decision{liveLeaderCount: 1}, false, t0)
 	if st.promoteAttempts != nil {
 		t.Fatalf("a credited leader must clear the attempt record, got %v", st.promoteAttempts)
@@ -320,13 +342,13 @@ func TestDecide_Failback_TransitioningPrimaryNotEligible(t *testing.T) {
 	now := time.Unix(1000, 0)
 	in := []observation{
 		withPriority(obs("standby", true, 100, 100), 0),
-		withPriority(obs("primary", false, 99, 90), 100),
+		promoting(withPriority(obs("primary", false, 99, 90), 100)),
 	}
 	prior := failbackState{candidate: "primary", eligibleSince: now.Add(-1 * time.Hour)}
 	d := decide(in, decideParams{incumbent: "standby", failback: fb(now, prior)})
 	if d.failbackTarget != nil {
 		t.Fatalf(
-			"a mid-drain primary (lease still held) must NOT be failback-eligible, got %q",
+			"a promoting primary must NOT be failback-eligible, got %q",
 			d.failbackTarget.be.Pod,
 		)
 	}
@@ -396,7 +418,7 @@ func TestDecide_Failback_WaitsWhileAnotherPodTransitions(t *testing.T) {
 	in := []observation{
 		withPriority(obs("standby", true, 100, 100), 0),
 		withPriority(obs("primary", false, 99, -1), 100),
-		withPriority(obs("other", false, 99, 7), 200),
+		promoting(withPriority(obs("other", false, 99, 7), 200)),
 	}
 	d := decide(in, decideParams{incumbent: "standby", failback: fb(now, prior)})
 	if d.failbackTarget != nil {

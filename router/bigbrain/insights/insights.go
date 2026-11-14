@@ -1,11 +1,11 @@
 package insights
 
 import (
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
-	"strconv"
 	"sync"
 	"time"
 )
@@ -14,7 +14,6 @@ const (
 	rootComponent              = "-root-component-"
 	maxRecentPerGroup          = 50
 	inclusiveEndHours          = 24
-	kindOCC                    = "occ"
 	kindRead                   = "read"
 	kindOCCRetried             = "occRetried"
 	kindOCCFailedPermanent     = "occFailedPermanently"
@@ -22,11 +21,8 @@ const (
 	kindBytesReadThreshold     = "bytesReadThreshold"
 	kindDocumentsReadLimit     = "documentsReadLimit"
 	kindDocumentsReadThreshold = "documentsReadThreshold"
-	eventFunctionCall          = "FunctionCall"
-	eventInsightReadLimit      = "InsightReadLimit"
 	fieldRequestID             = "request_id"
 	fieldOCCRetryCount         = "occ_retry_count"
-	fieldOCCFailedPermanently  = "occ_failed_permanently"
 	fieldCalls                 = "calls"
 	fieldSuccess               = "success"
 )
@@ -38,19 +34,18 @@ var (
 )
 
 type Row struct {
-	TS                   time.Time
-	Kind                 string
-	UDFID                string
-	ComponentPath        *string
-	RequestID            string
-	ExecutionID          string
-	OCCTableName         *string
-	OCCDocumentID        *string
-	OCCWriteSource       *string
-	OCCRetryCount        int
-	OCCFailedPermanently bool
-	Success              *bool
-	Calls                []Call
+	TS             time.Time
+	Kind           string
+	UDFID          string
+	ComponentPath  string
+	RequestID      string
+	ExecutionID    string
+	OCCTableName   string
+	OCCDocumentID  string
+	OCCWriteSource string
+	OCCRetryCount  int
+	Success        *bool
+	Calls          []Call
 }
 
 type Call struct {
@@ -80,8 +75,7 @@ type Insights struct {
 }
 
 type deploymentRows struct {
-	rows   []Row
-	start  int
+	byKind map[string][]Row
 	limits ReadLimits
 }
 
@@ -89,9 +83,38 @@ func New(ringCap int) *Insights {
 	return &Insights{mem: make(map[string]*deploymentRows), cap: ringCap}
 }
 
-type AnyEvent map[string]map[string]any
+type Event struct {
+	FunctionCall     *functionCall     `json:"FunctionCall"`
+	InsightReadLimit *insightReadLimit `json:"InsightReadLimit"`
+}
 
-func (i *Insights) Ingest(deployment string, limits ReadLimits, events []AnyEvent) (int, error) {
+type execution struct {
+	UDFID         string `json:"udf_id"`
+	ComponentPath string `json:"component_path"`
+	RequestID     string `json:"request_id"`
+	ID            string `json:"id"`
+	Timestamp     *int64 `json:"timestamp"`
+}
+
+type functionCall struct {
+	execution
+
+	IsOCC                bool   `json:"is_occ"`
+	OCCTableName         string `json:"occ_table_name"`
+	OCCDocumentID        string `json:"occ_document_id"`
+	OCCWriteSource       string `json:"occ_write_source"`
+	OCCRetryCount        int    `json:"occ_retry_count"`
+	OCCFailedPermanently bool   `json:"occ_failed_permanently"`
+}
+
+type insightReadLimit struct {
+	execution
+
+	Success *bool  `json:"success"`
+	Calls   []Call `json:"calls"`
+}
+
+func (i *Insights) Ingest(deployment string, limits ReadLimits, events []Event) (int, error) {
 	if !limits.valid() {
 		return 0, ErrBadReadLimits
 	}
@@ -100,7 +123,7 @@ func (i *Insights) Ingest(deployment string, limits ReadLimits, events []AnyEven
 	defer i.memMu.Unlock()
 	dep := i.mem[deployment]
 	if dep == nil {
-		dep = &deploymentRows{}
+		dep = &deploymentRows{byKind: make(map[string][]Row)}
 		i.mem[deployment] = dep
 	}
 	dep.limits = limits
@@ -110,25 +133,67 @@ func (i *Insights) Ingest(deployment string, limits ReadLimits, events []AnyEven
 	return len(rows), nil
 }
 
-func makeRows(events []AnyEvent) []Row {
+func makeRows(events []Event) []Row {
 	var rows []Row
 	for _, ev := range events {
-		for k, payload := range ev {
-			if row, ok := makeRow(k, payload); ok {
-				rows = append(rows, row)
+		if fc := ev.FunctionCall; fc != nil && fc.IsOCC {
+			kind := kindOCCRetried
+			if fc.OCCFailedPermanently {
+				kind = kindOCCFailedPermanent
 			}
+			r := fc.row(kind)
+			r.OCCTableName = fc.OCCTableName
+			r.OCCDocumentID = fc.OCCDocumentID
+			r.OCCWriteSource = fc.OCCWriteSource
+			r.OCCRetryCount = fc.OCCRetryCount
+			rows = append(rows, r)
+		}
+		if rl := ev.InsightReadLimit; rl != nil {
+			r := rl.row(kindRead)
+			r.Success = rl.Success
+			r.Calls = rl.Calls
+			rows = append(rows, r)
 		}
 	}
 	return rows
 }
 
-func (d *deploymentRows) push(r Row, ringCap int) {
-	if len(d.rows) < ringCap {
-		d.rows = append(d.rows, r)
-		return
+func (e execution) row(kind string) Row {
+	ts := time.Now().UTC()
+	if e.Timestamp != nil {
+		ts = time.UnixMilli(*e.Timestamp).UTC()
 	}
-	d.rows[d.start] = r
-	d.start = (d.start + 1) % len(d.rows)
+	return Row{
+		TS:            ts,
+		Kind:          kind,
+		UDFID:         e.UDFID,
+		ComponentPath: e.ComponentPath,
+		RequestID:     e.RequestID,
+		ExecutionID:   e.ID,
+	}
+}
+
+func (d *deploymentRows) len() int {
+	n := 0
+	for _, rows := range d.byKind {
+		n += len(rows)
+	}
+	return n
+}
+
+func (d *deploymentRows) push(r Row, ringCap int) {
+	if d.len() >= ringCap {
+		evict := r.Kind
+		for kind, rows := range d.byKind {
+			if len(rows) > len(d.byKind[evict]) {
+				evict = kind
+			}
+		}
+		rows := d.byKind[evict]
+		rows[0] = Row{}
+		d.byKind[evict] = rows[1:]
+	}
+	d.byKind[r.Kind] = append(d.byKind[r.Kind], r)
 }
 
 func (i *Insights) rows(deployment string, fromMs, toMs int64) ([]Row, ReadLimits) {
@@ -138,12 +203,12 @@ func (i *Insights) rows(deployment string, fromMs, toMs int64) ([]Row, ReadLimit
 	if dep == nil {
 		return nil, ReadLimits{}
 	}
-	out := make([]Row, 0, len(dep.rows))
-	for n := range len(dep.rows) {
-		r := dep.rows[(dep.start+n)%len(dep.rows)]
-		ms := r.TS.UnixMilli()
-		if ms >= fromMs && ms < toMs {
-			out = append(out, r)
+	out := make([]Row, 0, dep.len())
+	for _, rows := range dep.byKind {
+		for _, r := range rows {
+			if ms := r.TS.UnixMilli(); ms >= fromMs && ms < toMs {
+				out = append(out, r)
+			}
 		}
 	}
 	return out, dep.limits
@@ -203,11 +268,11 @@ func buildOCCRow(udfID, comp, occTable, kind string, grp []Row) []any {
 			fieldRequestID:     r.RequestID,
 			fieldOCCRetryCount: r.OCCRetryCount,
 		}
-		if r.OCCDocumentID != nil {
-			rec["occ_document_id"] = *r.OCCDocumentID
+		if r.OCCDocumentID != "" {
+			rec["occ_document_id"] = r.OCCDocumentID
 		}
-		if r.OCCWriteSource != nil {
-			rec["occ_write_source"] = *r.OCCWriteSource
+		if r.OCCWriteSource != "" {
+			rec["occ_write_source"] = r.OCCWriteSource
 		}
 		recent = append(recent, rec)
 	}
@@ -229,14 +294,10 @@ type occKey struct {
 func groupByOCC(rows []Row) map[occKey][]Row {
 	g := make(map[occKey][]Row)
 	for _, r := range rows {
-		if r.Kind != kindOCC {
+		if r.Kind == kindRead {
 			continue
 		}
-		kind := kindOCCRetried
-		if r.OCCFailedPermanently {
-			kind = kindOCCFailedPermanent
-		}
-		key := occKey{r.UDFID, derefOr(r.ComponentPath, rootComponent), derefOr(r.OCCTableName, ""), kind}
+		key := occKey{r.UDFID, cmp.Or(r.ComponentPath, rootComponent), r.OCCTableName, r.Kind}
 		g[key] = append(g[key], r)
 	}
 	return g
@@ -293,7 +354,7 @@ func (d readDimension) row(udfID, comp string, grp []Row) ([]any, bool) {
 		return nil, false
 	}
 	kind := d.kindThreshold
-	if peak >= d.limit {
+	if peak > d.limit {
 		kind = d.kindLimit
 	}
 	count := len(rows)
@@ -356,7 +417,7 @@ func groupByRead(rows []Row) map[readKey][]Row {
 		if r.Kind != kindRead {
 			continue
 		}
-		key := readKey{r.UDFID, derefOr(r.ComponentPath, rootComponent)}
+		key := readKey{r.UDFID, cmp.Or(r.ComponentPath, rootComponent)}
 		g[key] = append(g[key], r)
 	}
 	return g
@@ -386,112 +447,6 @@ func bucket(times []time.Time) []hourlyCount {
 type hourlyCount struct {
 	Hour  string `json:"hour"`
 	Count int    `json:"count"`
-}
-
-func makeRow(kind string, p map[string]any) (Row, bool) {
-	now := eventTime(p)
-	switch kind {
-	case eventFunctionCall:
-		if isOCC, _ := p["is_occ"].(bool); !isOCC {
-			return Row{}, false
-		}
-		return Row{
-			TS:                   now,
-			Kind:                 kindOCC,
-			UDFID:                getString(p, "udf_id"),
-			ComponentPath:        getStringPtr(p, "component_path"),
-			RequestID:            getString(p, fieldRequestID),
-			ExecutionID:          getString(p, "id"),
-			OCCTableName:         getStringPtr(p, "occ_table_name"),
-			OCCDocumentID:        getStringPtr(p, "occ_document_id"),
-			OCCWriteSource:       getStringPtr(p, "occ_write_source"),
-			OCCRetryCount:        getInt(p, fieldOCCRetryCount),
-			OCCFailedPermanently: getBool(p, fieldOCCFailedPermanently),
-		}, true
-	case eventInsightReadLimit:
-		return Row{
-			TS:            now,
-			Kind:          kindRead,
-			UDFID:         getString(p, "udf_id"),
-			ComponentPath: getStringPtr(p, "component_path"),
-			RequestID:     getString(p, fieldRequestID),
-			ExecutionID:   getString(p, "id"),
-			Success:       getBoolPtr(p, fieldSuccess),
-			Calls:         getCalls(p, fieldCalls),
-		}, true
-	}
-	return Row{}, false
-}
-
-func eventTime(p map[string]any) time.Time {
-	if v, ok := p["timestamp"].(json.Number); ok {
-		if ms, err := v.Int64(); err == nil {
-			return time.UnixMilli(ms).UTC()
-		}
-	}
-	return time.Now().UTC()
-}
-
-func getString(m map[string]any, k string) string {
-	if v, ok := m[k].(string); ok {
-		return v
-	}
-	return ""
-}
-
-func getStringPtr(m map[string]any, k string) *string {
-	if v, ok := m[k].(string); ok && v != "" {
-		return &v
-	}
-	return nil
-}
-
-func getBoolPtr(m map[string]any, k string) *bool {
-	if v, ok := m[k].(bool); ok {
-		return &v
-	}
-	return nil
-}
-
-func getBool(m map[string]any, k string) bool {
-	v, _ := m[k].(bool)
-	return v
-}
-
-func getInt(m map[string]any, k string) int {
-	if v, ok := m[k].(json.Number); ok {
-		if n, err := strconv.ParseInt(v.String(), 10, 64); err == nil {
-			return int(n)
-		}
-	}
-	return 0
-}
-
-func getCalls(m map[string]any, k string) []Call {
-	xs, ok := m[k].([]any)
-	if !ok {
-		return nil
-	}
-	out := make([]Call, 0, len(xs))
-	for _, x := range xs {
-		obj, isObj := x.(map[string]any)
-		if !isObj {
-			continue
-		}
-		out = append(out, Call{
-			TableName:     getString(obj, "table_name"),
-			BytesRead:     getInt(obj, "bytes_read"),
-			DocumentsRead: getInt(obj, "documents_read"),
-		})
-	}
-	return out
-}
-
-func derefOr(p *string, def string) string {
-	if p == nil {
-		return def
-	}
-	return *p
 }
 
 func mustJSON(v any) []byte {

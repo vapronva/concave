@@ -1,10 +1,10 @@
 package main
 
 import (
+	"fmt"
 	"log/slog"
+	"strings"
 	"testing"
-
-	"git.horse/vapronva/concave/router/bigbrain/election"
 )
 
 func TestParseDeployments(t *testing.T) {
@@ -42,7 +42,7 @@ func TestLoadDeploymentTokens_PairsTokensByIndex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseDeployments: %v", err)
 	}
-	cp, usage, err := loadDeploymentTokens(deployments)
+	cp, usage, err := loadDeploymentTokens(deployments, slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatalf("loadDeploymentTokens: %v", err)
 	}
@@ -53,7 +53,7 @@ func TestLoadDeploymentTokens_PairsTokensByIndex(t *testing.T) {
 		t.Fatalf("usage token pairing broken: %v", usage)
 	}
 	t.Setenv("BIGBRAIN_CONTROL_PLANE_TOKEN_1", "")
-	if _, _, lerr := loadDeploymentTokens(deployments); lerr == nil {
+	if _, _, lerr := loadDeploymentTokens(deployments, slog.New(slog.DiscardHandler)); lerr == nil {
 		t.Fatal("missing BIGBRAIN_CONTROL_PLANE_TOKEN_1 must error")
 	}
 	if _, _, _, berr := buildRegistry("", slog.New(slog.DiscardHandler)); berr == nil {
@@ -61,13 +61,27 @@ func TestLoadDeploymentTokens_PairsTokensByIndex(t *testing.T) {
 	}
 }
 
-func TestElectionConfigFromEnv(t *testing.T) {
-	t.Setenv("BIGBRAIN_FAILBACK_ENABLED", "")
-	if got := electionConfigFromEnv(); got != election.DefaultConfig() {
-		t.Fatalf("an unset env must yield the election defaults, got %+v", got)
+func TestLoadDeploymentTokens_SharedTokens(t *testing.T) {
+	deployments, err := parseDeployments("a,b,c")
+	if err != nil {
+		t.Fatalf("parseDeployments: %v", err)
 	}
-	t.Setenv("BIGBRAIN_FAILBACK_ENABLED", "false")
-	if got := electionConfigFromEnv(); got.FailbackEnabled {
-		t.Fatalf("an explicit false must reach the config, got %+v", got)
+	for i, token := range []string{"cp-a", "cp-b", "cp-c"} {
+		t.Setenv(fmt.Sprintf("BIGBRAIN_CONTROL_PLANE_TOKEN_%d", i), token)
+	}
+	for i, token := range []string{"shared", "usage-b", "shared"} {
+		t.Setenv(fmt.Sprintf("BIGBRAIN_USAGE_TOKEN_%d", i), token)
+	}
+	_, usage, err := loadDeploymentTokens(deployments, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatalf("a shared usage token must not refuse boot: %v", err)
+	}
+	if len(usage) != 1 || usage["b"] != "usage-b" {
+		t.Fatalf("deployments sharing a usage token must lose it, got %v", usage)
+	}
+	t.Setenv("BIGBRAIN_CONTROL_PLANE_TOKEN_2", "cp-a")
+	if _, _, err = loadDeploymentTokens(deployments, slog.New(slog.DiscardHandler)); err == nil ||
+		!strings.Contains(err.Error(), "[a c]") {
+		t.Fatalf("a shared control-plane token must refuse boot naming the deployments, got %v", err)
 	}
 }

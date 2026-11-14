@@ -2,8 +2,10 @@ package election
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sync"
+	"syscall"
 	"time"
 
 	"git.horse/vapronva/concave/router/bigbrain/backend"
@@ -56,9 +58,6 @@ type Controller struct {
 	backend *backend.Client
 	reg     *registry.Registry
 	log     *slog.Logger
-	mu      sync.Mutex
-	state   map[string]*deploymentState
-	actWG   sync.WaitGroup
 }
 
 type deploymentState struct {
@@ -67,26 +66,18 @@ type deploymentState struct {
 	incumbentPod              string
 	incumbentUnreachableSince time.Time
 	incumbentLiveSince        time.Time
-	promoting                 bool
-	demoting                  bool
 	discoveryDown             bool
 	failback                  failbackState
 	transitioningSeen         map[string]time.Time
 	promoteAttempts           map[string]time.Time
+	pollFailing               map[string]struct{}
 }
 
 func New(cfg Config, k8s *k8sclient.Client, b *backend.Client, reg *registry.Registry, log *slog.Logger) *Controller {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Controller{
-		cfg:     cfg,
-		k8s:     k8s,
-		backend: b,
-		reg:     reg,
-		log:     log,
-		state:   make(map[string]*deploymentState),
-	}
+	return &Controller{cfg: cfg, k8s: k8s, backend: b, reg: reg, log: log}
 }
 
 func (c *Controller) Run(ctx context.Context) {
@@ -104,55 +95,45 @@ func (c *Controller) Run(ctx context.Context) {
 		})
 	}
 	wg.Wait()
-	c.actWG.Wait()
 }
 
 func (c *Controller) runDeployment(ctx context.Context, name string) {
 	c.log.InfoContext(ctx, "election: starting reconcile loop", "deployment", name)
 	defer c.log.InfoContext(ctx, "election: stopping reconcile loop", "deployment", name)
+	st := &deploymentState{}
 	tick := time.NewTicker(c.cfg.Interval)
 	defer tick.Stop()
-	c.reconcileSafe(ctx, name)
+	c.reconcileSafe(ctx, name, st)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-tick.C:
-			c.reconcileSafe(ctx, name)
+			c.reconcileSafe(ctx, name, st)
 		}
 	}
 }
 
-func (c *Controller) reconcileSafe(ctx context.Context, name string) {
+func (c *Controller) reconcileSafe(ctx context.Context, name string, st *deploymentState) {
 	defer func() {
 		if r := recover(); r != nil {
 			c.log.ErrorContext(ctx, "election: reconcile panicked; retrying next tick",
 				"deployment", name, "panic", r)
 		}
 	}()
-	c.reconcile(ctx, name)
-}
-
-func (c *Controller) deploymentState(name string) *deploymentState {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	st := c.state[name]
-	if st == nil {
-		st = &deploymentState{}
-		c.state[name] = st
-	}
-	return st
+	c.reconcile(ctx, name, st)
 }
 
 type observation struct {
 	be               k8sclient.Backend
 	status           backend.Leadership
 	reach            bool
+	refused          bool
+	err              error
 	wasTransitioning bool
 }
 
-func (c *Controller) reconcile(ctx context.Context, name string) {
-	st := c.deploymentState(name)
+func (c *Controller) reconcile(ctx context.Context, name string, st *deploymentState) {
 	ns, ok := c.reg.Namespace(name)
 	if !ok {
 		return
@@ -161,20 +142,21 @@ func (c *Controller) reconcile(ctx context.Context, name string) {
 	pods, err := c.k8s.DiscoverBackends(dctx, ns, name)
 	cancel()
 	if err != nil {
-		if c.setDiscoveryDown(st, true) {
+		if st.setDiscoveryDown(true) {
 			c.log.WarnContext(ctx, "election: discovery failed", "deployment", name, "err", err)
 		}
 		return
 	}
-	if c.setDiscoveryDown(st, false) {
+	if st.setDiscoveryDown(false) {
 		c.log.InfoContext(ctx, "election: discovery recovered", "deployment", name)
 	}
-	pollStart := time.Now()
 	obs := c.pollAll(ctx, name, pods)
 	now := time.Now()
-	c.rememberTransitions(st, obs, pollStart)
+	c.logPollTransitions(ctx, name, st, obs)
+	c.rememberTransitions(st, obs, now)
 	dec := decide(obs, decideParams{
 		incumbent:            st.incumbentPod,
+		published:            c.reg.Published(name),
 		leaseUnverifiedGrace: c.cfg.LeaseUnverifiedGrace,
 		attempted:            st.promoteAttempts,
 		failback: failbackParams{
@@ -190,12 +172,10 @@ func (c *Controller) reconcile(ctx context.Context, name string) {
 		c.actEmptyDiscovery(ctx, name, ns, st, emptyStreak)
 		return
 	}
-	c.act(ctx, name, st, dec, streak, retain, pollStart)
+	c.act(ctx, name, st, dec, streak, retain, now)
 }
 
-func (c *Controller) setDiscoveryDown(st *deploymentState, down bool) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+func (st *deploymentState) setDiscoveryDown(down bool) bool {
 	if down {
 		st.failback = failbackState{}
 		st.incumbentLiveSince = time.Time{}
@@ -207,61 +187,60 @@ func (c *Controller) setDiscoveryDown(st *deploymentState, down bool) bool {
 	return true
 }
 
-func (c *Controller) rememberTransitions(st *deploymentState, obs []observation, pollStart time.Time) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+func (c *Controller) logPollTransitions(ctx context.Context, name string, st *deploymentState, obs []observation) {
+	failing := make(map[string]struct{})
+	for _, o := range obs {
+		_, was := st.pollFailing[o.be.Pod]
+		switch {
+		case !o.reach:
+			failing[o.be.Pod] = struct{}{}
+			if !was {
+				c.log.WarnContext(ctx, "election: leadership poll failed",
+					"deployment", name, "pod", o.be.Pod, "url", o.be.URL, "refused", o.refused, "err", o.err)
+			}
+		case was:
+			c.log.InfoContext(ctx, "election: leadership poll recovered", "deployment", name, "pod", o.be.Pod)
+		}
+	}
+	st.pollFailing = failing
+}
+
+func (c *Controller) rememberTransitions(st *deploymentState, obs []observation, now time.Time) {
 	for pod, seen := range st.transitioningSeen {
-		if pollStart.Sub(seen) >= c.cfg.UnreachableLeaderGrace {
+		if now.Sub(seen) >= c.cfg.UnreachableLeaderGrace {
 			delete(st.transitioningSeen, pod)
 		}
 	}
 	for i := range obs {
 		o := &obs[i]
-		seen, ok := st.transitioningSeen[o.be.Pod]
 		switch {
+		case o.refused:
+			delete(st.transitioningSeen, o.be.Pod)
 		case !o.reach:
-			o.wasTransitioning = ok
+			_, o.wasTransitioning = st.transitioningSeen[o.be.Pod]
 		case isTransitioning(*o):
-			if !ok || pollStart.After(seen) {
-				st.rememberTransition(o.be.Pod, pollStart)
-			}
-		case ok && seen.Before(pollStart):
+			st.markTransitioning(o.be.Pod, now)
+		default:
 			delete(st.transitioningSeen, o.be.Pod)
 		}
 	}
 }
 
-func (st *deploymentState) rememberTransition(pod string, at time.Time) {
+func (st *deploymentState) markTransitioning(pod string, at time.Time) {
 	if st.transitioningSeen == nil {
 		st.transitioningSeen = make(map[string]time.Time)
 	}
 	st.transitioningSeen[pod] = at
 }
 
-func (c *Controller) markTransitioning(st *deploymentState, pod string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	st.rememberTransition(pod, time.Now())
-}
-
-func (c *Controller) recordPromoteAttempt(st *deploymentState, pod string, at time.Time) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+func (st *deploymentState) recordPromoteAttempt(pod string, at time.Time) {
 	if st.promoteAttempts == nil {
 		st.promoteAttempts = make(map[string]time.Time)
 	}
 	st.promoteAttempts[pod] = at
 }
 
-func (c *Controller) restartFailbackClock(st *deploymentState, at time.Time) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	st.failback.eligibleSince = at
-}
-
 func (c *Controller) commitState(st *deploymentState, dec decision, emptyList bool, now time.Time) (int, int, bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	st.failback = dec.failbackState
 	if emptyList {
 		st.emptyStreak++
@@ -316,11 +295,13 @@ func (c *Controller) pollAll(ctx context.Context, name string, pods []k8sclient.
 			pctx, cancel := context.WithTimeout(ctx, pollTimeout)
 			defer cancel()
 			l, err := c.backend.Leadership(pctx, pods[i].URL)
-			if err != nil {
-				c.log.DebugContext(ctx, "election: leadership poll failed",
-					"deployment", name, "pod", pods[i].Pod, "url", pods[i].URL, "err", err)
+			obs[i] = observation{
+				be:      pods[i],
+				status:  l,
+				reach:   err == nil,
+				refused: errors.Is(err, syscall.ECONNREFUSED),
+				err:     err,
 			}
-			obs[i] = observation{be: pods[i], status: l, reach: err == nil}
 		})
 	}
 	wg.Wait()

@@ -45,6 +45,7 @@ type Scraper struct {
 	interval   time.Duration
 	httpc      *http.Client
 	log        *slog.Logger
+	failing    map[types.NamespacedName]struct{}
 }
 
 func NewScraper(
@@ -80,30 +81,61 @@ func (s *Scraper) Run(ctx context.Context) {
 
 func (s *Scraper) scrapeAll(ctx context.Context) {
 	fresh := make(map[types.NamespacedName]podSample)
+	failed := make(map[types.NamespacedName]error)
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	for _, ns := range s.namespaces {
 		wg.Go(func() {
-			samples := s.scrapeNamespace(ctx, ns)
+			samples, errs := s.scrapeNamespace(ctx, ns)
 			mu.Lock()
 			maps.Copy(fresh, samples)
+			maps.Copy(failed, errs)
 			mu.Unlock()
 		})
 	}
 	wg.Wait()
 	s.prov.replace(fresh)
+	if ctx.Err() == nil {
+		s.logTransitions(ctx, fresh, failed)
+	}
 }
 
-func (s *Scraper) scrapeNamespace(ctx context.Context, ns string) map[types.NamespacedName]podSample {
+func (s *Scraper) logTransitions(
+	ctx context.Context,
+	fresh map[types.NamespacedName]podSample,
+	failed map[types.NamespacedName]error,
+) {
+	for pod, err := range failed {
+		if _, known := s.failing[pod]; !known {
+			s.log.WarnContext(ctx, "scraper: pod scrape failed; pod left out of the HPA average",
+				"namespace", pod.Namespace, "pod", pod.Name, "err", err)
+		}
+	}
+	for pod := range s.failing {
+		if _, ok := fresh[pod]; ok {
+			s.log.InfoContext(ctx, "scraper: pod scrape recovered", "namespace", pod.Namespace, "pod", pod.Name)
+		}
+	}
+	s.failing = make(map[types.NamespacedName]struct{}, len(failed))
+	for pod := range failed {
+		s.failing[pod] = struct{}{}
+	}
+}
+
+func (s *Scraper) scrapeNamespace(
+	ctx context.Context,
+	ns string,
+) (map[types.NamespacedName]podSample, map[types.NamespacedName]error) {
 	sel := fmt.Sprintf("%s=funrun", k8sclient.LabelComponent)
 	lctx, cancel := context.WithTimeout(ctx, listTimeout)
 	pods, err := s.cs.CoreV1().Pods(ns).List(lctx, metav1.ListOptions{LabelSelector: sel, ResourceVersion: "0"})
 	cancel()
 	if err != nil {
 		s.log.WarnContext(ctx, "scraper: list funrun pods failed", "namespace", ns, "err", err)
-		return nil
+		return nil, nil
 	}
 	out := make(map[types.NamespacedName]podSample, len(pods.Items))
+	failed := make(map[types.NamespacedName]error)
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	now := time.Now()
@@ -113,26 +145,20 @@ func (s *Scraper) scrapeNamespace(ctx context.Context, ns string) map[types.Name
 			continue
 		}
 		wg.Go(func() {
+			name := types.NamespacedName{Namespace: p.Namespace, Name: p.Name}
 			busy, total, perr := s.scrapePod(ctx, p.Status.PodIP, healthPort(p))
-			if perr != nil {
-				s.log.DebugContext(ctx, "scraper: pod scrape failed",
-					"namespace", ns, "pod", p.Name, "err", perr)
-				return
-			}
-			if total == 0 {
-				return
-			}
 			mu.Lock()
-			out[types.NamespacedName{Namespace: p.Namespace, Name: p.Name}] = podSample{
-				labels: labels.Set(p.Labels),
-				value:  milliPercent(100 * busy / total),
-				ts:     now,
+			defer mu.Unlock()
+			switch {
+			case perr != nil:
+				failed[name] = perr
+			case total > 0:
+				out[name] = podSample{labels: labels.Set(p.Labels), value: milliPercent(100 * busy / total), ts: now}
 			}
-			mu.Unlock()
 		})
 	}
 	wg.Wait()
-	return out
+	return out, failed
 }
 
 func healthPort(p *corev1.Pod) int {

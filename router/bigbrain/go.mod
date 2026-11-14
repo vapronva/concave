@@ -1,11 +1,13 @@
 module git.horse/vapronva/concave/router/bigbrain
 
-go 1.27.3
+go 1.27.4
 
 require (
+	github.com/spf13/pflag v1.1.0
 	k8s.io/api v0.37.2
 	k8s.io/apimachinery v0.37.2
 	k8s.io/client-go v0.37.2
+	k8s.io/klog/v2 v2.140.0
 	k8s.io/metrics v0.37.2
 	sigs.k8s.io/custom-metrics-apiserver v1.37.0
 )
@@ -61,7 +63,6 @@ require (
 	github.com/prometheus/common v0.73.1 // indirect
 	github.com/prometheus/procfs v0.23.0 // indirect
 	github.com/spf13/cobra v1.10.2 // indirect
-	github.com/spf13/pflag v1.1.0 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 	go.etcd.io/etcd/api/v3 v3.7.3 // indirect
 	go.etcd.io/etcd/client/pkg/v3 v3.7.3 // indirect
@@ -99,7 +100,6 @@ require (
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
 	k8s.io/apiserver v0.37.2 // indirect
 	k8s.io/component-base v0.37.2 // indirect
-	k8s.io/klog/v2 v2.140.0 // indirect
 	k8s.io/kms v0.37.2 // indirect
 	k8s.io/kube-openapi v0.0.0-20260821135717-be32def86098 // indirect
 	k8s.io/streaming v0.37.2 // indirect

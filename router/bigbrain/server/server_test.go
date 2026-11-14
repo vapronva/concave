@@ -141,23 +141,6 @@ func TestServer_ShutdownClosesLeaderStream(t *testing.T) {
 	}
 }
 
-func TestServer_Readyz(t *testing.T) {
-	t.Parallel()
-	reg, h := newTestServer(t)
-	reg.EnsureDeployment("dev", "convex-dev")
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/readyz", nil))
-	if rr.Code != http.StatusServiceUnavailable {
-		t.Fatalf("unreconciled readyz: want 503, got %d", rr.Code)
-	}
-	reg.Update("dev", "", "")
-	rr = httptest.NewRecorder()
-	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/readyz", nil))
-	if rr.Code != http.StatusOK {
-		t.Fatalf("reconciled readyz: want 200, got %d", rr.Code)
-	}
-}
-
 func TestServer_UsageEndpointsRequireTheDeploymentToken(t *testing.T) {
 	t.Parallel()
 	reg, h := newTestServer(t)
@@ -223,7 +206,7 @@ func TestServer_UsageIngestThenQuery(t *testing.T) {
 	reg.EnsureDeployment("dev", "convex-dev")
 	ingest := `{"deployment":"dev","read_limits":{"documents":64000,"bytes":16777216,"warning_ratio":0.8},"events":[` +
 		`{"FunctionCall":{"is_occ":true,"udf_id":"mod:occFn","id":"o1","request_id":"q1",` +
-		`"component_path":"-root-component-","occ_table_name":"docs","status":"retried"}},` +
+		`"component_path":"-root-component-","occ_table_name":"docs","status":"failure"}},` +
 		`{"InsightReadLimit":{"udf_id":"mod:readFn","id":"r1","request_id":"q2",` +
 		`"component_path":"-root-component-","calls":[` +
 		`{"table_name":"big","bytes_read":17000000,"documents_read":52000}]}}]}`

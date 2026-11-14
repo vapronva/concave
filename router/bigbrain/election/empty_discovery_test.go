@@ -20,22 +20,22 @@ func emptyDiscoveryController(t *testing.T, debounce int) (*Controller, *registr
 	reg := registry.New()
 	reg.EnsureDeployment("dev", "convex-dev")
 	c := New(withConfig(func(c *Config) { c.EmptyDiscoveryDebounce = debounce }), k8s, nil, reg, quietLogger())
-	return c, reg, c.deploymentState("dev")
+	return c, reg, &deploymentState{}
 }
 
 func TestReconcile_EmptyDiscoveryDebouncePublishesLeaderless(t *testing.T) {
 	t.Parallel()
 	const debounce = 3
-	c, reg, _ := emptyDiscoveryController(t, debounce)
+	c, reg, st := emptyDiscoveryController(t, debounce)
 	ctx := context.Background()
 	for i := 1; i < debounce; i++ {
-		c.reconcile(ctx, "dev")
+		c.reconcile(ctx, "dev", st)
 		if reg.Published("dev") {
 			t.Fatalf("tick %d < debounce %d: must not publish yet", i, debounce)
 		}
 	}
-	c.reconcile(ctx, "dev")
-	if !reg.Published("dev") || !reg.AllPublished() {
+	c.reconcile(ctx, "dev", st)
+	if !reg.Published("dev") {
 		t.Fatal("persistently empty discovery must publish explicit leaderless")
 	}
 	ev, ok := reg.Leader("dev")
@@ -54,23 +54,20 @@ func TestReconcile_EmptyDiscoveryDebounceClearsRetainedLeader(t *testing.T) {
 	ctx := context.Background()
 	c.setLeader("dev", st, "backend-0", "http://10.0.0.1:3210")
 	for i := 1; i < debounce; i++ {
-		c.reconcile(ctx, "dev")
-		if pod, ok := leaderOf(t, reg, "dev"); !ok || pod != "backend-0" {
+		c.reconcile(ctx, "dev", st)
+		if pod, ok := leaderOf(t, reg); !ok || pod != "backend-0" {
 			t.Fatalf("tick %d < debounce %d: last-known leader must be retained, got %q ok=%v",
 				i, debounce, pod, ok)
 		}
 	}
-	c.reconcile(ctx, "dev")
-	if pod, ok := leaderOf(t, reg, "dev"); ok {
+	c.reconcile(ctx, "dev", st)
+	if pod, ok := leaderOf(t, reg); ok {
 		t.Fatalf("stale leader %q must be cleared after the empty-discovery debounce", pod)
 	}
-	if !reg.AllPublished() {
+	if !reg.Published("dev") {
 		t.Fatal("the leaderless publish must keep the deployment published")
 	}
-	c.mu.Lock()
-	incumbent, streak := st.incumbentPod, st.leaderlessStreak
-	c.mu.Unlock()
-	if incumbent != "" || streak != 0 {
+	if incumbent, streak := st.incumbentPod, st.leaderlessStreak; incumbent != "" || streak != 0 {
 		t.Fatalf("retained leader state must be cleared, got incumbent=%q leaderlessStreak=%d", incumbent, streak)
 	}
 	if _, empty, _ := c.commitState(st, decision{liveLeaderCount: 1}, false, time.Now()); empty != 0 {
@@ -89,19 +86,16 @@ func TestReconcile_DiscoveryErrorsNeverTriggerEmptyDebounce(t *testing.T) {
 	reg := registry.New()
 	reg.EnsureDeployment("dev", "convex-dev")
 	c := New(withConfig(func(c *Config) { c.EmptyDiscoveryDebounce = debounce }), k8s, nil, reg, quietLogger())
-	st := c.deploymentState("dev")
+	st := &deploymentState{}
 	ctx := context.Background()
 	c.setLeader("dev", st, "backend-0", "http://10.0.0.1:3210")
 	for range debounce * 3 {
-		c.reconcile(ctx, "dev")
+		c.reconcile(ctx, "dev", st)
 	}
-	if pod, ok := leaderOf(t, reg, "dev"); !ok || pod != "backend-0" {
+	if pod, ok := leaderOf(t, reg); !ok || pod != "backend-0" {
 		t.Fatalf("discovery errors must keep the last-known leader, got %q ok=%v", pod, ok)
 	}
-	c.mu.Lock()
-	empty := st.emptyStreak
-	c.mu.Unlock()
-	if empty != 0 {
-		t.Fatalf("discovery errors must not advance the empty streak, got %d", empty)
+	if st.emptyStreak != 0 {
+		t.Fatalf("discovery errors must not advance the empty streak, got %d", st.emptyStreak)
 	}
 }

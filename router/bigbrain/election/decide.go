@@ -53,10 +53,7 @@ func isTransitioning(o observation) bool {
 	if !o.reach {
 		return o.wasTransitioning
 	}
-	if o.status.IsLeader {
-		return false
-	}
-	return o.status.LeaseTS != nil || o.status.Role == "promoting"
+	return o.status.Role == "promoting"
 }
 
 func anyTransitioning(obs []observation) bool {
@@ -67,13 +64,14 @@ func isPromotable(o observation) bool {
 	return o.reach && !o.status.IsLeader && !isTransitioning(o) && o.status.TailerHealthy
 }
 
-func incumbentDiscoveredUnreachable(obs []observation, incumbent string) bool {
-	if incumbent == "" {
-		return false
-	}
+func incumbentDiscoveredUnreachable(obs []observation, incumbent string, published bool) bool {
+	unknown := incumbent == "" && !published
 	for _, o := range obs {
-		if o.be.Pod == incumbent {
-			return !o.reach
+		if o.reach || o.refused {
+			continue
+		}
+		if unknown || o.be.Pod == incumbent {
+			return true
 		}
 	}
 	return false
@@ -152,6 +150,7 @@ type failbackParams struct {
 
 type decideParams struct {
 	incumbent            string
+	published            bool
 	leaseUnverifiedGrace time.Duration
 	attempted            map[string]time.Time
 	failback             failbackParams
@@ -165,7 +164,7 @@ func decide(obs []observation, p decideParams) decision {
 	}
 	if len(claims) == 0 {
 		d.failbackState = retainedFailback(obs, p.failback.prior)
-		d.incumbentUnreachable = incumbentDiscoveredUnreachable(obs, p.incumbent)
+		d.incumbentUnreachable = incumbentDiscoveredUnreachable(obs, p.incumbent, p.published)
 		if d.hasTransitioning {
 			return d
 		}

@@ -8,9 +8,9 @@ import (
 	"git.horse/vapronva/concave/router/bigbrain/registry"
 )
 
-func leaderOf(t *testing.T, reg *registry.Registry, name string) (string, bool) {
+func leaderOf(t *testing.T, reg *registry.Registry) (string, bool) {
 	t.Helper()
-	ev, ok := reg.Leader(name)
+	ev, ok := reg.Leader("dev")
 	return ev.LeaderPod, ok
 }
 
@@ -20,22 +20,22 @@ func TestActLeaderless_RetainsLastKnownLeaderDuringHysteresis(t *testing.T) {
 	reg.EnsureDeployment("dev", "convex-dev")
 	const debounce = 3
 	c := New(withConfig(func(c *Config) { c.PromoteDebounce = debounce }), nil, nil, reg, quietLogger())
-	st := c.deploymentState("dev")
+	st := &deploymentState{}
 	ctx := context.Background()
 	c.setLeader("dev", st, "backend-0", "http://10.0.0.1:3210")
-	if pod, ok := leaderOf(t, reg, "dev"); !ok || pod != "backend-0" {
+	if pod, ok := leaderOf(t, reg); !ok || pod != "backend-0" {
 		t.Fatalf("setup: want leader backend-0, got %q ok=%v", pod, ok)
 	}
 	leaderless := decision{liveLeaderCount: 0}
 	for streak := 1; streak < debounce; streak++ {
 		c.act(ctx, "dev", st, leaderless, streak, false, time.Now())
-		if pod, ok := leaderOf(t, reg, "dev"); !ok || pod != "backend-0" {
+		if pod, ok := leaderOf(t, reg); !ok || pod != "backend-0" {
 			t.Fatalf("streak %d < debounce %d: last-known leader must be retained, got %q ok=%v",
 				streak, debounce, pod, ok)
 		}
 	}
 	c.act(ctx, "dev", st, leaderless, debounce, false, time.Now())
-	if _, ok := leaderOf(t, reg, "dev"); ok {
+	if _, ok := leaderOf(t, reg); ok {
 		t.Fatalf("streak == debounce %d: leader must be cleared", debounce)
 	}
 }
@@ -46,11 +46,11 @@ func TestActLeaderless_RetainsUnreachableIncumbentWithinGrace(t *testing.T) {
 	reg.EnsureDeployment("dev", "convex-dev")
 	const debounce = 3
 	c := New(withConfig(func(c *Config) { c.PromoteDebounce = debounce }), nil, nil, reg, quietLogger())
-	st := c.deploymentState("dev")
+	st := &deploymentState{}
 	c.setLeader("dev", st, "backend-0", "http://10.0.0.1:3210")
 	leaderless := decision{liveLeaderCount: 0, incumbentUnreachable: true, promoteTarget: &observation{}}
 	c.act(context.Background(), "dev", st, leaderless, debounce, true, time.Now())
-	if pod, ok := leaderOf(t, reg, "dev"); !ok || pod != "backend-0" {
+	if pod, ok := leaderOf(t, reg); !ok || pod != "backend-0" {
 		t.Fatalf("unreachable incumbent within grace must be retained even at debounce, got %q ok=%v", pod, ok)
 	}
 }
@@ -64,7 +64,7 @@ func TestCommitState_UnreachableIncumbentGraceExpiry(t *testing.T) {
 		registry.New(),
 		quietLogger(),
 	)
-	st := c.deploymentState("dev")
+	st := &deploymentState{}
 	base := time.Now()
 	d := decision{liveLeaderCount: 0, incumbentUnreachable: true}
 	if _, _, retain := c.commitState(st, d, false, base); !retain {
@@ -91,7 +91,7 @@ func TestCommitState_EmptyDiscoveryDoesNotRestartUnreachableGrace(t *testing.T) 
 		registry.New(),
 		quietLogger(),
 	)
-	st := c.deploymentState("dev")
+	st := &deploymentState{}
 	base := time.Now()
 	unreachable := decision{liveLeaderCount: 0, incumbentUnreachable: true}
 	if _, _, retain := c.commitState(st, unreachable, false, base); !retain {
@@ -114,7 +114,7 @@ func TestCommitState_CreditedBlipDoesNotRestartUnreachableGrace(t *testing.T) {
 		registry.New(),
 		quietLogger(),
 	)
-	st := c.deploymentState("dev")
+	st := &deploymentState{}
 	c.setLeader("dev", st, "backend-0", "http://10.0.0.1:3210")
 	base := time.Now()
 	unreachable := decision{liveLeaderCount: 0, incumbentUnreachable: true}
@@ -133,7 +133,7 @@ func TestCommitState_CreditedBlipDoesNotRestartUnreachableGrace(t *testing.T) {
 		t.Fatal("an empty discovery between credited claims must not count as continuous credit")
 	}
 	c.commitState(st, credited, false, base.Add(140*time.Second))
-	c.setDiscoveryDown(st, true)
+	st.setDiscoveryDown(true)
 	c.commitState(st, credited, false, base.Add(201*time.Second))
 	if _, _, retain := c.commitState(st, unreachable, false, base.Add(203*time.Second)); retain {
 		t.Fatal("a discovery error between credited claims must not count as continuous credit")
@@ -155,7 +155,7 @@ func TestCommitState_EmptyListResetsStreakOnlyPastDebounce(t *testing.T) {
 		registry.New(),
 		quietLogger(),
 	)
-	st := c.deploymentState("dev")
+	st := &deploymentState{}
 	st.leaderlessStreak = 2
 	empty := decision{liveLeaderCount: 0}
 	for tick := 1; tick < debounce; tick++ {
@@ -171,7 +171,7 @@ func TestCommitState_EmptyListResetsStreakOnlyPastDebounce(t *testing.T) {
 func TestCommitState_TransitioningDoesNotAdvanceStreak(t *testing.T) {
 	t.Parallel()
 	c := New(withConfig(func(c *Config) { c.PromoteDebounce = 3 }), nil, nil, registry.New(), quietLogger())
-	st := c.deploymentState("dev")
+	st := &deploymentState{}
 	transitioning := decision{liveLeaderCount: 0, hasTransitioning: true}
 	for range 10 {
 		if got, _, _ := c.commitState(st, transitioning, false, time.Now()); got != 0 {
@@ -186,25 +186,37 @@ func TestCommitState_TransitioningDoesNotAdvanceStreak(t *testing.T) {
 func TestCommitState_LeaderfulClearsStreak(t *testing.T) {
 	t.Parallel()
 	c := New(DefaultConfig(), nil, nil, registry.New(), quietLogger())
-	st := c.deploymentState("dev")
+	st := &deploymentState{}
 	st.leaderlessStreak = 5
 	if got, _, _ := c.commitState(st, decision{liveLeaderCount: 1}, false, time.Now()); got != 0 {
 		t.Fatalf("a live leader must reset the streak to 0, got %d", got)
 	}
 }
 
-func TestActLeaderless_RetainsLeaderWhenPromotionBlockedByInflight(t *testing.T) {
+func TestLeaderless_UnreachableIncumbentStaysPublishedWithoutStandby(t *testing.T) {
 	t.Parallel()
 	reg := registry.New()
-	reg.EnsureDeployment("prod", "convex-prod")
-	const debounce = 3
-	c := New(withConfig(func(c *Config) { c.PromoteDebounce = debounce }), nil, nil, reg, quietLogger())
-	st := c.deploymentState("prod")
-	c.setLeader("prod", st, "backend-0", "http://10.0.0.1:3210")
-	st.promoting = true
-	d := decision{liveLeaderCount: 0, promoteTarget: &observation{}}
-	c.actLeaderless(context.Background(), "prod", st, d, debounce, false, time.Now())
-	if pod, ok := leaderOf(t, reg, "prod"); !ok || pod != "backend-0" {
-		t.Fatalf("promotion blocked by inflight must retain last-known leader, got %q ok=%v", pod, ok)
+	reg.EnsureDeployment("dev", "convex-dev")
+	c := New(DefaultConfig(), nil, nil, reg, quietLogger())
+	st := &deploymentState{}
+	c.setLeader("dev", st, "backend-0", "http://backend-0:3210")
+	base := time.Now()
+	tick := func(at time.Time, o observation) {
+		d := decide([]observation{o}, sticky(st.incumbentPod))
+		streak, _, retain := c.commitState(st, d, false, at)
+		c.act(context.Background(), "dev", st, d, streak, retain, at)
+	}
+	for i := range 40 {
+		tick(base.Add(time.Duration(i)*DefaultInterval), unreachable("backend-0"))
+	}
+	if pod, ok := leaderOf(t, reg); !ok || pod != "backend-0" {
+		t.Fatalf("an unreachable incumbent with nothing to promote must stay published past the grace, got %q ok=%v",
+			pod, ok)
+	}
+	refused := unreachable("backend-0")
+	refused.refused = true
+	tick(base.Add(40*DefaultInterval), refused)
+	if pod, ok := leaderOf(t, reg); ok {
+		t.Fatalf("an incumbent whose poll is refused has no process and must be unpublished, got %q", pod)
 	}
 }

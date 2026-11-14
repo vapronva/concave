@@ -129,17 +129,6 @@ func (r *Registry) Published(name string) bool {
 	return ok && d.published
 }
 
-func (r *Registry) AllPublished() bool {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	for _, d := range r.deps {
-		if !d.published {
-			return false
-		}
-	}
-	return len(r.deps) > 0
-}
-
 func (r *Registry) Subscribe(name string) (<-chan LeaderEvent, func(), bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

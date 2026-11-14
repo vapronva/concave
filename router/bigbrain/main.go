@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"k8s.io/apimachinery/pkg/util/validation"
+	"k8s.io/klog/v2"
 
 	"git.horse/vapronva/concave/router/bigbrain/apiserver"
 	"git.horse/vapronva/concave/router/bigbrain/backend"
@@ -47,6 +48,7 @@ func main() {
 func run() int {
 	log := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(log)
+	klog.SetSlogLogger(log)
 	addr := env("BIGBRAIN_ADDR", defaultAddr)
 	reg, controlPlaneTokens, usageTokens, err := buildRegistry(env("BIGBRAIN_DEPLOYMENTS", ""), log)
 	if err != nil {
@@ -80,7 +82,7 @@ func run() int {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	metricsDone, apiserverFailed := startMetricsAPIServer(ctx, stop, k8s, reg, log)
+	metricsDone := startMetricsAPIServer(ctx, k8s, reg, log)
 	ctrlDone := runController(ctx, ctrl)
 	serveErr := make(chan error, 1)
 	go func() {
@@ -98,11 +100,6 @@ func run() int {
 	shutdown(httpSrv, srv, ctrlDone, metricsDone, cfg.ActuationTimeout+actuationDrainSlack, log)
 	if <-serveErr != nil {
 		return 1
-	}
-	select {
-	case <-apiserverFailed:
-		return 1
-	default:
 	}
 	return 0
 }
@@ -131,9 +128,9 @@ func buildRegistry(
 		reg.EnsureDeployment(d.name, d.namespace)
 		log.Info("bigbrain: registered bootstrap deployment", "name", d.name, "namespace", d.namespace)
 	}
-	controlPlaneTokens, usageTokens, err := loadDeploymentTokens(deployments)
+	controlPlaneTokens, usageTokens, err := loadDeploymentTokens(deployments, log)
 	if err != nil {
-		log.Error("bigbrain: missing deployment control-plane token", "err", err)
+		log.Error("bigbrain: invalid deployment tokens", "err", err)
 		return nil, nil, nil, err
 	}
 	return reg, controlPlaneTokens, usageTokens, nil
@@ -185,13 +182,12 @@ func shutdown(
 
 func startMetricsAPIServer(
 	ctx context.Context,
-	stop context.CancelFunc,
 	k8s *k8sclient.Client,
 	reg *registry.Registry,
 	log *slog.Logger,
-) (<-chan struct{}, <-chan struct{}) {
+) <-chan struct{} {
 	if !envBool("BIGBRAIN_METRICS_APISERVER_ENABLED", false) {
-		return nil, nil
+		return nil
 	}
 	prov := apiserver.NewProvider()
 	seen := make(map[string]struct{}, len(reg.Names()))
@@ -219,13 +215,8 @@ func startMetricsAPIServer(
 	wg.Go(func() {
 		apiserver.NewScraper(k8s.Clientset(), namespaces, prov, metricsScrapeInterval, log).Run(ctx)
 	})
-	apiserverFailed := make(chan struct{})
 	wg.Go(func() {
-		if aerr := apiserver.Run(ctx, cfg, prov, log); aerr != nil {
-			log.ErrorContext(ctx, "bigbrain: custom-metrics apiserver exited", "err", aerr)
-			close(apiserverFailed)
-			stop()
-		}
+		apiserver.Run(ctx, cfg, prov, log)
 	})
 	done := make(chan struct{})
 	go func() {
@@ -233,7 +224,7 @@ func startMetricsAPIServer(
 		close(done)
 	}()
 	log.InfoContext(ctx, "bigbrain: custom-metrics apiserver enabled", "port", cfg.SecurePort)
-	return done, apiserverFailed
+	return done
 }
 
 func runController(ctx context.Context, ctrl *election.Controller) <-chan struct{} {
@@ -245,7 +236,10 @@ func runController(ctx context.Context, ctrl *election.Controller) <-chan struct
 	return done
 }
 
-func loadDeploymentTokens(deployments []deploymentRef) (map[string]string, map[string]string, error) {
+func loadDeploymentTokens(
+	deployments []deploymentRef,
+	log *slog.Logger,
+) (map[string]string, map[string]string, error) {
 	controlPlaneTokens := make(map[string]string, len(deployments))
 	usageTokens := make(map[string]string, len(deployments))
 	for i, d := range deployments {
@@ -266,7 +260,32 @@ func loadDeploymentTokens(deployments []deploymentRef) (map[string]string, map[s
 			usageTokens[d.name] = usage
 		}
 	}
+	if shared := sharedTokens(deployments, controlPlaneTokens); len(shared) > 0 {
+		return nil, nil, fmt.Errorf("deployments %v share a control-plane token", shared)
+	}
+	for _, names := range sharedTokens(deployments, usageTokens) {
+		log.Error("bigbrain: deployments share a usage token; their usage endpoints stay closed", "deployments", names)
+		for _, name := range names {
+			delete(usageTokens, name)
+		}
+	}
 	return controlPlaneTokens, usageTokens, nil
+}
+
+func sharedTokens(deployments []deploymentRef, tokens map[string]string) [][]string {
+	byToken := make(map[string][]string, len(tokens))
+	for _, d := range deployments {
+		if token, ok := tokens[d.name]; ok {
+			byToken[token] = append(byToken[token], d.name)
+		}
+	}
+	var shared [][]string
+	for _, d := range deployments {
+		if names := byToken[tokens[d.name]]; len(names) > 1 && names[0] == d.name {
+			shared = append(shared, names)
+		}
+	}
+	return shared
 }
 
 func headerSafe(token string) bool {

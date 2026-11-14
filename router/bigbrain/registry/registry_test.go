@@ -139,26 +139,3 @@ func TestRegistry_ConcurrentUpdateAndSubscribe(t *testing.T) {
 	}
 	wg.Wait()
 }
-
-func TestRegistry_PublishedLifecycle(t *testing.T) {
-	t.Parallel()
-	r := registry.New()
-	r.EnsureDeployment("dev", "convex-dev")
-	if r.Published("dev") || r.AllPublished() {
-		t.Fatal("nothing published before the first Update")
-	}
-	r.Update("dev", "", "")
-	if !r.Published("dev") || !r.AllPublished() {
-		t.Fatal("an explicit leaderless Update must publish")
-	}
-	if _, ok := r.Leader("dev"); ok {
-		t.Fatal("published leaderless deployment must still report no leader")
-	}
-	r.EnsureDeployment("prod", "convex-prod")
-	if r.AllPublished() {
-		t.Fatal("AllPublished must be false while prod is unreconciled")
-	}
-	if r.Published("ghost") {
-		t.Fatal("unknown deployment must not report published")
-	}
-}

@@ -13,10 +13,10 @@ func (c *Controller) act(
 	d decision,
 	streak int,
 	retain bool,
-	pollStart time.Time,
+	now time.Time,
 ) {
 	if d.liveLeaderCount == 0 {
-		c.actLeaderless(ctx, name, st, d, streak, retain, pollStart)
+		c.actLeaderless(ctx, name, st, d, streak, retain, now)
 		return
 	}
 	if len(d.demotes) > 0 {
@@ -24,32 +24,15 @@ func (c *Controller) act(
 			"deployment", name, "leader", d.leaderPod, "claimedLeaders", d.liveLeaderCount, "demotes", len(d.demotes))
 	}
 	c.setLeader(name, st, d.leaderPod, d.leaderURL)
-	c.demoteAll(ctx, name, st, d.demotes)
+	c.demoteAll(ctx, name, d.demotes)
 	if d.failbackTarget != nil {
-		c.actFailback(ctx, name, st, d.leaderPod, *d.failbackTarget, pollStart)
-	}
-}
-
-func (c *Controller) actFailback(
-	ctx context.Context,
-	name string,
-	st *deploymentState,
-	incumbent string,
-	target observation,
-	pollStart time.Time,
-) {
-	if !c.tryAcquirePromote(st, pollStart) {
-		return
-	}
-	c.restartFailbackClock(st, pollStart)
-	base := context.WithoutCancel(ctx)
-	c.actGo(name, func() {
-		defer c.release(&st.promoting)
-		c.log.InfoContext(base, "election: failback: promoting higher-priority pod over incumbent",
-			"deployment", name, "promoting", target.be.Pod, "over", incumbent,
+		target := *d.failbackTarget
+		st.failback.eligibleSince = now
+		c.log.InfoContext(ctx, "election: failback: promoting higher-priority pod over incumbent",
+			"deployment", name, "promoting", target.be.Pod, "over", d.leaderPod,
 			"candidatePriority", target.be.Priority, "candidateLatestTs", target.status.LatestTS)
-		c.promoteAndLog(base, name, "failback promote", st, target)
-	})
+		c.promote(ctx, name, "failback promote", st, target)
+	}
 }
 
 func (c *Controller) actEmptyDiscovery(ctx context.Context, name, ns string, st *deploymentState, streak int) {
@@ -61,9 +44,6 @@ func (c *Controller) actEmptyDiscovery(ctx context.Context, name, ns string, st 
 	case streak == c.cfg.EmptyDiscoveryDebounce:
 		c.log.WarnContext(ctx, "election: discovery persistently empty; publishing leaderless",
 			"deployment", name, "namespace", ns, "ticks", streak)
-	default:
-		c.log.DebugContext(ctx, "election: discovery still empty",
-			"deployment", name, "namespace", ns, "streak", streak)
 	}
 	c.setLeader(name, st, "", "")
 }
@@ -75,11 +55,9 @@ func (c *Controller) actLeaderless(
 	d decision,
 	streak int,
 	retain bool,
-	pollStart time.Time,
+	now time.Time,
 ) {
 	if streak < c.cfg.PromoteDebounce {
-		c.log.DebugContext(ctx, "election: leaderless, retaining last-known leader during hysteresis",
-			"deployment", name, "streak", streak, "need", c.cfg.PromoteDebounce)
 		return
 	}
 	if retain {
@@ -88,99 +66,82 @@ func (c *Controller) actLeaderless(
 		return
 	}
 	if d.promoteTarget == nil {
-		c.setLeader(name, st, "", "")
+		if !d.incumbentUnreachable {
+			c.setLeader(name, st, "", "")
+		}
 		if d.hasTransitioning {
 			c.log.InfoContext(ctx, "election: leaderless; a pod is mid-transition",
 				"deployment", name, "streak", streak)
 			return
 		}
 		c.log.WarnContext(ctx, "election: leaderless and no promotable standby",
-			"deployment", name, "streak", streak)
-		return
-	}
-	if !c.tryAcquirePromote(st, pollStart) {
+			"deployment", name, "streak", streak, "keptUnreachableIncumbent", d.incumbentUnreachable)
 		return
 	}
 	c.setLeader(name, st, "", "")
 	target := *d.promoteTarget
-	c.recordPromoteAttempt(st, target.be.Pod, pollStart)
-	base := context.WithoutCancel(ctx)
-	c.actGo(name, func() {
-		defer c.release(&st.promoting)
-		c.log.InfoContext(base, "election: promoting preferred warm standby",
-			"deployment", name, "pod", target.be.Pod,
-			"priority", target.be.Priority, "latestTs", target.status.LatestTS)
-		c.promoteAndLog(base, name, "promote", st, target)
-	})
+	st.recordPromoteAttempt(target.be.Pod, now)
+	c.log.InfoContext(ctx, "election: promoting preferred warm standby",
+		"deployment", name, "pod", target.be.Pod,
+		"priority", target.be.Priority, "latestTs", target.status.LatestTS)
+	c.promote(ctx, name, "promote", st, target)
 }
 
-func (c *Controller) promoteAndLog(base context.Context, name, kind string, st *deploymentState, target observation) {
-	actx, cancel := context.WithTimeout(base, c.cfg.ActuationTimeout)
+func (c *Controller) promote(ctx context.Context, name, kind string, st *deploymentState, target observation) {
+	actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), c.cfg.ActuationTimeout)
 	defer cancel()
 	code, sent, err := c.backend.Promote(actx, name, target.be.URL)
 	if err != nil {
 		if sent {
-			c.markTransitioning(st, target.be.Pod)
+			st.markTransitioning(target.be.Pod, time.Now())
 		}
-		c.log.ErrorContext(base, "election: "+kind+" failed", "deployment", name, "pod", target.be.Pod, "err", err)
+		c.log.ErrorContext(ctx, "election: "+kind+" failed", "deployment", name, "pod", target.be.Pod, "err", err)
 		return
 	}
 	switch code {
 	case http.StatusOK, http.StatusAccepted:
-		c.markTransitioning(st, target.be.Pod)
-		c.log.InfoContext(base, "election: "+kind+" accepted",
+		st.markTransitioning(target.be.Pod, time.Now())
+		c.log.InfoContext(ctx, "election: "+kind+" accepted",
 			"deployment", name, "pod", target.be.Pod, "status", code)
 	case http.StatusForbidden:
-		c.log.ErrorContext(base, "election: "+kind+" forbidden; control-plane token mismatch",
+		c.log.ErrorContext(ctx, "election: "+kind+" forbidden; control-plane token mismatch",
 			"deployment", name, "pod", target.be.Pod)
 	default:
-		c.log.WarnContext(base, "election: "+kind+" unexpected status",
+		c.log.WarnContext(ctx, "election: "+kind+" unexpected status",
 			"deployment", name, "pod", target.be.Pod, "status", code)
 	}
 }
 
-func (c *Controller) demoteAll(ctx context.Context, name string, st *deploymentState, targets []demoteTarget) {
-	if len(targets) == 0 {
-		return
-	}
-	if !c.tryAcquire(&st.demoting) {
-		return
-	}
-	base := context.WithoutCancel(ctx)
-	c.actGo(name, func() {
-		defer c.release(&st.demoting)
-		for _, a := range targets {
-			code, err := c.demoteOne(base, name, a)
-			if err != nil {
-				c.log.ErrorContext(base, "election: demote failed", "deployment", name, "pod", a.pod, "err", err)
-				continue
-			}
-			switch code {
-			case http.StatusAccepted:
-				c.log.InfoContext(base, "election: demote accepted", "deployment", name, "pod", a.pod, "status", code)
-			case http.StatusConflict:
-				c.log.InfoContext(base, "election: demote declined; backend is mid-transition or its lease changed",
-					"deployment", name, "pod", a.pod, "status", code)
-			case http.StatusForbidden:
-				c.log.ErrorContext(base, "election: demote forbidden; control-plane token mismatch",
-					"deployment", name, "pod", a.pod)
-			default:
-				c.log.WarnContext(base, "election: demote unexpected status",
-					"deployment", name, "pod", a.pod, "status", code)
-			}
+func (c *Controller) demoteAll(ctx context.Context, name string, targets []demoteTarget) {
+	for _, a := range targets {
+		code, err := c.demoteOne(ctx, name, a)
+		if err != nil {
+			c.log.ErrorContext(ctx, "election: demote failed", "deployment", name, "pod", a.pod, "err", err)
+			continue
 		}
-	})
+		switch code {
+		case http.StatusAccepted:
+			c.log.InfoContext(ctx, "election: demote accepted", "deployment", name, "pod", a.pod, "status", code)
+		case http.StatusConflict:
+			c.log.InfoContext(ctx, "election: demote declined; backend is mid-transition or its lease changed",
+				"deployment", name, "pod", a.pod, "status", code)
+		case http.StatusForbidden:
+			c.log.ErrorContext(ctx, "election: demote forbidden; control-plane token mismatch",
+				"deployment", name, "pod", a.pod)
+		default:
+			c.log.WarnContext(ctx, "election: demote unexpected status",
+				"deployment", name, "pod", a.pod, "status", code)
+		}
+	}
 }
 
-func (c *Controller) demoteOne(base context.Context, name string, target demoteTarget) (int, error) {
-	actx, cancel := context.WithTimeout(base, c.cfg.ActuationTimeout)
+func (c *Controller) demoteOne(ctx context.Context, name string, target demoteTarget) (int, error) {
+	actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), c.cfg.ActuationTimeout)
 	defer cancel()
 	return c.backend.Demote(actx, name, target.url, target.leaseTS)
 }
 
 func (c *Controller) setLeader(name string, st *deploymentState, pod, url string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	if st.incumbentPod != pod {
 		if pod == "" {
 			c.log.Warn("election: deployment is now leaderless", "deployment", name, "was", st.incumbentPod)
@@ -190,46 +151,4 @@ func (c *Controller) setLeader(name string, st *deploymentState, pod, url string
 		st.incumbentPod = pod
 	}
 	c.reg.Update(name, pod, url)
-}
-
-func (c *Controller) tryAcquire(flag *bool) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if *flag {
-		return false
-	}
-	*flag = true
-	return true
-}
-
-func (c *Controller) tryAcquirePromote(st *deploymentState, pollStart time.Time) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if st.promoting {
-		return false
-	}
-	for _, seen := range st.transitioningSeen {
-		if seen.After(pollStart) {
-			return false
-		}
-	}
-	st.promoting = true
-	return true
-}
-
-func (c *Controller) release(flag *bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	*flag = false
-}
-
-func (c *Controller) actGo(name string, fn func()) {
-	c.actWG.Go(func() {
-		defer func() {
-			if r := recover(); r != nil {
-				c.log.Error("election: actuation panicked; recovered", "deployment", name, "panic", r)
-			}
-		}()
-		fn()
-	})
 }

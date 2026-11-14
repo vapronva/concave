@@ -14,38 +14,37 @@ func testLimits() insights.ReadLimits {
 	return insights.ReadLimits{Documents: 32000, Bytes: 16 * 1024 * 1024, WarningRatio: 0.8}
 }
 
-func TestIngestRejectsOutOfRangeLimits(t *testing.T) {
-	t.Parallel()
-	i := insights.New(10)
-	bad := []insights.ReadLimits{
-		{Documents: 0, Bytes: 1, WarningRatio: 0.8},
-		{Documents: 1, Bytes: 0, WarningRatio: 0.8},
-		{Documents: 1, Bytes: 1, WarningRatio: 0},
-		{Documents: 1, Bytes: 1, WarningRatio: 1.5},
+func events(t *testing.T, raw string) []insights.Event {
+	t.Helper()
+	var out []insights.Event
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		t.Fatalf("decode events: %v", err)
 	}
-	for _, limits := range bad {
-		if _, err := i.Ingest("p", limits, nil); !errors.Is(err, insights.ErrBadReadLimits) {
-			t.Fatalf("limits %+v: want ErrBadReadLimits, got %v", limits, err)
-		}
+	return out
+}
+
+func kindBodies(t *testing.T, i *insights.Insights, deployment string) map[string]string {
+	t.Helper()
+	today := time.Now().UTC().Format("2006-01-02")
+	out, err := i.Query(deployment, today, today)
+	if err != nil {
+		t.Fatal(err)
 	}
+	bodies := make(map[string]string, len(out))
+	for _, row := range out {
+		bodies[row[0].(string)] = row[3].(string)
+	}
+	return bodies
 }
 
 func TestRingBufferCapPerDeployment(t *testing.T) {
 	t.Parallel()
 	i := insights.New(3)
-	floodA := func() {
-		_, _ = i.Ingest("A", testLimits(), []insights.AnyEvent{
-			{"FunctionCall": map[string]any{"is_occ": true, "udf_id": "fa", "id": "xa"}},
-		})
-	}
-	_, _ = i.Ingest("B", testLimits(), []insights.AnyEvent{
-		{"FunctionCall": map[string]any{
-			"is_occ": true, "udf_id": "fb", "id": "xb", "request_id": "rb",
-			"component_path": "_default", "occ_table_name": "tb", "status": "retried",
-		}},
-	})
+	_, _ = i.Ingest("B", testLimits(), events(t, `[{"FunctionCall":{
+		"is_occ":true,"udf_id":"fb","id":"xb","request_id":"rb",
+		"component_path":"_default","occ_table_name":"tb","status":"failure"}}]`))
 	for range 50 {
-		floodA()
+		_, _ = i.Ingest("A", testLimits(), events(t, `[{"FunctionCall":{"is_occ":true,"udf_id":"fa","id":"xa"}}]`))
 	}
 	today := time.Now().UTC().Format("2006-01-02")
 	out, err := i.Query("B", today, today)
@@ -67,17 +66,35 @@ func TestRingBufferCapPerDeployment(t *testing.T) {
 	}
 }
 
+func TestRingEvictsFromTheMostPopulousKind(t *testing.T) {
+	t.Parallel()
+	i := insights.New(4)
+	_, _ = i.Ingest("p", testLimits(), events(t, `[
+		{"FunctionCall":{"is_occ":true,"udf_id":"f","id":"perm","occ_failed_permanently":true,"status":"failure"}},
+		{"InsightReadLimit":{"udf_id":"r","id":"read","success":true,
+			"calls":[{"table_name":"t","bytes_read":1,"documents_read":30000}]}}]`))
+	retry := events(t, `[{"FunctionCall":{"is_occ":true,"udf_id":"f","id":"retry","status":"failure"}}]`)
+	for range 100 {
+		_, _ = i.Ingest("p", testLimits(), retry)
+	}
+	bodies := kindBodies(t, i, "p")
+	for kind, want := range map[string]string{
+		"occFailedPermanently":   `"occCalls":1`,
+		"documentsReadThreshold": `"count":1`,
+		"occRetried":             `"occCalls":2`,
+	} {
+		if !strings.Contains(bodies[kind], want) {
+			t.Errorf("%s: want %s, got %q (all: %v)", kind, want, bodies[kind], bodies)
+		}
+	}
+}
+
 func TestQueryOCCFailedPermanentlyUsesExplicitSignal(t *testing.T) {
 	t.Parallel()
 	i := insights.New(100)
-	_, _ = i.Ingest("p", testLimits(), []insights.AnyEvent{
-		{"FunctionCall": map[string]any{
-			"is_occ": true, "udf_id": "f", "id": "i",
-			"component_path":         "_default",
-			"status":                 "failure",
-			"occ_failed_permanently": true,
-		}},
-	})
+	_, _ = i.Ingest("p", testLimits(), events(t, `[{"FunctionCall":{
+		"is_occ":true,"udf_id":"f","id":"i","component_path":"_default",
+		"status":"failure","occ_failed_permanently":true}}]`))
 	today := time.Now().UTC().Format("2006-01-02")
 	out, _ := i.Query("p", today, today)
 	if len(out) == 0 || out[0][0] != "occFailedPermanently" {
@@ -88,26 +105,14 @@ func TestQueryOCCFailedPermanentlyUsesExplicitSignal(t *testing.T) {
 func TestIngestQueryRoundTripRowShapes(t *testing.T) {
 	t.Parallel()
 	i := insights.New(100)
-	kept, _ := i.Ingest("p", testLimits(), []insights.AnyEvent{
-		{"FunctionCall": map[string]any{"is_occ": false, "udf_id": "mod:plainFn"}},
-		{"UnknownVariant": map[string]any{"v": 1}},
-		{"FunctionCall": map[string]any{
-			"is_occ": true, "udf_id": "mod:occFn", "id": "occ1", "request_id": "rq1",
-			"component_path": "-root-component-", "occ_table_name": "docs",
-			"occ_retry_count": json.Number("3"), "status": "retried",
-		}},
-		{"InsightReadLimit": map[string]any{
-			"udf_id": "mod:readFn", "id": "rd1", "request_id": "rq2",
-			"component_path": "-root-component-", "success": false,
-			"calls": []any{
-				map[string]any{
-					"table_name":     "big",
-					"bytes_read":     json.Number("2000000"),
-					"documents_read": json.Number("40000"),
-				},
-			},
-		}},
-	})
+	kept, _ := i.Ingest("p", testLimits(), events(t, `[
+		{"FunctionCall":{"is_occ":false,"udf_id":"mod:plainFn"}},
+		{"UnknownVariant":{"v":1}},
+		{"FunctionCall":{"is_occ":true,"udf_id":"mod:occFn","id":"occ1","request_id":"rq1",
+			"component_path":"-root-component-","occ_table_name":"docs","occ_retry_count":3,"status":"failure"}},
+		{"InsightReadLimit":{"udf_id":"mod:readFn","id":"rd1","request_id":"rq2",
+			"component_path":"-root-component-","success":false,
+			"calls":[{"table_name":"big","bytes_read":2000000,"documents_read":40000}]}}]`))
 	if kept != 2 {
 		t.Fatalf("only OCC calls and read-limit insights are kept, got kept=%d", kept)
 	}
@@ -153,24 +158,14 @@ func TestIngestQueryRoundTripRowShapes(t *testing.T) {
 func TestQueryOCCPermanenceSplitsGroups(t *testing.T) {
 	t.Parallel()
 	i := insights.New(100)
-	_, _ = i.Ingest("p", testLimits(), []insights.AnyEvent{
-		{"FunctionCall": map[string]any{
-			"is_occ": true, "udf_id": "f", "id": "a", "component_path": "_default", "occ_table_name": "t",
-		}},
-		{"FunctionCall": map[string]any{
-			"is_occ": true, "udf_id": "f", "id": "b", "component_path": "_default", "occ_table_name": "t",
-			"occ_failed_permanently": true,
-		}},
-	})
-	today := time.Now().UTC().Format("2006-01-02")
-	out, _ := i.Query("p", today, today)
-	bodies := make(map[string]string)
-	for _, row := range out {
-		bodies[row[0].(string)] = row[3].(string)
-	}
+	_, _ = i.Ingest("p", testLimits(), events(t, `[
+		{"FunctionCall":{"is_occ":true,"udf_id":"f","id":"a","component_path":"_default","occ_table_name":"t"}},
+		{"FunctionCall":{"is_occ":true,"udf_id":"f","id":"b","component_path":"_default","occ_table_name":"t",
+			"occ_failed_permanently":true}}]`))
+	bodies := kindBodies(t, i, "p")
 	for _, kind := range []string{"occRetried", "occFailedPermanently"} {
 		if body, ok := bodies[kind]; !ok || !strings.Contains(body, `"occCalls":1`) {
-			t.Errorf("want a %s row counting one call; got %v", kind, out)
+			t.Errorf("want a %s row counting one call; got %v", kind, bodies)
 		}
 	}
 }
@@ -178,34 +173,22 @@ func TestQueryOCCPermanenceSplitsGroups(t *testing.T) {
 func TestQueryReadDimensionsCountTheirOwnRows(t *testing.T) {
 	t.Parallel()
 	i := insights.New(100)
-	calls := func(bytes, docs string) []any {
-		return []any{map[string]any{
-			"table_name": "t", "bytes_read": json.Number(bytes), "documents_read": json.Number(docs),
-		}}
-	}
-	_, _ = i.Ingest("p", testLimits(), []insights.AnyEvent{
-		{"InsightReadLimit": map[string]any{
-			"udf_id": "f", "id": "a", "component_path": "_default", "calls": calls("16777216", "1"),
-		}},
-		{"InsightReadLimit": map[string]any{
-			"udf_id": "f", "id": "b", "component_path": "_default", "calls": calls("1", "30000"),
-		}},
-	})
-	today := time.Now().UTC().Format("2006-01-02")
-	out, _ := i.Query("p", today, today)
-	bodies := make(map[string]string)
-	for _, row := range out {
-		bodies[row[0].(string)] = row[3].(string)
-	}
+	_, _ = i.Ingest("p", testLimits(), events(t, `[
+		{"InsightReadLimit":{"udf_id":"f","id":"a","component_path":"_default",
+			"calls":[{"table_name":"t","bytes_read":16777216,"documents_read":1}]}},
+		{"InsightReadLimit":{"udf_id":"f","id":"b","component_path":"_default",
+			"calls":[{"table_name":"t","bytes_read":1,"documents_read":32001}]}}]`))
+	bodies := kindBodies(t, i, "p")
 	if len(bodies) != 2 {
-		t.Fatalf("want one bytes row and one documents row, got %v", out)
+		t.Fatalf("want one bytes row and one documents row, got %v", bodies)
 	}
-	for _, kind := range []string{"bytesReadLimit", "documentsReadThreshold"} {
+	for _, kind := range []string{"bytesReadThreshold", "documentsReadLimit"} {
 		if body, ok := bodies[kind]; !ok || !strings.Contains(body, `"count":1`) {
-			t.Errorf("want a %s row counting only its own execution; got %v", kind, out)
+			t.Errorf("want a %s row counting only its own execution (reading exactly the limit succeeds); got %v",
+				kind, bodies)
 		}
 	}
-	if body := bodies["documentsReadThreshold"]; !strings.Contains(body, `"limit":32000`) ||
+	if body := bodies["documentsReadLimit"]; !strings.Contains(body, `"limit":32000`) ||
 		!strings.Contains(body, `"threshold":25600`) {
 		t.Errorf("a read row must carry the deployment's limit and threshold; got %s", body)
 	}

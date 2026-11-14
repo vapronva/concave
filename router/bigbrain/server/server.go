@@ -1,7 +1,6 @@
 package server
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
@@ -47,18 +46,12 @@ func (s *Server) Shutdown() {
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+	ok := func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
-	})
-	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
-		if !s.reg.AllPublished() {
-			writeErr(w, http.StatusServiceUnavailable, "leadership not yet reconciled")
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
-	})
+	}
+	mux.HandleFunc("GET /healthz", ok)
+	mux.HandleFunc("GET /readyz", ok)
 	mux.HandleFunc("GET /registry/deployments/{name}/leader", s.handleGetLeader)
 	mux.HandleFunc("GET /registry/deployments/{name}/leader-stream", s.handleLeaderStream)
 	mux.HandleFunc("POST /internal/usage", s.handleUsageIngest)
@@ -116,14 +109,12 @@ func (s *Server) handleUsageIngest(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]int{"ingested": kept})
 }
 
-func decodeEvents(raw json.RawMessage) ([]insights.AnyEvent, error) {
+func decodeEvents(raw json.RawMessage) ([]insights.Event, error) {
 	if len(raw) == 0 {
 		return nil, nil
 	}
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.UseNumber()
-	var events []insights.AnyEvent
-	err := dec.Decode(&events)
+	var events []insights.Event
+	err := json.Unmarshal(raw, &events)
 	return events, err
 }
 
@@ -268,15 +259,10 @@ func logging(log *slog.Logger, next http.Handler) http.Handler {
 		start := time.Now()
 		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(sw, r)
-		level := slog.LevelInfo
-		if sw.status < http.StatusBadRequest {
-			level = slog.LevelDebug
+		if sw.status >= http.StatusBadRequest {
+			log.InfoContext(r.Context(), "http",
+				"method", r.Method, "path", r.URL.Path, "status", sw.status, "dur", time.Since(start).String())
 		}
-		if !log.Enabled(r.Context(), level) {
-			return
-		}
-		log.Log(r.Context(), level, "http",
-			"method", r.Method, "path", r.URL.Path, "status", sw.status, "dur", time.Since(start).String())
 	})
 }
 

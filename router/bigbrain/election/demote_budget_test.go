@@ -39,12 +39,10 @@ func TestRunActions_StalledPodDoesNotStarveLaterDemotes(t *testing.T) {
 		reg,
 		quietLogger(),
 	)
-	st := c.deploymentState("dev")
-	c.demoteAll(context.Background(), "dev", st, []demoteTarget{
+	c.demoteAll(context.Background(), "dev", []demoteTarget{
 		{pod: "backend-0", url: stalled.URL},
 		{pod: "backend-1", url: responsive.URL},
 	})
-	c.actWG.Wait()
 	if got := demoted.Load(); got != 1 {
 		t.Fatalf("demote of the reachable pod must still happen after a stalled peer; got %d calls, want 1", got)
 	}
