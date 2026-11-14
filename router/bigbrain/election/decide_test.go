@@ -510,3 +510,23 @@ func TestDecide_Failback_SplitBrainColdCandidateResetsClock(t *testing.T) {
 		t.Fatalf("a candidate cold against the surviving claimant must RESET the clock, got %+v", d.failbackState)
 	}
 }
+
+func TestDecide_SupersededUnverifiedLeaderIsDemoted(t *testing.T) {
+	t.Parallel()
+	p := decideParams{leaseUnverifiedGrace: 60 * time.Second}
+	cutOff := withUnverified(obs("backend-0", true, 100, 10), 120)
+	d := decide([]observation{cutOff, obs("backend-1", true, 120, 11)}, p)
+	if d.leaderPod != "backend-1" || len(d.demotes) != 1 || d.demotes[0].pod != "backend-0" ||
+		d.demotes[0].leaseTS == nil || *d.demotes[0].leaseTS != 10 {
+		t.Fatalf("a credited newer lease proves the steal; the cut-off claimant must be compare-demoted, got %+v", d)
+	}
+	newer := withUnverified(obs("backend-0", true, 100, 12), 120)
+	d = decide([]observation{newer, obs("backend-1", true, 120, 11)}, p)
+	if len(d.demotes) != 0 {
+		t.Fatalf("an unverified claimant on a newer lease must not be demoted, got %+v", d.demotes)
+	}
+	d = decide([]observation{cutOff, withTailer(obs("backend-1", false, 100, -1), false)}, p)
+	if len(d.demotes) != 0 || d.promoteTarget != nil {
+		t.Fatalf("with nothing credited (shared outage) nothing is demoted or promoted, got %+v", d)
+	}
+}

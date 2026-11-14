@@ -179,6 +179,7 @@ func (st *deploymentState) setDiscoveryDown(down bool) bool {
 	if down {
 		st.failback = failbackState{}
 		st.incumbentLiveSince = time.Time{}
+		st.emptyStreak = 0
 	}
 	if st.discoveryDown == down {
 		return false

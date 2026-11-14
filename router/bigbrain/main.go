@@ -36,9 +36,9 @@ const (
 	shutdownTimeout        = 10 * time.Second
 	actuationDrainSlack    = 5 * time.Second
 
-	defaultMetricsAPIServerPort    = 6443
-	defaultMetricsAPIServerCertDir = "/var/run/bigbrain-apiserver"
-	metricsScrapeInterval          = 5 * time.Second
+	defaultMetricsAPIServerPort = 6443
+	metricsAPIServerCertDir     = "/var/run/bigbrain-apiserver"
+	metricsScrapeInterval       = 5 * time.Second
 )
 
 func main() {
@@ -209,7 +209,7 @@ func startMetricsAPIServer(
 	}
 	cfg := apiserver.Config{
 		SecurePort: securePort,
-		CertDir:    env("BIGBRAIN_METRICS_APISERVER_CERT_DIR", defaultMetricsAPIServerCertDir),
+		CertDir:    metricsAPIServerCertDir,
 	}
 	var wg sync.WaitGroup
 	wg.Go(func() {

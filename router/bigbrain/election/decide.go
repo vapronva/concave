@@ -100,6 +100,12 @@ func betterLeader(a, b observation) bool {
 	}
 }
 
+func isSupersededBy(o, leader observation) bool {
+	lease, ok := leaseOf(o)
+	leaderLease, leaderOK := leaseOf(leader)
+	return o.reach && o.status.IsLeader && ok && leaderOK && lease < leaderLease
+}
+
 func leaseOf(o observation) (uint64, bool) {
 	if o.status.LeaseTS == nil {
 		return 0, false
@@ -175,8 +181,11 @@ func decide(obs []observation, p decideParams) decision {
 	}
 	leader := pickLeader(claims)
 	d.leaderPod, d.leaderURL = leader.be.Pod, leader.be.URL
-	for _, o := range claims {
-		if o.be.Pod != leader.be.Pod {
+	for _, o := range obs {
+		if o.be.Pod == leader.be.Pod {
+			continue
+		}
+		if isLiveLeaderClaim(o, p.leaseUnverifiedGrace) || isSupersededBy(o, leader) {
 			d.demotes = append(d.demotes, demoteTarget{pod: o.be.Pod, url: o.be.URL, leaseTS: o.status.LeaseTS})
 		}
 	}

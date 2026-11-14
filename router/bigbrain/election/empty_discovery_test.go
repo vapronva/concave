@@ -86,7 +86,7 @@ func TestReconcile_DiscoveryErrorsNeverTriggerEmptyDebounce(t *testing.T) {
 	reg := registry.New()
 	reg.EnsureDeployment("dev", "convex-dev")
 	c := New(withConfig(func(c *Config) { c.EmptyDiscoveryDebounce = debounce }), k8s, nil, reg, quietLogger())
-	st := &deploymentState{}
+	st := &deploymentState{emptyStreak: debounce - 1}
 	ctx := context.Background()
 	c.setLeader("dev", st, "backend-0", "http://10.0.0.1:3210")
 	for range debounce * 3 {
@@ -96,6 +96,6 @@ func TestReconcile_DiscoveryErrorsNeverTriggerEmptyDebounce(t *testing.T) {
 		t.Fatalf("discovery errors must keep the last-known leader, got %q ok=%v", pod, ok)
 	}
 	if st.emptyStreak != 0 {
-		t.Fatalf("discovery errors must not advance the empty streak, got %d", st.emptyStreak)
+		t.Fatalf("a discovery error must break the empty streak, got %d", st.emptyStreak)
 	}
 }

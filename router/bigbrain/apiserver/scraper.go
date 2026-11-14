@@ -46,6 +46,7 @@ type Scraper struct {
 	httpc      *http.Client
 	log        *slog.Logger
 	failing    map[types.NamespacedName]struct{}
+	listDown   map[string]error
 }
 
 func NewScraper(
@@ -82,22 +83,41 @@ func (s *Scraper) Run(ctx context.Context) {
 func (s *Scraper) scrapeAll(ctx context.Context) {
 	fresh := make(map[types.NamespacedName]podSample)
 	failed := make(map[types.NamespacedName]error)
+	listFailed := make(map[string]error)
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	for _, ns := range s.namespaces {
 		wg.Go(func() {
-			samples, errs := s.scrapeNamespace(ctx, ns)
+			samples, errs, err := s.scrapeNamespace(ctx, ns)
 			mu.Lock()
 			maps.Copy(fresh, samples)
 			maps.Copy(failed, errs)
+			if err != nil {
+				listFailed[ns] = err
+			}
 			mu.Unlock()
 		})
 	}
 	wg.Wait()
 	s.prov.replace(fresh)
 	if ctx.Err() == nil {
+		s.logListTransitions(ctx, listFailed)
 		s.logTransitions(ctx, fresh, failed)
 	}
+}
+
+func (s *Scraper) logListTransitions(ctx context.Context, listFailed map[string]error) {
+	for ns, err := range listFailed {
+		if _, known := s.listDown[ns]; !known {
+			s.log.WarnContext(ctx, "scraper: list funrun pods failed", "namespace", ns, "err", err)
+		}
+	}
+	for ns := range s.listDown {
+		if _, still := listFailed[ns]; !still {
+			s.log.InfoContext(ctx, "scraper: list funrun pods recovered", "namespace", ns)
+		}
+	}
+	s.listDown = listFailed
 }
 
 func (s *Scraper) logTransitions(
@@ -125,14 +145,13 @@ func (s *Scraper) logTransitions(
 func (s *Scraper) scrapeNamespace(
 	ctx context.Context,
 	ns string,
-) (map[types.NamespacedName]podSample, map[types.NamespacedName]error) {
+) (map[types.NamespacedName]podSample, map[types.NamespacedName]error, error) {
 	sel := fmt.Sprintf("%s=funrun", k8sclient.LabelComponent)
 	lctx, cancel := context.WithTimeout(ctx, listTimeout)
 	pods, err := s.cs.CoreV1().Pods(ns).List(lctx, metav1.ListOptions{LabelSelector: sel, ResourceVersion: "0"})
 	cancel()
 	if err != nil {
-		s.log.WarnContext(ctx, "scraper: list funrun pods failed", "namespace", ns, "err", err)
-		return nil, nil
+		return nil, nil, err
 	}
 	out := make(map[types.NamespacedName]podSample, len(pods.Items))
 	failed := make(map[types.NamespacedName]error)
@@ -158,7 +177,7 @@ func (s *Scraper) scrapeNamespace(
 		})
 	}
 	wg.Wait()
-	return out, failed
+	return out, failed, nil
 }
 
 func healthPort(p *corev1.Pod) int {
