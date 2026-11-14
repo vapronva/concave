@@ -438,6 +438,7 @@ func (t *tracker) serveHTTP(w http.ResponseWriter, r *http.Request, site bool) {
 			return
 		}
 	}
+	hasBody := r.Body != http.NoBody
 	if t.maxBodyBytes > 0 {
 		if r.ContentLength > t.maxBodyBytes {
 			http.Error(w, "request entity too large", http.StatusRequestEntityTooLarge)
@@ -445,7 +446,7 @@ func (t *tracker) serveHTTP(w http.ResponseWriter, r *http.Request, site bool) {
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, t.maxBodyBytes)
 	}
-	if t.bodyRate > 0 && r.Body != http.NoBody {
+	if t.bodyRate > 0 && hasBody {
 		r.Body = &pacedBody{
 			ReadCloser: r.Body,
 			rc:         http.NewResponseController(w),
@@ -476,32 +477,43 @@ type pacedBody struct {
 	perByte time.Duration
 	n       int64
 	mu      sync.Mutex
-	closed  bool
+	settled bool
 }
 
 func (b *pacedBody) Read(p []byte) (int, error) {
-	b.setDeadline(b.start.Add(b.grace + time.Duration(b.n)*b.perByte))
+	b.setDeadline(b.start.Add(b.grace+time.Duration(b.n)*b.perByte), false)
 	n, err := b.ReadCloser.Read(p)
 	b.n += int64(n)
 	if errors.Is(err, io.EOF) {
-		b.setDeadline(time.Time{})
+		b.setDeadline(time.Time{}, true)
 	}
 	return n, err
 }
 
-func (b *pacedBody) setDeadline(t time.Time) {
+func (b *pacedBody) setDeadline(t time.Time, final bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if !b.closed {
-		_ = b.rc.SetReadDeadline(t)
+	if b.settled {
+		return
 	}
+	_ = b.rc.SetReadDeadline(t)
+	b.settled = final
 }
 
 func (b *pacedBody) Close() error {
 	b.mu.Lock()
-	b.closed = true
+	b.settled = true
 	b.mu.Unlock()
 	return b.ReadCloser.Close()
+}
+
+func withBodyGrace(next http.Handler, grace time.Duration) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body != http.NoBody {
+			_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(grace))
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func allowedMethod(method string) bool {
@@ -715,7 +727,7 @@ func run(cfg config, addr, bigbrainURL string, maxBody int64, mono bool, ln net.
 	//nolint:gosec // operator-configured values, not request data
 	log.Printf("usher listening on %s, %d deployment(s), bigbrain=%q", addr, len(cfg.Deployments), bigbrainURL)
 	srv := &http.Server{
-		Handler:           newMux(routes, trackers, monoHost),
+		Handler:           withBodyGrace(newMux(routes, trackers, monoHost), bodyReadGrace),
 		ReadHeaderTimeout: readHeaderTimeout,
 		IdleTimeout:       idleTimeout,
 		MaxHeaderBytes:    maxHeaderBytes,

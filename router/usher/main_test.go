@@ -1016,9 +1016,9 @@ func pacedEdge(t *testing.T, upstream http.Handler) (*tracker, string) {
 	if !tr.setLeader(up.URL) {
 		t.Fatal("setLeader should install proxy")
 	}
-	edge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	edge := httptest.NewServer(withBodyGrace(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		tr.serveHTTP(w, r, false)
-	}))
+	}), tr.bodyGrace))
 	t.Cleanup(edge.Close)
 	return tr, edge.Listener.Addr().String()
 }
@@ -1090,5 +1090,68 @@ func TestServeHTTP_ResponseStreamingPastBodyDeadlineIsNotCut(t *testing.T) {
 	}
 	if events != 6 || sc.Err() != nil {
 		t.Fatalf("a response streaming after the body ended must not be cut: %d/6 events, err=%v", events, sc.Err())
+	}
+}
+
+func TestServeHTTP_TrickledBodyOnRejectedPathIsBounded(t *testing.T) {
+	t.Parallel()
+	_, addr := pacedEdge(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	start := time.Now()
+	_, _ = fmt.Fprint(c, "POST /metrics HTTP/1.1\r\nHost: api.example\r\nTransfer-Encoding: chunked\r\n\r\n")
+	go func() {
+		for range 40 {
+			if _, werr := fmt.Fprint(c, "1\r\nx\r\n"); werr != nil {
+				return
+			}
+			time.Sleep(400 * time.Millisecond)
+		}
+	}()
+	_ = c.SetReadDeadline(time.Now().Add(10 * time.Second))
+	status, rerr := bufio.NewReader(c).ReadString('\n')
+	if rerr != nil || !strings.Contains(status, "404") {
+		t.Fatalf("a rejected request must still be answered, got %q err=%v", status, rerr)
+	}
+	if took := time.Since(start); took > 3*time.Second {
+		t.Fatalf("the server drained a trickled body for %v, want near the 1s grace", took)
+	}
+}
+
+type deadlineRecorder struct {
+	http.ResponseWriter
+
+	deadlines []time.Time
+}
+
+//nolint:unparam // http.ResponseController needs this exact signature
+func (d *deadlineRecorder) SetReadDeadline(t time.Time) error {
+	d.deadlines = append(d.deadlines, t)
+	return nil
+}
+
+func TestPacedBody_NoDeadlineChangeAfterEOF(t *testing.T) {
+	t.Parallel()
+	rec := &deadlineRecorder{}
+	body := &pacedBody{
+		ReadCloser: io.NopCloser(strings.NewReader("x")),
+		rc:         http.NewResponseController(rec),
+		start:      time.Now().Add(-time.Hour),
+		grace:      time.Second,
+		perByte:    time.Millisecond,
+	}
+	if _, err := io.ReadAll(body); err != nil {
+		t.Fatal(err)
+	}
+	settledAt := len(rec.deadlines)
+	if settledAt == 0 || !rec.deadlines[settledAt-1].IsZero() {
+		t.Fatalf("EOF must clear the deadline, got %v", rec.deadlines)
+	}
+	_, _ = body.Read(make([]byte, 1))
+	if len(rec.deadlines) != settledAt {
+		t.Fatalf("a read after EOF re-armed an expired deadline: %v", rec.deadlines[settledAt:])
 	}
 }
