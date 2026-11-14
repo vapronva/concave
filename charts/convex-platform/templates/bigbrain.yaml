@@ -84,7 +84,8 @@ spec:
       {{- with include "convex.imagePullSecrets" . }}{{- . | nindent 6 }}{{- end }}
       terminationGracePeriodSeconds: {{ $b.terminationGracePeriodSeconds }}
       serviceAccountName: {{ include "convex.bigbrainName" . }}
-      {{- with include "convex.podScheduling" $b }}{{- . | nindent 6 }}{{- end }}
+      {{- $nodeLoss := list (dict "key" "node.kubernetes.io/unreachable" "operator" "Exists" "effect" "NoExecute" "tolerationSeconds" 30) (dict "key" "node.kubernetes.io/not-ready" "operator" "Exists" "effect" "NoExecute" "tolerationSeconds" 30) }}
+      {{- with include "convex.podScheduling" (merge (dict "tolerations" (concat ($b.tolerations | default list) $nodeLoss)) $b) }}{{- . | nindent 6 }}{{- end }}
       {{- if $b.affinity }}
       affinity:
         {{- toYaml $b.affinity | nindent 8 }}

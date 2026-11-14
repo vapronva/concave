@@ -81,6 +81,7 @@ backend:
 
 funrun:
   enabled: true
+  mode: follower
   replicas: 2
   updateStrategy:
     type: RollingUpdate

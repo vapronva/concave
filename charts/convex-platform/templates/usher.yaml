@@ -107,6 +107,10 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 20
             failureThreshold: 6
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "5"]
           {{- with $u.resources }}
           resources:
             {{- toYaml . | nindent 12 }}

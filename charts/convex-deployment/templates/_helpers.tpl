@@ -200,7 +200,7 @@ strategy:
       name: {{ include "convex.dbSecretName" . }}
       key: {{ default "db-password" $db.passwordRef.key }}
 - name: POSTGRES_URL
-  value: "postgres://{{ $db.user }}:$(DB_PASSWORD)@{{ required "db.host is required" $db.host }}:{{ $db.port }}{{- if eq $db.sslMode "disable" }}?sslmode=disable{{- end }}"
+  value: "postgres://{{ $db.user }}:$(DB_PASSWORD)@{{ required "db.host is required" $db.host }}:{{ $db.port }}?options=-cidle_in_transaction_session_timeout%3D10s%09-ctcp_keepalives_idle%3D60%09-ctcp_keepalives_interval%3D10%09-ctcp_keepalives_count%3D3{{- if eq $db.sslMode "disable" }}&sslmode=disable{{- end }}"
 {{- if eq $db.sslMode "disable" }}
 - name: DO_NOT_REQUIRE_SSL
   value: "1"
@@ -344,7 +344,7 @@ seccompProfile:
   value: {{ int64 .Values.allocator.arenaMax | quote }}
 {{- end }}
 - name: V8_ACTION_USER_TIMEOUT_SECS
-  value: {{ .Values.backend.actionUserTimeoutSeconds | default 600 | int64 | quote }}
+  value: {{ ternary .Values.backend.actionUserTimeoutSeconds 600 (eq (include "convex.set" .Values.backend.actionUserTimeoutSeconds) "1") | int64 | quote }}
 {{- end -}}
 
 {{- define "convex.backendTunableEnv" -}}

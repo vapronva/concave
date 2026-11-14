@@ -2,12 +2,15 @@
 {{- if eq (include "convex.listenPort" .Values.funrun.listen) (include "convex.listenPort" .Values.funrun.healthListen) }}
 {{- fail "funrun.listen and funrun.healthListen must use different ports" }}
 {{- end }}
+{{- if not (has (toString .Values.funrun.mode) (list "follower" "stateless")) }}
+{{- fail (printf "funrun.mode must be follower or stateless, got %q" (toString .Values.funrun.mode)) }}
+{{- end }}
 {{- $funrunDrainSet := not (or (kindIs "invalid" .Values.funrun.drainDelaySeconds) (eq (toString .Values.funrun.drainDelaySeconds) "")) }}
 {{- $funrunDrainDelay := ternary (int .Values.funrun.drainDelaySeconds) 8 $funrunDrainSet }}
-{{- $funrunActionBudget := int (.Values.backend.actionUserTimeoutSeconds | default 600) }}
+{{- $funrunActionBudget := int (ternary .Values.backend.actionUserTimeoutSeconds 600 (eq (include "convex.set" .Values.backend.actionUserTimeoutSeconds) "1") | int64) }}
 {{- $funrunShutdownNeed := add 15 $funrunDrainDelay 30 $funrunActionBudget 300 }}
 {{- if gt $funrunShutdownNeed (int .Values.funrun.terminationGracePeriodSeconds) }}
-{{- fail (printf "funrun.terminationGracePeriodSeconds=%d is below the %d seconds a clean shutdown needs: 15 (preStop sleep) + %d (drain delay) + 30 (FUNRUN_SNAPSHOT_WAIT_TIMEOUT_SECS) + %d (V8_ACTION_USER_TIMEOUT_SECS) + 300 (V8_ACTION_SYSTEM_TIMEOUT_SECONDS); raise funrun.terminationGracePeriodSeconds or lower backend.actionUserTimeoutSeconds" (int .Values.funrun.terminationGracePeriodSeconds) $funrunShutdownNeed $funrunDrainDelay $funrunActionBudget) }}
+{{- fail (printf "funrun.terminationGracePeriodSeconds=%d is below the %d seconds a clean shutdown needs: 15 (preStop sleep) + %d (drain delay) + 30 (snapshot wait) + %d (V8_ACTION_USER_TIMEOUT_SECS) + 300 (V8_ACTION_SYSTEM_TIMEOUT_SECONDS); raise funrun.terminationGracePeriodSeconds or lower backend.actionUserTimeoutSeconds" (int .Values.funrun.terminationGracePeriodSeconds) $funrunShutdownNeed $funrunDrainDelay $funrunActionBudget) }}
 {{- end }}
 ---
 apiVersion: apps/v1
@@ -63,12 +66,12 @@ spec:
             - { name: grpc, containerPort: {{ include "convex.listenPort" .Values.funrun.listen }} }
             - { name: health, containerPort: {{ include "convex.listenPort" .Values.funrun.healthListen }} }
           env:
-            - name: RUST_LOG
-              value: info
             - name: FUNRUN_LISTEN
               value: "0.0.0.0:{{ include "convex.listenPort" .Values.funrun.listen }}"
             - name: FUNRUN_HEALTH_LISTEN
               value: "0.0.0.0:{{ include "convex.listenPort" .Values.funrun.healthListen }}"
+            - name: FUNRUN_MODE
+              value: {{ .Values.funrun.mode | quote }}
             {{- if $funrunDrainSet }}
             - name: CONVEX_FUNRUN_DRAIN_DELAY_SECS
               value: {{ int64 .Values.funrun.drainDelaySeconds | quote }}
