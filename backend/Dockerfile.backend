@@ -14,24 +14,11 @@ ARG MIRROR_DEBIAN_FALLBACK_URL=""
 
 COPY --from=tools /usr/local/bin/pkg-base-setup /usr/local/bin/
 
-RUN --mount=type=cache,target=/var/cache/apt --mount=type=cache,target=/var/lib/apt,sharing=locked <<EOF
+RUN <<EOF
 set -o errexit -o nounset -o xtrace
 echo 'Acquire::ForceIPv4 "true";' > /etc/apt/apt.conf.d/99force-ipv4
 pkg-base-setup
 apt-get install --assume-yes cmake libclang-dev clang curl pkg-config git protobuf-compiler python3
-EOF
-
-ARG JUST_VERSION=1.59.0
-
-ARG JUST_SHA256=409044617b6f06517c1035e55ca38c8c856ff8b650e41bc2aa1ef82d5903a23e
-
-RUN <<EOF
-set -o errexit -o nounset -o xtrace
-curl --fail --silent --show-error --location --retry 5 --retry-all-errors --retry-delay 3 --connect-timeout 30 --output /tmp/just.tar.gz "https://github.com/casey/just/releases/download/${JUST_VERSION}/just-${JUST_VERSION}-x86_64-unknown-linux-musl.tar.gz"
-echo "${JUST_SHA256}  /tmp/just.tar.gz" | sha256sum --check -
-tar --extract --gzip --directory=/usr/local/bin --file=/tmp/just.tar.gz just
-rm /tmp/just.tar.gz
-just --version
 EOF
 
 ARG UV_VERSION=0.13.7
@@ -66,7 +53,7 @@ COPY apply-patches.sh /tmp/apply-patches.sh
 
 RUN PATCHES_DIR=/tmp/patches/backend UPSTREAM_PIN=/tmp/patches/UPSTREAM bash /tmp/apply-patches.sh /convex
 
-ARG NODE_SHA256=6c172a9ab6718f7b801fb5a7bd486af2ee5e32758086a04b84fcce2aa77095e6
+ARG NODE_SHA256=4f2b175a6d53a5c617a80dba2676238a0688cef28c6da4eba35c7d844e66fcfb
 
 RUN <<EOF
 set -o errexit -o nounset -o xtrace
@@ -94,7 +81,7 @@ EOF
 
 RUN --mount=type=cache,target=/root/.npm \
     --mount=type=cache,target=/root/.local/share/pnpm/store,sharing=locked \
-    npm ci --prefix scripts/ && just install-js
+    npm ci --prefix scripts/ && scripts/node_modules/.bin/pnpm --dir npm-packages install --frozen-lockfile --ignore-scripts
 
 RUN --mount=type=cache,target=/convex/target/ \
     --mount=type=cache,target=/usr/local/cargo/git/db \
@@ -117,12 +104,11 @@ ARG MIRROR_UBUNTU_FALLBACK_URL=""
 
 COPY --from=tools /usr/local/bin/pkg-base-setup /usr/local/bin/
 
-RUN --mount=type=cache,target=/var/cache/apt --mount=type=cache,target=/var/lib/apt,sharing=locked <<EOF
+RUN <<EOF
 set -o errexit -o nounset -o xtrace
 echo 'Acquire::ForceIPv4 "true";' > /etc/apt/apt.conf.d/99force-ipv4
 pkg-base-setup
 apt-get install --assume-yes curl
-apt-get clean
 rm --recursive --force /var/lib/apt/lists/*
 EOF
 
@@ -131,8 +117,7 @@ COPY --from=build /usr/bin/node /usr/bin/node
 COPY --from=build /usr/lib/node_modules/npm /usr/lib/node_modules/npm
 
 RUN ln --symbolic --force /usr/lib/node_modules/npm/bin/npm-cli.js /usr/bin/npm && \
-    ln --symbolic --force /usr/lib/node_modules/npm/bin/npx-cli.js /usr/bin/npx && \
-    chmod +x /usr/bin/npm /usr/bin/npx
+    ln --symbolic --force /usr/lib/node_modules/npm/bin/npx-cli.js /usr/bin/npx
 
 WORKDIR /convex
 
@@ -146,7 +131,7 @@ COPY --from=build --chmod=755 \
 RUN groupadd --system --gid 1001 convex && \
     useradd --system --uid 1001 --gid convex --create-home convex && \
     mkdir --parents /convex/data && \
-    chown --recursive convex:convex /convex
+    chown convex:convex /convex/data
 
 USER convex
 

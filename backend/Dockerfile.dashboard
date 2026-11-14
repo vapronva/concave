@@ -2,7 +2,7 @@ ARG TOOLS_IMAGE=docker.horse/ci/on-alpine/tools:1
 
 FROM $TOOLS_IMAGE AS tools
 
-FROM docker.io/library/node:24.22.1-trixie-slim AS build
+FROM docker.io/library/node:24.22.3-trixie-slim AS build
 
 ARG MIRROR_DEBIAN_URL=""
 
@@ -13,7 +13,6 @@ COPY --from=tools /usr/local/bin/pkg-base-setup /usr/local/bin/
 RUN echo 'Acquire::ForceIPv4 "true";' > /etc/apt/apt.conf.d/99force-ipv4 && \
       pkg-base-setup && \
       apt-get install --assume-yes --no-install-recommends build-essential curl git python3 perl && \
-      apt-get clean && \
       rm --recursive --force /var/lib/apt/lists/*
 
 ARG UV_VERSION=0.13.7
@@ -60,7 +59,7 @@ ENV PATH="/src/scripts/node_modules/.bin:${PATH}"
 
 WORKDIR /src/npm-packages
 
-RUN --mount=type=cache,target=/root/.local/share/pnpm/store,sharing=locked pnpm install --frozen-lockfile
+RUN --mount=type=cache,target=/root/.local/share/pnpm/store,sharing=locked pnpm install --frozen-lockfile --ignore-scripts
 
 ENV NODE_ENV=production
 
@@ -72,7 +71,7 @@ ENV NEXT_PUBLIC_LOAD_MONACO_INTERNALLY=${NEXT_PUBLIC_LOAD_MONACO_INTERNALLY}
 
 RUN --mount=type=cache,target=/root/.cache/uv turbo run build --filter=dashboard-self-hosted...
 
-FROM docker.io/library/node:24.22.1-trixie-slim
+FROM docker.io/library/node:24.22.3-trixie-slim
 
 LABEL org.opencontainers.image.source=https://git.horse/vapronva/concave
 
@@ -84,7 +83,6 @@ COPY --from=tools /usr/local/bin/pkg-base-setup /usr/local/bin/
 
 RUN echo 'Acquire::ForceIPv4 "true";' > /etc/apt/apt.conf.d/99force-ipv4 && \
       pkg-base-setup && \
-      apt-get clean && \
       rm --recursive --force /var/lib/apt/lists/*
 
 RUN groupadd --system --gid 1001 nodejs && useradd --system --uid 1001 --gid nodejs nextjs
