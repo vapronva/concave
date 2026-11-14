@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -997,5 +999,96 @@ func TestNewMux_MonoExactSiteHostStillRoutesToSiteProxy(t *testing.T) {
 	}
 	if got, _ := gotPath.Load().(string); got != "/http/myaction" {
 		t.Fatalf("mono: site proxy must prefix /http, upstream path=%q", got)
+	}
+}
+
+func pacedEdge(t *testing.T, upstream http.Handler) (*tracker, string) {
+	t.Helper()
+	up := httptest.NewServer(upstream)
+	t.Cleanup(up.Close)
+	tr := &tracker{
+		host:           "api.example",
+		bodyGrace:      time.Second,
+		bodyRate:       1024,
+		resolveCh:      make(chan struct{}, 1),
+		proxyTransport: newProxyTransport(),
+	}
+	if !tr.setLeader(up.URL) {
+		t.Fatal("setLeader should install proxy")
+	}
+	edge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tr.serveHTTP(w, r, false)
+	}))
+	t.Cleanup(edge.Close)
+	return tr, edge.Listener.Addr().String()
+}
+
+func TestServeHTTP_TrickledBodyIsCutWithoutNudge(t *testing.T) {
+	t.Parallel()
+	tr, addr := pacedEdge(t, http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+	}))
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	start := time.Now()
+	_, _ = fmt.Fprint(c, "POST /api/storage/upload HTTP/1.1\r\nHost: api.example\r\nTransfer-Encoding: chunked\r\n\r\n")
+	go func() {
+		for range 40 {
+			if _, werr := fmt.Fprint(c, "1\r\nx\r\n"); werr != nil {
+				return
+			}
+			time.Sleep(400 * time.Millisecond)
+		}
+	}()
+	_ = c.SetReadDeadline(time.Now().Add(10 * time.Second))
+	if _, rerr := bufio.NewReader(c).ReadString('\n'); rerr == nil {
+		t.Fatal("a body trickled below the minimum rate must be aborted, got a response")
+	}
+	if took := time.Since(start); took > 3*time.Second {
+		t.Fatalf("trickle cut after %v, want near the 1s grace", took)
+	}
+	select {
+	case <-tr.resolveCh:
+		t.Fatal("a body-rate abort must not nudge leader resolution")
+	default:
+	}
+}
+
+func TestServeHTTP_ResponseStreamingPastBodyDeadlineIsNotCut(t *testing.T) {
+	t.Parallel()
+	_, addr := pacedEdge(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		for i := range 6 {
+			_, _ = fmt.Fprintf(w, "data: %d\n\n", i)
+			_ = http.NewResponseController(w).Flush()
+			time.Sleep(500 * time.Millisecond)
+		}
+	}))
+	req, err := http.NewRequest(
+		http.MethodPost,
+		"http://"+addr+"/api/stream",
+		strings.NewReader(`{"path":"chat:stream"}`),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Host = "api.example"
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	events := 0
+	sc := bufio.NewScanner(resp.Body)
+	for sc.Scan() {
+		if strings.HasPrefix(sc.Text(), "data: ") {
+			events++
+		}
+	}
+	if events != 6 || sc.Err() != nil {
+		t.Fatalf("a response streaming after the body ended must not be cut: %d/6 events, err=%v", events, sc.Err())
 	}
 }

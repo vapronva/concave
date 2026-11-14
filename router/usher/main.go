@@ -52,6 +52,8 @@ const (
 	readyzPath              = "/usher/readyz"
 	maxHeaderBytes          = 64 * 1024
 	proxyBufferSize         = 32 * 1024
+	bodyReadGrace           = 30 * time.Second
+	bodyMinRate             = 4096
 )
 
 var (
@@ -87,6 +89,8 @@ type tracker struct {
 	bigbrainURL    string
 	maxBodyBytes   int64
 	streamIdle     time.Duration
+	bodyGrace      time.Duration
+	bodyRate       int64
 	client         *http.Client
 	streamClient   *http.Client
 	proxyTransport *http.Transport
@@ -441,6 +445,15 @@ func (t *tracker) serveHTTP(w http.ResponseWriter, r *http.Request, site bool) {
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, t.maxBodyBytes)
 	}
+	if t.bodyRate > 0 && r.Body != http.NoBody {
+		r.Body = &pacedBody{
+			ReadCloser: r.Body,
+			rc:         http.NewResponseController(w),
+			start:      time.Now(),
+			grace:      t.bodyGrace,
+			perByte:    time.Second / time.Duration(t.bodyRate),
+		}
+	}
 	p := t.currentLeader(site)
 	if p == nil {
 		if t.noLeaderLog.allow() {
@@ -452,6 +465,43 @@ func (t *tracker) serveHTTP(w http.ResponseWriter, r *http.Request, site bool) {
 	}
 	_ = http.NewResponseController(w).EnableFullDuplex()
 	p.ServeHTTP(w, r)
+}
+
+type pacedBody struct {
+	io.ReadCloser
+
+	rc      *http.ResponseController
+	start   time.Time
+	grace   time.Duration
+	perByte time.Duration
+	n       int64
+	mu      sync.Mutex
+	closed  bool
+}
+
+func (b *pacedBody) Read(p []byte) (int, error) {
+	b.setDeadline(b.start.Add(b.grace + time.Duration(b.n)*b.perByte))
+	n, err := b.ReadCloser.Read(p)
+	b.n += int64(n)
+	if errors.Is(err, io.EOF) {
+		b.setDeadline(time.Time{})
+	}
+	return n, err
+}
+
+func (b *pacedBody) setDeadline(t time.Time) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !b.closed {
+		_ = b.rc.SetReadDeadline(t)
+	}
+}
+
+func (b *pacedBody) Close() error {
+	b.mu.Lock()
+	b.closed = true
+	b.mu.Unlock()
+	return b.ReadCloser.Close()
 }
 
 func allowedMethod(method string) bool {
@@ -483,6 +533,8 @@ func startTracker(
 		bigbrainURL:    bigbrainURL,
 		maxBodyBytes:   maxBodyBytes,
 		streamIdle:     streamIdleTimeout,
+		bodyGrace:      bodyReadGrace,
+		bodyRate:       bodyMinRate,
 		client:         client,
 		streamClient:   &http.Client{Transport: newControlPlaneTransport()},
 		proxyTransport: newProxyTransport(),
