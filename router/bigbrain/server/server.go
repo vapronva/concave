@@ -27,7 +27,7 @@ const (
 type Server struct {
 	reg         *registry.Registry
 	ins         *insights.Insights
-	usageTokens map[string]string
+	usageTokens map[string][sha256.Size]byte
 	log         *slog.Logger
 	done        chan struct{}
 	stopOnce    sync.Once
@@ -37,7 +37,13 @@ func New(reg *registry.Registry, ins *insights.Insights, usageTokens map[string]
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Server{reg: reg, ins: ins, usageTokens: usageTokens, log: log, done: make(chan struct{})}
+	digests := make(map[string][sha256.Size]byte, len(usageTokens))
+	for name, token := range usageTokens {
+		if token != "" {
+			digests[name] = sha256.Sum256([]byte(token))
+		}
+	}
+	return &Server{reg: reg, ins: ins, usageTokens: digests, log: log, done: make(chan struct{})}
 }
 
 func (s *Server) Shutdown() {
@@ -59,17 +65,23 @@ func (s *Server) Handler() http.Handler {
 	return logging(s.log, mux)
 }
 
-func (s *Server) bearerOK(r *http.Request, deployment string) bool {
-	expected := s.usageTokens[deployment]
-	if expected == "" {
-		return false
+func (s *Server) tokenDeployment(r *http.Request) string {
+	got := sha256.Sum256([]byte(bearerToken(r.Header.Get("Authorization"))))
+	found := ""
+	for name, want := range s.usageTokens {
+		if subtle.ConstantTimeCompare(got[:], want[:]) == 1 {
+			found = name
+		}
 	}
-	a := sha256.Sum256([]byte(bearerToken(r.Header.Get("Authorization"))))
-	b := sha256.Sum256([]byte(expected))
-	return subtle.ConstantTimeCompare(a[:], b[:]) == 1
+	return found
 }
 
 func (s *Server) handleUsageIngest(w http.ResponseWriter, r *http.Request) {
+	dep := s.tokenDeployment(r)
+	if dep == "" {
+		writeErr(w, http.StatusUnauthorized, "invalid usage token")
+		return
+	}
 	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, usageBodyLimit))
 	if err != nil {
 		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
@@ -88,11 +100,7 @@ func (s *Server) handleUsageIngest(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid usage body")
 		return
 	}
-	if body.Deployment == "" {
-		writeErr(w, http.StatusBadRequest, "missing deployment")
-		return
-	}
-	if !s.bearerOK(r, body.Deployment) {
+	if body.Deployment != dep {
 		writeErr(w, http.StatusUnauthorized, "invalid usage token")
 		return
 	}
@@ -101,7 +109,7 @@ func (s *Server) handleUsageIngest(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid usage events")
 		return
 	}
-	kept, err := s.ins.Ingest(body.Deployment, body.ReadLimits, events)
+	kept, err := s.ins.Ingest(dep, body.ReadLimits, events)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -125,7 +133,7 @@ func (s *Server) handleUsageQuery(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "deploymentName is required")
 		return
 	}
-	if !s.bearerOK(r, dep) {
+	if s.tokenDeployment(r) != dep {
 		writeErr(w, http.StatusUnauthorized, "invalid usage token")
 		return
 	}

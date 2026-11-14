@@ -198,6 +198,13 @@ func TestServer_UsageIngestOversizedTrailingBytesIs413(t *testing.T) {
 	if rr.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("a value that fits with trailing bytes past the cap: want 413, got %d (%s)", rr.Code, rr.Body.String())
 	}
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/internal/usage", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer wrong")
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("a wrong token must be refused before the body is read: want 401, got %d", rr.Code)
+	}
 }
 
 func TestServer_UsageIngestThenQuery(t *testing.T) {
