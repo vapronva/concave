@@ -1,9 +1,9 @@
 diff --git a/crates/pb/protos/funrun.proto b/crates/pb/protos/funrun.proto
 new file mode 100644
-index 000000000..3b7ea78d4
+index 000000000..1579de679
 --- /dev/null
 +++ b/crates/pb/protos/funrun.proto
-@@ -0,0 +1,158 @@
+@@ -0,0 +1,199 @@
 +syntax = "proto3";
 +
 +package funrun;
@@ -11,7 +11,9 @@ index 000000000..3b7ea78d4
 +import "common.proto";
 +import "convex_identity.proto";
 +import "convex_query_journal.proto";
++import "errors.proto";
 +import "outcome.proto";
++import "searchlight.proto";
 +import "usage.proto";
 +
 +service Funrun {
@@ -162,23 +164,65 @@ index 000000000..3b7ea78d4
 +  string tablet_id = 1;
 +  uint64 rows_read = 2;
 +}
-diff --git a/crates/pb/src/error_metadata.rs b/crates/pb/src/error_metadata.rs
-index 156289c91..88f1f64f9 100644
---- a/crates/pb/src/error_metadata.rs
-+++ b/crates/pb/src/error_metadata.rs
-@@ -155,11 +155,23 @@ fn has_connection_reset_source(status: &tonic::Status) -> bool {
- pub trait ErrorMetadataStatusExt {
-     fn from_anyhow(error: anyhow::Error) -> Self;
-     fn into_anyhow(self) -> anyhow::Error;
-+    fn error_metadata(&self) -> Option<ErrorMetadata>;
-     fn context<C>(self, context: C) -> anyhow::Error
-     where
-         C: Display + Send + Sync + 'static;
- }
- 
-+fn decode_status_details(details: &[u8]) -> anyhow::Result<Option<ErrorMetadata>> {
-+    let details =
-+        StatusDetailsProto::decode(details).context("Failed to decode StatusDetails proto")?;
++
++message SnapshotTableCountsRequest {
++  common.RepeatableTimestamp ts = 1;
++}
++
++message SnapshotTableCountsResponse {
++  bool available = 1;
++  repeated TabletCount tablets = 2;
++  SnapshotError error = 3;
++}
++
++message TabletCount {
++  string tablet_id = 1;
++  uint64 count = 2;
++}
++
++message SnapshotTextSearchRequest {
++  common.RepeatableTimestamp ts = 1;
++  string index_id = 2;
++  string printable_index_name = 3;
++  searchlight.TextQuery query = 4;
++  repeated common.DocumentUpdate pending_updates = 5;
++}
++
++message SnapshotTextSearchResponse {
++  repeated TextSearchCandidate candidates = 1;
++  uint64 filtered_bytes_searched = 2;
++  SnapshotError error = 3;
++}
++
++message TextSearchCandidate {
++  searchlight.CandidateRevision revision = 1;
++  bytes index_key = 2;
++}
++
++message SnapshotError {
++  string message = 1;
++  errors.ErrorMetadata metadata = 2;
++}
+diff --git a/crates/pb/src/funrun_status.rs b/crates/pb/src/funrun_status.rs
+new file mode 100644
+index 000000000..896635392
+--- /dev/null
++++ b/crates/pb/src/funrun_status.rs
+@@ -0,0 +1,124 @@
++use std::error::Error as _;
++
++use anyhow::Context;
++use errors::{
++    ErrorMetadata,
++    INTERNAL_SERVER_ERROR,
++    INTERNAL_SERVER_ERROR_MSG,
++};
++use prost::Message;
++
++use crate::errors::StatusDetails;
++
++fn decode_details(details: &[u8]) -> anyhow::Result<Option<ErrorMetadata>> {
++    let details = StatusDetails::decode(details).context("Failed to decode StatusDetails proto")?;
 +    details
 +        .error_metadata
 +        .map(|metadata| {
@@ -187,57 +231,56 @@ index 156289c91..88f1f64f9 100644
 +        .transpose()
 +}
 +
- impl ErrorMetadataStatusExt for tonic::Status {
-     fn from_anyhow(error: anyhow::Error) -> Self {
-         let message = truncate(&format!("{error:#}"));
-@@ -177,11 +189,9 @@ impl ErrorMetadataStatusExt for tonic::Status {
-     fn into_anyhow(self) -> anyhow::Error {
-         let code = self.code();
-         let is_connection_reset = has_connection_reset_source(&self);
--        let details = match StatusDetailsProto::decode(self.details()) {
--            Ok(details) => details,
--            Err(err) => {
--                return anyhow::anyhow!("Failed to decode StatusDetails proto: {}", err);
--            },
-+        let (metadata, details_error) = match decode_status_details(self.details()) {
-+            Ok(metadata) => (metadata, None),
-+            Err(err) => (None, Some(err)),
-         };
-         let message = self.message().to_string();
-         let mut source_chain = String::new();
-@@ -190,13 +200,12 @@ impl ErrorMetadataStatusExt for tonic::Status {
-             source_chain.push_str(&format!(": {s}"));
-             source = s.source();
-         }
-+        if let Some(err) = details_error {
-+            source_chain.push_str(&format!("; undecodable status details: {err:#}"));
++fn has_connection_reset_source(status: &tonic::Status) -> bool {
++    let mut source = status.source();
++    while let Some(error) = source {
++        if error
++            .downcast_ref::<std::io::Error>()
++            .is_some_and(|error| error.kind() == std::io::ErrorKind::ConnectionReset)
++        {
++            return true;
 +        }
-         let mut error: anyhow::Error =
-             anyhow::anyhow!("status: {code:?}, message: {message:?}{source_chain}");
--        if let Some(error_metadata) = details.error_metadata {
--            let error_metadata = match ErrorMetadata::try_from(error_metadata) {
--                Ok(error_metadata) => error_metadata,
--                Err(err) => return err.context("Failed to parse ErrorMetadata proto"),
--            };
-+        if let Some(error_metadata) = metadata {
-             error = error.context(error_metadata)
-         } else if code == tonic::Code::ResourceExhausted
-             || (code == tonic::Code::Unknown && is_connection_reset)
-@@ -211,6 +220,10 @@ impl ErrorMetadataStatusExt for tonic::Status {
-         error
-     }
- 
-+    fn error_metadata(&self) -> Option<ErrorMetadata> {
-+        decode_status_details(self.details()).ok().flatten()
++        source = error.source();
 +    }
++    false
++}
 +
-     fn context<C>(self, context: C) -> anyhow::Error
-     where
-         C: Display + Send + Sync + 'static,
-@@ -218,3 +231,46 @@ impl ErrorMetadataStatusExt for tonic::Status {
-         self.into_anyhow().context(context)
-     }
- }
++pub fn status_error_metadata(status: &tonic::Status) -> Option<ErrorMetadata> {
++    decode_details(status.details()).ok().flatten()
++}
++
++pub fn status_into_anyhow(status: tonic::Status) -> anyhow::Error {
++    let code = status.code();
++    let (metadata, details_error) = match decode_details(status.details()) {
++        Ok(metadata) => (metadata, None),
++        Err(error) => (None, Some(error)),
++    };
++    let mut source_chain = String::new();
++    let mut source = status.source();
++    while let Some(s) = source {
++        source_chain.push_str(&format!(": {s}"));
++        source = s.source();
++    }
++    if let Some(error) = details_error {
++        source_chain.push_str(&format!("; undecodable status details: {error:#}"));
++    }
++    let error = anyhow::anyhow!(
++        "status: {code:?}, message: {:?}{source_chain}",
++        status.message()
++    );
++    match metadata {
++        Some(metadata) => error.context(metadata),
++        None if code == tonic::Code::ResourceExhausted
++            || (code == tonic::Code::Unknown && has_connection_reset_source(&status)) =>
++        {
++            error.context(ErrorMetadata::overloaded(
++                INTERNAL_SERVER_ERROR,
++                INTERNAL_SERVER_ERROR_MSG,
++            ))
++        },
++        None => error,
++    }
++}
 +
 +#[cfg(test)]
 +mod tests {
@@ -247,15 +290,19 @@ index 156289c91..88f1f64f9 100644
 +        INTERNAL_SERVER_ERROR_MSG,
 +    };
 +
-+    use super::ErrorMetadataStatusExt;
++    use super::{
++        status_error_metadata,
++        status_into_anyhow,
++    };
++    use crate::error_metadata::ErrorMetadataStatusExt;
 +
 +    #[test]
 +    fn plain_metadata_round_trips() {
 +        let metadata = ErrorMetadata::bad_request("BadRobot", "robot was bad");
 +        let status = tonic::Status::from_anyhow(metadata.clone().into());
 +        assert_eq!(status.code(), tonic::Code::InvalidArgument);
-+        assert_eq!(status.error_metadata(), Some(metadata.clone()));
-+        let error = status.into_anyhow();
++        assert_eq!(status_error_metadata(&status), Some(metadata.clone()));
++        let error = status_into_anyhow(status);
 +        assert_eq!(error.downcast_ref::<ErrorMetadata>(), Some(&metadata));
 +    }
 +
@@ -264,28 +311,41 @@ index 156289c91..88f1f64f9 100644
 +        let metadata = ErrorMetadata::rejected_before_execution("FunrunRejected", "try elsewhere");
 +        let status = tonic::Status::from_anyhow(metadata.clone().into());
 +        assert_eq!(status.code(), tonic::Code::ResourceExhausted);
-+        let decoded = status.error_metadata().unwrap();
++        let decoded = status_error_metadata(&status).unwrap();
 +        assert!(decoded.is_rejected_before_execution());
 +        assert_eq!(decoded, metadata);
 +    }
 +
 +    #[test]
 +    fn bare_resource_exhausted_decodes_as_overloaded() {
-+        let error = tonic::Status::resource_exhausted("quota exhausted").into_anyhow();
-+        assert_eq!(
-+            error.downcast_ref::<ErrorMetadata>(),
-+            Some(&ErrorMetadata::overloaded(
-+                INTERNAL_SERVER_ERROR,
-+                INTERNAL_SERVER_ERROR_MSG
-+            ))
++        let overloaded =
++            ErrorMetadata::overloaded(INTERNAL_SERVER_ERROR, INTERNAL_SERVER_ERROR_MSG);
++        let error = status_into_anyhow(tonic::Status::resource_exhausted("quota exhausted"));
++        assert_eq!(error.downcast_ref::<ErrorMetadata>(), Some(&overloaded));
++        let undecodable = tonic::Status::with_details(
++            tonic::Code::ResourceExhausted,
++            "quota exhausted",
++            vec![0xff, 0xff, 0xff].into(),
 +        );
++        assert_eq!(status_error_metadata(&undecodable), None);
++        let error = status_into_anyhow(undecodable);
++        assert!(format!("{error:#}").contains("undecodable status details"));
++        assert_eq!(error.downcast_ref::<ErrorMetadata>(), Some(&overloaded));
 +    }
 +}
 diff --git a/crates/pb/src/lib.rs b/crates/pb/src/lib.rs
-index e23221de2..b40ff32fd 100644
+index e23221de2..a4ce2c704 100644
 --- a/crates/pb/src/lib.rs
 +++ b/crates/pb/src/lib.rs
-@@ -27,6 +27,9 @@ pub mod convex_query_journal {
+@@ -4,6 +4,7 @@ pub mod authentication_token;
+ pub mod document_id;
+ pub mod error_metadata;
+ pub mod field_path;
++pub mod funrun_status;
+ pub mod http;
+ pub mod user_identity_attributes;
+ pub mod common {
+@@ -27,6 +28,9 @@ pub mod convex_query_journal {
  pub mod errors {
      include!(concat!(env!("OUT_DIR"), "/errors.rs"));
  }

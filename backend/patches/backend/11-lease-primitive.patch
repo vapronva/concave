@@ -1,5 +1,5 @@
 diff --git a/crates/common/src/persistence/mod.rs b/crates/common/src/persistence/mod.rs
-index 0527f7553..b3e1bad79 100644
+index 0527f7553..dcd7eedf8 100644
 --- a/crates/common/src/persistence/mod.rs
 +++ b/crates/common/src/persistence/mod.rs
 @@ -440,6 +440,14 @@ pub trait Persistence: Sync + Send + 'static {
@@ -17,23 +17,31 @@ index 0527f7553..b3e1bad79 100644
  }
  
  #[derive(Debug, Clone, Copy)]
-@@ -726,7 +734,6 @@ pub trait PersistenceReader: Send + Sync + 'static {
-     async fn table_size_stats(&self) -> anyhow::Result<Vec<PersistenceTableSize>> {
-         Ok(vec![])
+diff --git a/crates/postgres/src/connection.rs b/crates/postgres/src/connection.rs
+index 187d304ee..9972905d9 100644
+--- a/crates/postgres/src/connection.rs
++++ b/crates/postgres/src/connection.rs
+@@ -258,7 +258,7 @@ impl PostgresConnection<'_> {
+         tracing::warn!("Retrying with a new connection");
+         // Always retry with a fresh connection in case other pooled connections
+         // are also stale
+-        self.conn = Some(self.pool.create_connection().await?);
++        self.conn = Some(with_timeout(self.pool.create_connection()).await?);
+         self.poisoned = AtomicBool::new(false);
+         Ok(true)
      }
--
- }
- 
- /// Timestamp that is repeatable because the caller is holding the lease and
 diff --git a/crates/postgres/src/ha.rs b/crates/postgres/src/ha.rs
 new file mode 100644
-index 000000000..6de807a48
+index 000000000..04b74ae17
 --- /dev/null
 +++ b/crates/postgres/src/ha.rs
-@@ -0,0 +1,93 @@
+@@ -0,0 +1,124 @@
 +use common::errors::database_operational_error;
 +
 +use super::*;
++
++const CHECK_LEASES_TABLE_SQL: &str = r"SELECT 1 WHERE to_regclass('@db_name.leases') IS NOT NULL";
++const LOCK_LEASES_SQL: &str = r"LOCK TABLE @db_name.leases IN EXCLUSIVE MODE";
 +
 +impl PostgresPersistence {
 +    pub async fn schema_initialized(
@@ -48,27 +56,15 @@ index 000000000..6de807a48
 +            .get_connection("schema_initialized", &schema, &options.instance_name)
 +            .await?;
 +        if client
-+            .query_opt(sql::CHECK_LEASES_TABLE_SQL, &[])
++            .query_opt(CHECK_LEASES_TABLE_SQL, &[])
 +            .await?
 +            .is_none()
 +        {
 +            return Ok(false);
 +        }
-+        let mut params = vec![];
-+        if options.multitenant {
-+            params.push(&options.instance_name.raw as &(dyn ToSql + Sync));
-+        }
-+        if client
-+            .query_opt(sql::check_lease_row_exists(options.multitenant), &params)
-+            .await?
-+            .is_none()
-+        {
-+            return Ok(false);
-+        }
-+        Ok(client
-+            .query_opt(sql::check_newly_created(options.multitenant), &params)
-+            .await?
-+            .is_some())
++        let newly_created =
++            Self::check_newly_created(&client, options.multitenant, &options.instance_name).await?;
++        Ok(!newly_created)
 +    }
 +}
 +
@@ -124,8 +120,48 @@ index 000000000..6de807a48
 +        Ok(row.is_some())
 +    }
 +}
++
++impl PostgresConnection<'_> {
++    pub(super) async fn steal_lease(
++        &mut self,
++        ts: i64,
++        instance_name: &PgInstanceName,
++        multitenant: bool,
++        allow_read_only: bool,
++    ) -> anyhow::Result<i64> {
++        let instance_name = instance_name.raw.clone();
++        let rows = assert_send(self.with_retry(async move |client| {
++            let lock = client.prepare_cached(LOCK_LEASES_SQL).await?;
++            let acquire = client
++                .prepare_cached(sql::lease_acquire(multitenant, allow_read_only))
++                .await?;
++            let mut params = vec![Param::Ts(ts)];
++            if multitenant {
++                params.push(Param::Text(instance_name.clone()));
++            }
++            let ((), _, rows, ()) = futures::try_join!(
++                client.batch_execute("BEGIN"),
++                client.execute(&lock, &[]),
++                async {
++                    client
++                        .query_raw(&acquire, &params)
++                        .await?
++                        .try_collect::<Vec<_>>()
++                        .await
++                },
++                client.batch_execute("COMMIT"),
++            )?;
++            Ok(rows)
++        }))
++        .await?;
++        Ok(rows
++            .first()
++            .context("failed to acquire lease: leases row missing, or read-only")?
++            .get(0))
++    }
++}
 diff --git a/crates/postgres/src/lib.rs b/crates/postgres/src/lib.rs
-index 96af1f23e..22f1ca99f 100644
+index 96af1f23e..ec26143c7 100644
 --- a/crates/postgres/src/lib.rs
 +++ b/crates/postgres/src/lib.rs
 @@ -2,6 +2,7 @@
@@ -173,37 +209,18 @@ index 96af1f23e..22f1ca99f 100644
      #[fastrace::trace]
      async fn write<'a>(
          &self,
-@@ -1750,8 +1762,8 @@ struct Lease {
- }
- 
- impl Lease {
--    /// Acquire a lease. Blocks as long as there is another lease holder.
--    /// Returns any transient errors encountered.
-+    /// Acquire the lease, stealing it from any current holder unless the
-+    /// instance is marked read-only. Returns any transient errors encountered.
-     async fn acquire(
-         pool: Arc<ConvexPgPool>,
-         schema: &SchemaName,
-@@ -1770,29 +1782,30 @@ impl Lease {
+@@ -1770,23 +1782,10 @@ impl Lease {
              .as_nanos() as i64;
  
          tracing::info!("attempting to acquire lease");
 -        let stmt = client
-+        let instance_name_q = instance_name.clone();
-+        let row = client
-             .with_retry(async move |client| {
-+                let mut params = vec![&ts as &(dyn ToSql + Sync)];
-+                if multitenant {
-+                    params.push(&instance_name_q.raw as &(dyn ToSql + Sync));
-+                }
-                 client
+-            .with_retry(async move |client| {
+-                client
 -                    .prepare_cached(sql::lease_acquire(multitenant, allow_read_only))
-+                    .query_opt(
-+                        sql::lease_acquire(multitenant, allow_read_only),
-+                        params.as_slice(),
-+                    )
-                     .await
-             })
+-                    .await
+-            })
++        let ts = client
++            .steal_lease(ts, &instance_name, multitenant, allow_read_only)
              .await?;
 -        let mut params = vec![&ts as &(dyn ToSql + Sync)];
 -        if multitenant {
@@ -215,50 +232,19 @@ index 96af1f23e..22f1ca99f 100644
 -            rows_modified == 1,
 -            "failed to acquire lease: already acquired with higher timestamp, or read-only"
 -        );
--        tracing::info!("lease acquired with ts {}", ts);
--
-+        let acquired_ts: i64 = row
-+            .context("failed to acquire lease: leases row missing, or read-only")?
-+            .get(0);
-+        tracing::info!("lease acquired with ts {}", acquired_ts);
+         tracing::info!("lease acquired with ts {}", ts);
+ 
          timer.finish();
-         Ok(Self {
-             pool,
--            lease_ts: ts,
-+            lease_ts: acquired_ts,
-             schema: schema.clone(),
-             instance_name,
-             multitenant,
 diff --git a/crates/postgres/src/sql.rs b/crates/postgres/src/sql.rs
-index 269fb0371..ef5fd14ba 100644
+index 269fb0371..6595b529d 100644
 --- a/crates/postgres/src/sql.rs
 +++ b/crates/postgres/src/sql.rs
-@@ -700,6 +700,20 @@ pub const fn unset_read_only(multitenant: bool) -> &'static str {
-     )
- }
- 
-+pub(crate) const CHECK_LEASES_TABLE_SQL: &str =
-+    r"SELECT 1 WHERE to_regclass('@db_name.leases') IS NOT NULL";
-+
-+pub const fn check_lease_row_exists(multitenant: bool) -> &'static str {
-+    tableify!(
-+        multitenant,
-+        formatcp!(
-+            "SELECT 1 FROM @db_name.leases WHERE {column}={value} LIMIT 1",
-+            column = if multitenant { "instance_name" } else { "id" },
-+            value = if multitenant { "$1" } else { "1" }
-+        )
-+    )
-+}
-+
- // If this query returns a result, the lease is still valid and will remain so
- // until the end of the transaction.
- pub const fn lease_precond(multitenant: bool) -> &'static str {
-@@ -726,12 +740,12 @@ pub const fn advisory_lease_check(multitenant: bool) -> &'static str {
+@@ -726,12 +726,13 @@ pub const fn advisory_lease_check(multitenant: bool) -> &'static str {
      )
  }
  
 -// Acquire the lease unless acquire by someone with a higher timestamp.
++// Acquire the lease above the current holder's timestamp unless read-only.
  pub const fn lease_acquire(multitenant: bool, allow_read_only: bool) -> &'static str {
      tableify!(
          [multitenant, allow_read_only],

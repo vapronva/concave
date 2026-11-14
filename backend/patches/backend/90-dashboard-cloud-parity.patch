@@ -30,18 +30,17 @@ index 6c018be51..58d9cf3f6 100644
        {children}
 diff --git a/npm-packages/dashboard-common/src/features/health/components/ChartForInsight.tsx b/npm-packages/dashboard-common/src/features/health/components/ChartForInsight.tsx
 new file mode 100644
-index 000000000..7f0889886
+index 000000000..23aa837c6
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/health/components/ChartForInsight.tsx
-@@ -0,0 +1,265 @@
+@@ -0,0 +1,167 @@
 +import {
 +  useInsightsPeriod,
-+  HourlyCount,
 +  Insight,
++  utcHour,
 +} from "@common/features/health/lib/insights";
 +import { formatBytes, formatNumberCompact } from "@common/lib/format";
 +import { ChartTooltip } from "@common/elements/ChartTooltip";
-+import { format } from "date-fns";
 +import {
 +  ResponsiveContainer,
 +  XAxis,
@@ -52,295 +51,162 @@ index 000000000..7f0889886
 +  ReferenceLine,
 +  CartesianGrid,
 +} from "recharts";
-+import { LoadingTransition } from "@ui/Loading";
 +import { DeploymentTimes } from "@common/features/health/components/DeploymentTimes";
 +import { useDeploymentAuditLogs } from "@common/lib/useDeploymentAuditLog";
 +
 +export function ChartForInsight({ insight }: { insight: Insight }) {
-+  switch (insight.kind) {
-+    case "occFailedPermanently":
-+    case "occRetried":
-+      return <ChartOCC insight={insight} />;
-+    case "bytesReadLimit":
-+    case "bytesReadThreshold": {
-+      const bytesReadInsight = insight as Insight & {
-+        kind: "bytesReadLimit" | "bytesReadThreshold";
-+      };
-+      return <ChartCountBytesRead insight={bytesReadInsight} />;
-+    }
-+    case "documentsReadLimit":
-+    case "documentsReadThreshold": {
-+      const docsReadInsight = insight as Insight & {
-+        kind: "documentsReadLimit" | "documentsReadThreshold";
-+      };
-+      return <ChartCountDocumentsRead insight={docsReadInsight} />;
-+    }
-+    default: {
-+      insight satisfies never;
-+      return null;
-+    }
-+  }
-+}
-+
-+function InsightsLineChart({
-+  data,
-+  name,
-+}: {
-+  data: HourlyCount[];
-+  name: string;
-+}) {
++  const name = seriesName(insight);
++  const data = insight.details.hourlyCounts;
 +  const { from } = useInsightsPeriod();
 +  const auditLogs = useDeploymentAuditLogs(Date.parse(from), {
 +    actions: ["push_config", "push_config_with_components"],
 +  });
-+  const deploysByHour = auditLogs?.map((log) => {
-+    const creationDate = new Date(log._creationTime);
-+    const hour = `${creationDate.getUTCFullYear()}-${String(
-+      creationDate.getUTCMonth() + 1,
-+    ).padStart(2, "0")}-${String(creationDate.getUTCDate()).padStart(
-+      2,
-+      "0",
-+    )} ${String(creationDate.getUTCHours()).padStart(2, "0")}:00:00`;
-+    return { hour, timestamp: log._creationTime };
-+  });
++  const deploysByHour = auditLogs?.map((log) => ({
++    hour: utcHour(log._creationTime),
++    timestamp: log._creationTime,
++  }));
 +  const midnightTicks = data
-+    .filter((d) => new Date(toNumericUTCWithHour(d.hour)).getUTCHours() === 0)
++    .filter((d) => parseHour(d.hour).getUTCHours() === 0)
 +    .map((d) => d.hour);
 +  return (
-+    <div>
-+      <LoadingTransition
-+        loadingProps={{ fullHeight: false, className: "h-[200px] w-full" }}
-+      >
-+        <ResponsiveContainer height={200} width="100%">
-+          <LineChart
-+            data={data}
-+            style={{
++    <div className="animate-fadeInFromLoading">
++      <ResponsiveContainer height={200} width="100%">
++        <LineChart
++          data={data}
++          style={{
++            fontSize: 12,
++          }}
++        >
++          {deploysByHour?.map(({ hour, timestamp }) => (
++            <ReferenceLine
++              key={timestamp}
++              x={hour}
++              stroke="var(--brand-yellow)"
++              strokeDasharray="3 3"
++            />
++          ))}
++          <CartesianGrid
++            className="stroke-content-tertiary/30"
++            horizontal
++            strokeWidth={1}
++            syncWithTicks
++          />
++          <XAxis
++            dataKey="hour"
++            domain={["auto", "auto"]}
++            tickFormatter={dateLabel}
++            strokeWidth={1}
++            axisLine={{ className: "stroke-content-tertiary/30" }}
++            tickLine={false}
++            tick={{
 +              fontSize: 12,
++              fill: "var(--content-secondary)",
 +            }}
-+          >
-+            {deploysByHour?.map(({ hour, timestamp }) => (
-+              <ReferenceLine
-+                key={timestamp}
-+                x={hour}
-+                stroke="var(--brand-yellow)"
-+                strokeDasharray="3 3"
-+              />
-+            ))}
-+            <CartesianGrid
-+              className="stroke-content-tertiary/30"
-+              horizontal
-+              strokeWidth={1}
-+              syncWithTicks
-+            />
-+            <XAxis
-+              dataKey="hour"
-+              domain={["auto", "auto"]}
-+              tickFormatter={dateLabel}
-+              strokeWidth={1}
-+              axisLine={{ className: "stroke-content-tertiary/30" }}
-+              tickLine={false}
-+              tick={{
-+                fontSize: 12,
-+                fill: "var(--content-secondary)",
-+              }}
-+              {...(midnightTicks.length > 0 ? { ticks: midnightTicks } : {})}
-+            />
-+            <YAxis
-+              tick={{
-+                fontSize: 12,
-+                fill: "currentColor",
-+              }}
-+              axisLine={{ className: "stroke-content-tertiary/30" }}
-+              tickLine={false}
-+              tickFormatter={formatNumberCompact}
-+              width={48}
-+            />
-+            <Tooltip
-+              content={({ active, payload, label }) => {
-+                const deploymentTimes = deploysByHour
-+                  ?.filter((deploy) => deploy.hour === label)
-+                  .map((deploy) => format(new Date(deploy.timestamp), "Pp"));
-+                return (
-+                  <ChartTooltip
-+                    active={active}
-+                    payload={payload?.map((p) => ({
-+                      formattedValue: (
-+                        <div className="flex flex-col items-start">
-+                          <div>
-+                            {formatNumberCompact(p.payload.count)} {name}
-+                          </div>
-+                        </div>
-+                      ),
-+                      ...p,
-+                    }))}
-+                    extraContent={
-+                      <DeploymentTimes deploymentTimes={deploymentTimes} />
-+                    }
-+                    label={timeLabel(label)}
-+                  />
++            {...(midnightTicks.length > 0 ? { ticks: midnightTicks } : {})}
++          />
++          <YAxis
++            tick={{
++              fontSize: 12,
++              fill: "currentColor",
++            }}
++            axisLine={{ className: "stroke-content-tertiary/30" }}
++            tickLine={false}
++            tickFormatter={formatNumberCompact}
++            width={48}
++          />
++          <Tooltip
++            content={({ active, payload, label }) => {
++              const deploymentTimes = deploysByHour
++                ?.filter((deploy) => deploy.hour === label)
++                .map((deploy) =>
++                  new Date(deploy.timestamp).toLocaleString(undefined, {
++                    timeZone: "UTC",
++                    year: "numeric",
++                    month: "numeric",
++                    day: "numeric",
++                    hour: "numeric",
++                    minute: "2-digit",
++                  }),
 +                );
-+              }}
-+              animationDuration={100}
-+            />
-+            <Line
-+              isAnimationActive={false}
-+              className="stroke-chart-line-1"
-+              activeDot={{ r: 4, className: "stroke-none" }}
-+              name={name}
-+              dataKey="count"
-+              dot={false}
-+            />
-+          </LineChart>
-+        </ResponsiveContainer>
-+      </LoadingTransition>
++              return (
++                <ChartTooltip
++                  active={active}
++                  payload={payload?.map((p) => ({
++                    formattedValue: (
++                      <div className="flex flex-col items-start">
++                        <div>
++                          {formatNumberCompact(p.payload.count)} {name}
++                        </div>
++                      </div>
++                    ),
++                    ...p,
++                  }))}
++                  extraContent={
++                    <DeploymentTimes deploymentTimes={deploymentTimes} />
++                  }
++                  label={timeLabel(label)}
++                />
++              );
++            }}
++            animationDuration={100}
++          />
++          <Line
++            isAnimationActive={false}
++            className="stroke-chart-line-1"
++            activeDot={{ r: 4, className: "stroke-none" }}
++            name={name}
++            dataKey="count"
++            dot={false}
++          />
++        </LineChart>
++      </ResponsiveContainer>
 +    </div>
 +  );
 +}
 +
-+function ChartOCC({
-+  insight,
-+}: {
-+  insight: Insight & { kind: "occFailedPermanently" | "occRetried" };
-+}) {
-+  return (
-+    <InsightsLineChart
-+      data={insight.details.hourlyCounts}
-+      name={`write conflict ${insight.kind === "occFailedPermanently" ? "failures" : "retries"}`}
-+    />
-+  );
-+}
-+
-+function ChartCountBytesRead({
-+  insight,
-+}: {
-+  insight: Insight & { kind: "bytesReadLimit" | "bytesReadThreshold" };
-+}) {
-+  return (
-+    <InsightsLineChart
-+      data={insight.details.hourlyCounts}
-+      name={`function calls reading more than ${formatBytes(insight.details.threshold)}`}
-+    />
-+  );
-+}
-+
-+function ChartCountDocumentsRead({
-+  insight,
-+}: {
-+  insight: Insight & {
-+    kind: "documentsReadLimit" | "documentsReadThreshold";
-+  };
-+}) {
-+  return (
-+    <InsightsLineChart
-+      data={insight.details.hourlyCounts}
-+      name={`function calls reading more than ${formatNumberCompact(insight.details.threshold)} documents`}
-+    />
-+  );
-+}
-+
-+function toNumericUTCWithHour(dateString: string) {
-+  try {
-+    const [datePart, timePart] = dateString.split(" ");
-+    if (!datePart) return NaN;
-+    const [year, month, day] = datePart.split("-");
-+    const [hour = "0", minute = "0", second = "0"] = timePart
-+      ? timePart.split(":")
-+      : [];
-+    return Date.UTC(
-+      Number(year),
-+      Number(month) - 1,
-+      Number(day),
-+      Number(hour),
-+      Number(minute),
-+      Number(second),
-+    );
-+  } catch (error) {
-+    console.error("Error parsing date:", error, dateString);
-+    return NaN;
++function seriesName(insight: Insight) {
++  switch (insight.kind) {
++    case "occFailedPermanently":
++      return "write conflict failures";
++    case "occRetried":
++      return "write conflict retries";
++    case "bytesReadLimit":
++    case "bytesReadThreshold":
++      return `function calls reading more than ${formatBytes(insight.details.threshold)}`;
++    case "documentsReadLimit":
++    case "documentsReadThreshold":
++      return `function calls reading more than ${formatNumberCompact(insight.details.threshold)} documents`;
++    default: {
++      insight satisfies never;
++      return "";
++    }
 +  }
 +}
 +
-+const dateLabel = (value: string) => {
++function parseHour(hour: string) {
++  return new Date(`${hour.replace(" ", "T")}Z`);
++}
++
++function dateLabel(hour: string) {
++  return parseHour(hour).toLocaleDateString(undefined, { timeZone: "UTC" });
++}
++
++function timeLabel(value: string | number | undefined) {
 +  if (!value) {
 +    return "";
 +  }
-+  try {
-+    const timestamp = toNumericUTCWithHour(value);
-+    if (Number.isNaN(timestamp)) {
-+      console.warn("Invalid date for dateLabel:", value);
-+      return "Invalid date";
-+    }
-+    const date = new Date(timestamp);
-+    return date.toLocaleDateString(undefined, { timeZone: "UTC" });
-+  } catch (error) {
-+    console.error("Error in dateLabel:", error, value);
-+    return "Invalid date";
-+  }
-+};
-+
-+const timeLabel = (value: string | number | undefined) => {
-+  if (!value) {
-+    return "";
-+  }
-+  const stringValue = typeof value === "number" ? String(value) : value;
-+  try {
-+    const timestamp = toNumericUTCWithHour(stringValue);
-+    if (Number.isNaN(timestamp)) {
-+      console.warn("Invalid date for timeLabel:", stringValue);
-+      return "Invalid date";
-+    }
-+    const date = new Date(timestamp);
-+    const oneHourLater = new Date(date.getTime() + 60 * 60 * 1000);
-+    const hour = (d: Date) =>
-+      d.toLocaleTimeString(undefined, { timeZone: "UTC", hour: "numeric" });
-+    return `${date.toLocaleDateString(undefined, { timeZone: "UTC" })} ${hour(date)} – ${hour(oneHourLater)}`;
-+  } catch (error) {
-+    console.error("Error formatting date:", error, stringValue);
-+    return "Invalid date format";
-+  }
-+};
-diff --git a/npm-packages/dashboard-common/src/features/health/components/DeploymentSummary.tsx b/npm-packages/dashboard-common/src/features/health/components/DeploymentSummary.tsx
-index d9abe1961..2a9622ef2 100644
---- a/npm-packages/dashboard-common/src/features/health/components/DeploymentSummary.tsx
-+++ b/npm-packages/dashboard-common/src/features/health/components/DeploymentSummary.tsx
-@@ -215,6 +215,9 @@ export function DeploymentSummary({
-   // ViewData-gated). When the panel is hidden, round all corners of
-   // the main panel.
-   const showUrlPanel = deployment.kind === "cloud" && canViewData;
-+  const showPort = deployment.kind === "local" && deployment.port > 0;
-+  const showDetailsRow =
-+    deployment.kind === "cloud" || showPort || Boolean(lastPushEvent);
-   const mainPanelRounding = showUrlPanel
-     ? "rounded-l-lg rounded-tr-lg rounded-bl-none lg:flex-1 lg:rounded-tr-none lg:rounded-bl-lg"
-     : "rounded-lg";
-@@ -255,9 +258,19 @@ export function DeploymentSummary({
-           </div>
- 
-           {/* Row 2: Region/Port + Class + Version */}
--          <div className="flex flex-wrap items-center gap-6">
-+          <div
-+            className={
-+              showDetailsRow ? "flex flex-wrap items-center gap-6" : "hidden"
-+            }
-+          >
-             {/* Region + Class stay together when wrapping */}
--            <div className="flex items-center gap-6">
-+            <div
-+              className={
-+                deployment.kind === "cloud" || showPort
-+                  ? "flex items-center gap-6"
-+                  : "hidden"
-+              }
-+            >
-               {/* Region (cloud) or Port (local) */}
-               {deployment.kind === "cloud" && (
-                 <div className="flex items-center gap-2">
++  const date = parseHour(String(value));
++  const oneHourLater = new Date(date.getTime() + 60 * 60 * 1000);
++  const hour = (d: Date) =>
++    d.toLocaleTimeString(undefined, { timeZone: "UTC", hour: "numeric" });
++  return `${date.toLocaleDateString(undefined, { timeZone: "UTC" })} ${hour(date)} – ${hour(oneHourLater)}`;
++}
 diff --git a/npm-packages/dashboard-common/src/features/health/components/EventsForInsight.tsx b/npm-packages/dashboard-common/src/features/health/components/EventsForInsight.tsx
 new file mode 100644
-index 000000000..831a6c837
+index 000000000..20180d8e3
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/health/components/EventsForInsight.tsx
-@@ -0,0 +1,615 @@
+@@ -0,0 +1,440 @@
 +import { DeploymentInfoContext } from "@common/lib/deploymentContext";
 +import {
 +  Disclosure,
@@ -366,26 +232,6 @@ index 000000000..831a6c837
 +import { Link } from "@ui/Link";
 +import { useContext } from "react";
 +
-+type FormattedBytesReadEvent = {
-+  timestamp: string;
-+  id: string;
-+  requestId: string;
-+  executionId: string;
-+  totalCount: number;
-+  events: { tableName: string; count: number }[];
-+  status: string;
-+};
-+
-+type FormattedOccEvent = {
-+  timestamp: string;
-+  id: string;
-+  requestId: string;
-+  executionId: string;
-+  occDocumentId: string;
-+  occWriteSource: string;
-+  occRetryCount: number;
-+};
-+
 +export function EventsForInsight({ insight }: { insight: Insight }) {
 +  return (
 +    <div className="flex flex-col gap-2 overflow-y-hidden">
@@ -400,45 +246,20 @@ index 000000000..831a6c837
 +          </Tooltip>
 +        </div>
 +        <span className="text-xs text-content-secondary">
-+          Data may be behind by a couple hours.
++          Refreshes every 10 minutes.
 +        </span>
 +      </div>
 +      {(() => {
 +        switch (insight.kind) {
 +          case "occFailedPermanently":
-+            return (
-+              <OCCFailedEvents
-+                insight={insight as Insight & { kind: "occFailedPermanently" }}
-+              />
-+            );
 +          case "occRetried":
-+            return (
-+              <OCCRetriedEvents
-+                insight={insight as Insight & { kind: "occRetried" }}
-+              />
-+            );
++            return <OCCEvents insight={insight} />;
 +          case "bytesReadLimit":
 +          case "bytesReadThreshold":
-+            return (
-+              <BytesReadEvents
-+                insight={
-+                  insight as Insight & {
-+                    kind: "bytesReadLimit" | "bytesReadThreshold";
-+                  }
-+                }
-+              />
-+            );
++            return <ReadEvents insight={insight} unit="bytes" />;
 +          case "documentsReadLimit":
 +          case "documentsReadThreshold":
-+            return (
-+              <DocumentsReadEvents
-+                insight={
-+                  insight as Insight & {
-+                    kind: "documentsReadLimit" | "documentsReadThreshold";
-+                  }
-+                }
-+              />
-+            );
++            return <ReadEvents insight={insight} unit="documents" />;
 +          default: {
 +            insight satisfies never;
 +            return null;
@@ -452,7 +273,7 @@ index 000000000..831a6c837
 +const eventTimestampColumn = {
 +  header: (
 +    <div className="flex items-center gap-1">
-+      Timestamp{" "}
++      Timestamp (UTC){" "}
 +      <Tooltip tip="Events are sorted in reverse cronological order.">
 +        <CaretDownIcon />
 +      </Tooltip>
@@ -498,32 +319,57 @@ index 000000000..831a6c837
 +  tooltip: "Whether the function call ultimately succeeded or failed.",
 +  Column: EventStatus,
 +};
++const eventOccRetryCountColumn = {
++  header: "Retry #",
++  className: "flex w-16 items-center gap-1",
++  key: "occRetryCount",
++  tooltip:
++    "The number of previous attempts before this one to call the function.",
++  Column: EventOccRetryCount,
++};
++const readAmountColumns = {
++  bytes: {
++    header: "Bytes Read",
++    className: "w-60",
++    key: "bytesRead",
++    tooltip: "The number of bytes read by the function during this call.",
++    Column: BytesEventReadAmount,
++  },
++  documents: {
++    header: "Documents Read",
++    className: "w-60",
++    key: "bytesRead",
++    tooltip: "The number of documents read by the function during this call.",
++    Column: DocumentsEventReadAmount,
++  },
++};
 +
-+function BytesReadEvents({
++function ReadEvents({
 +  insight,
++  unit,
 +}: {
 +  insight: Insight & {
-+    kind: "bytesReadLimit" | "bytesReadThreshold";
++    kind:
++      | "bytesReadLimit"
++      | "bytesReadThreshold"
++      | "documentsReadLimit"
++      | "documentsReadThreshold";
 +  };
++  unit: "bytes" | "documents";
 +}) {
-+  const events = insight.details.recentEvents.map((event) => {
-+    const totalCount = event.calls.reduce(
-+      (sum, call) => sum + call.bytes_read,
-+      0,
-+    );
-+    return {
-+      timestamp: event.timestamp,
-+      id: event.id,
-+      requestId: event.request_id,
-+      executionId: event.id,
-+      totalCount,
-+      events: event.calls.map((call) => ({
-+        tableName: call.table_name,
-+        count: call.bytes_read,
-+      })),
-+      status: event.success ? "success" : "failure",
-+    } as FormattedBytesReadEvent;
-+  });
++  const field = unit === "bytes" ? "bytes_read" : "documents_read";
++  const events = insight.details.recentEvents.map((event) => ({
++    timestamp: event.timestamp,
++    id: event.id,
++    requestId: event.request_id,
++    executionId: event.id,
++    totalCount: event.calls.reduce((sum, call) => sum + call[field], 0),
++    events: event.calls.map((call) => ({
++      tableName: call.table_name,
++      count: call[field],
++    })),
++    status: event.success ? "success" : "failure",
++  }));
 +  return (
 +    <EventsTable
 +      events={events}
@@ -533,84 +379,26 @@ index 000000000..831a6c837
 +        eventFunctionCallColumn,
 +        eventTimestampColumn,
 +        eventStatusColumn,
-+        {
-+          header: "Bytes Read",
-+          className: "w-60",
-+          key: "bytesRead",
-+          tooltip: "The number of bytes read by the function during this call.",
-+          Column: BytesEventReadAmount,
-+        },
++        readAmountColumns[unit],
 +      ]}
 +    />
 +  );
 +}
 +
-+function DocumentsReadEvents({
++function OCCEvents({
 +  insight,
 +}: {
-+  insight: Insight & {
-+    kind: "documentsReadLimit" | "documentsReadThreshold";
-+  };
++  insight: Insight & { kind: "occFailedPermanently" | "occRetried" };
 +}) {
-+  const events = insight.details.recentEvents.map((event) => {
-+    const totalCount = event.calls.reduce(
-+      (sum, call) => sum + call.documents_read,
-+      0,
-+    );
-+    return {
-+      timestamp: event.timestamp,
-+      id: event.id,
-+      requestId: event.request_id,
-+      executionId: event.id,
-+      totalCount,
-+      events: event.calls.map((call) => ({
-+        tableName: call.table_name,
-+        count: call.documents_read,
-+      })),
-+      status: event.success ? "success" : "failure",
-+    } as FormattedBytesReadEvent;
-+  });
-+  return (
-+    <EventsTable
-+      events={events}
-+      insight={insight}
-+      columns={[
-+        eventRequestIdColumn,
-+        eventFunctionCallColumn,
-+        eventTimestampColumn,
-+        eventStatusColumn,
-+        {
-+          header: "Documents Read",
-+          className: "w-60",
-+          key: "bytesRead",
-+          tooltip:
-+            "The number of documents read by the function during this call.",
-+          Column: DocumentsEventReadAmount,
-+        },
-+      ]}
-+    />
-+  );
-+}
-+
-+function OCCFailedEvents({
-+  insight,
-+}: {
-+  insight: Insight & {
-+    kind: "occFailedPermanently";
-+  };
-+}) {
-+  const events = insight.details.recentEvents.map(
-+    (event) =>
-+      ({
-+        timestamp: event.timestamp,
-+        id: event.id,
-+        requestId: event.request_id,
-+        executionId: event.id,
-+        occDocumentId: event.occ_document_id,
-+        occWriteSource: event.occ_write_source,
-+        occRetryCount: event.occ_retry_count,
-+      }) as FormattedOccEvent,
-+  );
++  const events = insight.details.recentEvents.map((event) => ({
++    timestamp: event.timestamp,
++    id: event.id,
++    requestId: event.request_id,
++    executionId: event.id,
++    occDocumentId: event.occ_document_id,
++    occWriteSource: event.occ_write_source,
++    occRetryCount: event.occ_retry_count,
++  }));
 +  return (
 +    <EventsTable
 +      events={events}
@@ -621,48 +409,7 @@ index 000000000..831a6c837
 +        eventTimestampColumn,
 +        eventOccDocumentIdColumn,
 +        eventOccWriteSourceColumn,
-+      ]}
-+    />
-+  );
-+}
-+
-+function OCCRetriedEvents({
-+  insight,
-+}: {
-+  insight: Insight & {
-+    kind: "occRetried";
-+  };
-+}) {
-+  const events = insight.details.recentEvents.map(
-+    (event) =>
-+      ({
-+        timestamp: event.timestamp,
-+        id: event.id,
-+        requestId: event.request_id,
-+        executionId: event.id,
-+        occDocumentId: event.occ_document_id,
-+        occWriteSource: event.occ_write_source,
-+        occRetryCount: event.occ_retry_count,
-+      }) as FormattedOccEvent,
-+  );
-+  return (
-+    <EventsTable
-+      events={events}
-+      insight={insight}
-+      columns={[
-+        eventRequestIdColumn,
-+        eventFunctionCallColumn,
-+        eventTimestampColumn,
-+        eventOccDocumentIdColumn,
-+        eventOccWriteSourceColumn,
-+        {
-+          header: "Retry #",
-+          className: "flex w-16 items-center gap-1",
-+          key: "occRetryCount",
-+          tooltip:
-+            "The number of previous attempts before this one to call the function.",
-+          Column: EventOccRetryCount,
-+        },
++        ...(insight.kind === "occRetried" ? [eventOccRetryCountColumn] : []),
 +      ]}
 +    />
 +  );
@@ -733,16 +480,7 @@ index 000000000..831a6c837
 +function EventTimestamp({ event }: { event: { timestamp: string } }) {
 +  return (
 +    <div className="min-w-40">
-+      {(() => {
-+        try {
-+          const timestamp = event.timestamp.endsWith("Z")
-+            ? event.timestamp
-+            : `${event.timestamp}Z`;
-+          return new Date(timestamp).toLocaleString();
-+        } catch {
-+          return new Date(event.timestamp).toLocaleString();
-+        }
-+      })()}
++      {new Date(event.timestamp).toLocaleString(undefined, { timeZone: "UTC" })}
 +    </div>
 +  );
 +}
@@ -751,15 +489,7 @@ index 000000000..831a6c837
 +  return <div className="w-32 truncate">{event.executionId}</div>;
 +}
 +
-+function EventRequestId({
-+  event,
-+  insight: _insight,
-+  componentId: _componentId,
-+}: {
-+  event: { requestId: string };
-+  insight: Insight;
-+  componentId: ComponentId | undefined;
-+}) {
++function EventRequestId({ event }: { event: { requestId: string } }) {
 +  return (
 +    <div className="w-36">
 +      {event.requestId || (
@@ -777,7 +507,7 @@ index 000000000..831a6c837
 +  insight: Insight & {
 +    kind: "occFailedPermanently" | "occRetried";
 +  };
-+  event: FormattedOccEvent;
++  event: { occDocumentId?: string };
 +  componentId: ComponentId | undefined;
 +}) {
 +  const { deploymentsURI, captureMessage } = useContext(DeploymentInfoContext);
@@ -813,13 +543,9 @@ index 000000000..831a6c837
 +function EventOccWriteSource({
 +  insight,
 +  event,
-+  componentId: _componentId,
 +}: {
-+  insight: Insight & {
-+    kind: "occFailedPermanently" | "occRetried";
-+  };
-+  event: FormattedOccEvent;
-+  componentId: ComponentId | undefined;
++  insight: Insight;
++  event: { occWriteSource?: string };
 +}) {
 +  return (
 +    <div className="w-60 truncate">
@@ -844,41 +570,20 @@ index 000000000..831a6c837
 +  );
 +}
 +
-+function EventOccRetryCount({
-+  event,
-+  insight: _insight,
-+  componentId: _componentId,
-+}: {
-+  event: FormattedOccEvent;
-+  insight: Insight & { kind: "occRetried" };
-+  componentId: ComponentId | undefined;
-+}) {
++function EventOccRetryCount({ event }: { event: { occRetryCount: number } }) {
 +  return <div className="w-16">{event.occRetryCount}</div>;
 +}
 +
-+function BytesEventReadAmount({
-+  event,
-+  insight: _insight,
-+  componentId: _componentId,
-+}: {
-+  event: FormattedBytesReadEvent;
-+  insight: Insight & { kind: "bytesReadLimit" | "bytesReadThreshold" };
-+  componentId: ComponentId | undefined;
-+}) {
++type ReadAmountEvent = {
++  totalCount: number;
++  events: { tableName: string; count: number }[];
++};
++
++function BytesEventReadAmount({ event }: { event: ReadAmountEvent }) {
 +  return <EventReadAmount event={event} format={formatBytes} />;
 +}
 +
-+function DocumentsEventReadAmount({
-+  event,
-+  insight: _insight,
-+  componentId: _componentId,
-+}: {
-+  event: FormattedBytesReadEvent;
-+  insight: Insight & {
-+    kind: "documentsReadLimit" | "documentsReadThreshold";
-+  };
-+  componentId: ComponentId | undefined;
-+}) {
++function DocumentsEventReadAmount({ event }: { event: ReadAmountEvent }) {
 +  return <EventReadAmount event={event} format={formatNumberCompact} />;
 +}
 +
@@ -886,7 +591,7 @@ index 000000000..831a6c837
 +  event,
 +  format,
 +}: {
-+  event: FormattedBytesReadEvent;
++  event: ReadAmountEvent;
 +  format: (count: number) => string;
 +}) {
 +  return (
@@ -929,21 +634,7 @@ index 000000000..831a6c837
 +  );
 +}
 +
-+function EventStatus({
-+  event,
-+  insight: _insight,
-+  componentId: _componentId,
-+}: {
-+  event: FormattedBytesReadEvent;
-+  insight: Insight & {
-+    kind:
-+      | "bytesReadLimit"
-+      | "bytesReadThreshold"
-+      | "documentsReadLimit"
-+      | "documentsReadThreshold";
-+  };
-+  componentId: ComponentId | undefined;
-+}) {
++function EventStatus({ event }: { event: { status: string } }) {
 +  return (
 +    <div className="w-16">
 +      {event.status === "success" ? (
@@ -958,10 +649,10 @@ index 000000000..831a6c837
 +}
 diff --git a/npm-packages/dashboard-common/src/features/health/components/HealthWithInsights.tsx b/npm-packages/dashboard-common/src/features/health/components/HealthWithInsights.tsx
 new file mode 100644
-index 000000000..1b14178c7
+index 000000000..f8be4d7d3
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/health/components/HealthWithInsights.tsx
-@@ -0,0 +1,262 @@
+@@ -0,0 +1,252 @@
 +import React, {
 +  useState,
 +  useCallback,
@@ -978,15 +669,13 @@ index 000000000..1b14178c7
 +import { FunctionNameOption } from "@common/elements/FunctionNameOption";
 +import { HealthView } from "@common/features/health/components/HealthView";
 +import {
-+  Insight,
++  InsightsState,
 +  useInsights,
-+  useInsightsErrored,
 +  useInsightsPeriod,
-+  useIsInsightsNotConfigured,
++  insightsPeriodLabel,
 +  getInsightPageIdentifier,
 +  insightsViewUrl,
 +} from "@common/features/health/lib/insights";
-+import { DeploymentInfoContext } from "@common/lib/deploymentContext";
 +import { useRouter } from "next/router";
 +import { Link } from "@ui/Link";
 +import {
@@ -999,14 +688,11 @@ index 000000000..1b14178c7
 +import { InsightSummaryBreakdown } from "./InsightsSummaryBreakdown";
 +import { UrlObject } from "url";
 +
-+const InsightsContext = createContext<
-+  | {
-+      page: string;
-+      insights?: Insight[];
-+      selectedFunctions: MultiSelectValue;
-+    }
-+  | undefined
-+>(undefined);
++const InsightsContext = createContext<{
++  page: string;
++  state: InsightsState;
++  selectedFunctions: MultiSelectValue;
++}>({ page: "home", state: { kind: "loading" }, selectedFunctions: "all" });
 +
 +export function HealthWithInsights() {
 +  const { query, push } = useRouter();
@@ -1020,16 +706,14 @@ index 000000000..1b14178c7
 +  );
 +  const [selectedFunctions, setSelectedFunctions] =
 +    useState<MultiSelectValue>("all");
-+  const insights = useInsights();
++  const state = useInsights();
 +  const { from } = useInsightsPeriod();
-+  const { useCurrentDeployment, useCurrentTeam, useCurrentProject } =
-+    useContext(DeploymentInfoContext);
-+  const deployment = useCurrentDeployment();
-+  const team = useCurrentTeam();
-+  const project = useCurrentProject();
-+  const selectedInsight = insights?.find(
-+    (insight) => getInsightPageIdentifier(insight) === page,
-+  );
++  const selectedInsight =
++    state.kind === "ready"
++      ? state.insights.find(
++          (insight) => getInsightPageIdentifier(insight) === page,
++        )
++      : undefined;
 +  const header = (
 +    <div
 +      className={cn(
@@ -1082,14 +766,7 @@ index 000000000..1b14178c7
 +      {page === "insights" && (
 +        <div className="flex animate-fadeInFromLoading flex-wrap items-center gap-4">
 +          <span className="text-sm text-content-secondary">
-+            {new Date(from).toLocaleString([], {
-+              year: "numeric",
-+              month: "numeric",
-+              day: "numeric",
-+              hour: "numeric",
-+              minute: undefined,
-+            })}{" "}
-+            – Now
++            {insightsPeriodLabel(from)}
 +          </span>
 +          <div className="min-w-[20rem]">
 +            <MultiSelectCombobox
@@ -1116,10 +793,10 @@ index 000000000..1b14178c7
 +  const providerValue = useMemo(
 +    () => ({
 +      page,
-+      insights,
++      state,
 +      selectedFunctions,
 +    }),
-+    [page, insights, selectedFunctions],
++    [page, state, selectedFunctions],
 +  );
 +  return (
 +    <InsightsContext.Provider value={providerValue}>
@@ -1127,27 +804,21 @@ index 000000000..1b14178c7
 +        header={header}
 +        PagesWrapper={InsightsWrapper}
 +        PageWrapper={PageWrapper}
-+        deployment={deployment}
-+        teamSlug={team?.slug}
-+        projectSlug={project?.slug}
 +      />
 +    </InsightsContext.Provider>
 +  );
 +}
 +
 +function InsightsWrapper({ children }: { children: React.ReactNode }) {
-+  const { insights, selectedFunctions, page } =
-+    useContext(InsightsContext) || {};
++  const { state, selectedFunctions, page } = useContext(InsightsContext);
 +  const moduleFunctions = useModuleFunctions();
-+  const notConfigured = useIsInsightsNotConfigured();
-+  const errored = useInsightsErrored();
 +  return (
 +    <div
 +      className={cn(
 +        "flex min-h-0 grow gap-6 transition-transform duration-500 motion-reduce:transition-none",
 +        page === "home" && "translate-x-0",
 +        page === "insights" && "-translate-x-[calc(100%+1.5rem)]",
-+        page?.startsWith("insight:") && "-translate-x-[calc(200%+3rem)]",
++        page.startsWith("insight:") && "-translate-x-[calc(200%+3rem)]",
 +      )}
 +    >
 +      {children}
@@ -1160,34 +831,44 @@ index 000000000..1b14178c7
 +          className="scrollbar h-fit max-h-full w-full max-w-280 min-w-0 overflow-auto"
 +        >
 +          <InsightsSummary
-+            insights={insights?.filter((insight) => {
-+              if (!selectedFunctions) return true;
-+              if (selectedFunctions === "all") return true;
-+              return moduleFunctions.some(
-+                (mf) =>
-+                  mf.identifier === insight.functionId &&
-+                  (mf.componentPath ?? null) === insight.componentPath &&
-+                  selectedFunctions.includes(itemIdentifier(mf)),
-+              );
-+            })}
-+            notConfigured={notConfigured}
-+            errored={errored}
++            state={
++              state.kind === "ready" && selectedFunctions !== "all"
++                ? {
++                    kind: "ready",
++                    insights: state.insights.filter((insight) =>
++                      moduleFunctions.some(
++                        (mf) =>
++                          mf.identifier === insight.functionId &&
++                          (mf.componentPath ?? null) ===
++                            insight.componentPath &&
++                          selectedFunctions.includes(itemIdentifier(mf)),
++                      ),
++                    ),
++                  }
++                : state
++            }
 +          />
 +        </Sheet>
 +      </div>
 +      <div
-+        inert={!page?.startsWith("insight:")}
++        inert={!page.startsWith("insight:")}
 +        className="scrollbar flex w-full shrink-0 overflow-y-auto px-6"
 +      >
-+        <InsightSummaryBreakdown
-+          insight={
-+            insights
-+              ? insights.find(
-+                  (insight) => getInsightPageIdentifier(insight) === page,
-+                ) || null
-+              : undefined
-+          }
-+        />
++        {state.kind === "notConfigured" || state.kind === "error" ? (
++          <Sheet padding={false} className="h-fit w-full">
++            <InsightsSummary state={state} />
++          </Sheet>
++        ) : (
++          <InsightSummaryBreakdown
++            insight={
++              state.kind === "ready"
++                ? (state.insights.find(
++                    (insight) => getInsightPageIdentifier(insight) === page,
++                  ) ?? null)
++                : undefined
++            }
++          />
++        )}
 +      </div>
 +    </div>
 +  );
@@ -1200,7 +881,7 @@ index 000000000..1b14178c7
 +      shallow: true,
 +    });
 +  }, [push]);
-+  const { page } = useContext(InsightsContext) || {};
++  const { page } = useContext(InsightsContext);
 +  return (
 +    <div
 +      className="scrollbar flex w-full shrink-0 grow flex-col overflow-y-auto px-6 pb-4"
@@ -1226,13 +907,13 @@ index 000000000..1b14178c7
 +}
 diff --git a/npm-packages/dashboard-common/src/features/health/components/InsightsSummary.tsx b/npm-packages/dashboard-common/src/features/health/components/InsightsSummary.tsx
 new file mode 100644
-index 000000000..12e644d62
+index 000000000..42f961fc5
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/health/components/InsightsSummary.tsx
-@@ -0,0 +1,109 @@
+@@ -0,0 +1,99 @@
 +import {
 +  getInsightPageIdentifier,
-+  Insight,
++  InsightsState,
 +} from "@common/features/health/lib/insights";
 +import { Loading } from "@ui/Loading";
 +import { EmptySection } from "@common/elements/EmptySection";
@@ -1243,22 +924,13 @@ index 000000000..12e644d62
 +} from "@radix-ui/react-icons";
 +import { InsightsSummaryListItem } from "./InsightsSummaryListItem";
 +
-+export function InsightsSummary({
-+  insights,
-+  notConfigured = false,
-+  errored = false,
-+}: {
-+  insights: Insight[] | undefined;
-+  notConfigured?: boolean;
-+  errored?: boolean;
-+}) {
-+  if (notConfigured) {
++export function InsightsSummary({ state }: { state: InsightsState }) {
++  if (state.kind === "notConfigured") {
 +    return (
 +      <div className="py-16">
 +        <EmptySection
 +          Icon={InfoCircledIcon}
 +          header="Insights are not configured"
-+          color="none"
 +          sheet={false}
 +          body="Insights are not configured for this deployment."
 +          learnMoreButton={{
@@ -1269,7 +941,7 @@ index 000000000..12e644d62
 +      </div>
 +    );
 +  }
-+  if (errored) {
++  if (state.kind === "error") {
 +    return (
 +      <div className="py-16">
 +        <EmptySection
@@ -1286,8 +958,7 @@ index 000000000..12e644d62
 +      </div>
 +    );
 +  }
-+  const hasAnyInsights = !insights || insights.length > 0;
-+  if (!hasAnyInsights) {
++  if (state.kind === "ready" && state.insights.length === 0) {
 +    return (
 +      <div className="py-16">
 +        <EmptySection
@@ -1312,17 +983,16 @@ index 000000000..12e644d62
 +        <p className="min-w-60">Problem</p>
 +        <p className="min-w-60">Chart</p>
 +      </div>
-+      {insights && (
++      {state.kind === "ready" ? (
 +        <div className="flex w-full animate-fadeInFromLoading flex-col">
-+          {insights.map((insight) => (
++          {state.insights.map((insight) => (
 +            <InsightsSummaryListItem
 +              key={getInsightPageIdentifier(insight)}
 +              insight={insight}
 +            />
 +          ))}
 +        </div>
-+      )}
-+      {!insights &&
++      ) : (
 +        Array.from({ length: 5 }, (_, i) => `loading-insight-${i}`).map(
 +          (key) => (
 +            <div
@@ -1335,7 +1005,8 @@ index 000000000..12e644d62
 +              <Loading className="h-9 w-60" />
 +            </div>
 +          ),
-+        )}
++        )
++      )}
 +    </div>
 +  );
 +}
@@ -1493,10 +1164,10 @@ index 000000000..0c7b9dd40
 +};
 diff --git a/npm-packages/dashboard-common/src/features/health/components/ProblemForInsight.tsx b/npm-packages/dashboard-common/src/features/health/components/ProblemForInsight.tsx
 new file mode 100644
-index 000000000..886e236ff
+index 000000000..87ed3881a
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/health/components/ProblemForInsight.tsx
-@@ -0,0 +1,252 @@
+@@ -0,0 +1,220 @@
 +import {
 +  InfoCircledIcon,
 +  QuestionMarkCircledIcon,
@@ -1515,30 +1186,26 @@ index 000000000..886e236ff
 +}) {
 +  switch (insight.kind) {
 +    case "bytesReadLimit":
-+    case "bytesReadThreshold": {
-+      const bytesReadInsight = insight as Insight & {
-+        kind: "bytesReadLimit" | "bytesReadThreshold";
-+      };
++    case "bytesReadThreshold":
 +      return (
-+        <BytesReadCountProblem insight={bytesReadInsight} explain={explain} />
++        <ReadCountProblem
++          kind="bytes"
++          details={insight.details}
++          explain={explain}
++        />
 +      );
-+    }
 +    case "documentsReadLimit":
-+    case "documentsReadThreshold": {
-+      const docsReadInsight = insight as Insight & {
-+        kind: "documentsReadLimit" | "documentsReadThreshold";
-+      };
++    case "documentsReadThreshold":
 +      return (
-+        <DocsReadCountProblem insight={docsReadInsight} explain={explain} />
++        <ReadCountProblem
++          kind="documents"
++          details={insight.details}
++          explain={explain}
++        />
 +      );
-+    }
 +    case "occFailedPermanently":
-+    case "occRetried": {
-+      const occInsight = insight as Insight & {
-+        kind: "occFailedPermanently" | "occRetried";
-+      };
-+      return <OCCProblem insight={occInsight} explain={explain} />;
-+    }
++    case "occRetried":
++      return <OCCProblem insight={insight} explain={explain} />;
 +    default: {
 +      insight satisfies never;
 +      return null;
@@ -1631,24 +1298,22 @@ index 000000000..886e236ff
 +  );
 +}
 +
-+function BytesReadCountProblem({
-+  insight,
++function ReadCountProblem({
++  kind,
++  details,
 +  explain,
 +}: {
-+  insight: Insight & { kind: "bytesReadLimit" | "bytesReadThreshold" };
++  kind: "bytes" | "documents";
++  details: { limit: number; count: number };
 +  explain: boolean;
 +}) {
 +  return (
 +    <div className="flex flex-col items-start gap-1">
-+      <ReadLimitProblem
-+        explain={explain}
-+        kind="bytes"
-+        limit={insight.details.limit}
-+      />
++      <ReadLimitProblem explain={explain} kind={kind} limit={details.limit} />
 +      {!explain && (
 +        <span className="text-xs text-content-secondary">
-+          {formatNumberCompact(insight.details.count)} function call
-+          {insight.details.count === 1 ? "" : "s"}
++          {formatNumberCompact(details.count)} function call
++          {details.count === 1 ? "" : "s"}
 +        </span>
 +      )}
 +    </div>
@@ -1723,43 +1388,16 @@ index 000000000..886e236ff
 +    </div>
 +  );
 +}
-+
-+function DocsReadCountProblem({
-+  insight,
-+  explain,
-+}: {
-+  insight: Insight & {
-+    kind: "documentsReadLimit" | "documentsReadThreshold";
-+  };
-+  explain: boolean;
-+}) {
-+  return (
-+    <div className="flex flex-col items-start gap-1">
-+      <ReadLimitProblem
-+        explain={explain}
-+        kind="documents"
-+        limit={insight.details.limit}
-+      />
-+      {!explain && (
-+        <span className="text-xs text-content-secondary">
-+          {formatNumberCompact(insight.details.count)} function call
-+          {insight.details.count === 1 ? "" : "s"}
-+        </span>
-+      )}
-+    </div>
-+  );
-+}
 diff --git a/npm-packages/dashboard-common/src/features/health/components/SmallInsightsSummary.tsx b/npm-packages/dashboard-common/src/features/health/components/SmallInsightsSummary.tsx
 new file mode 100644
-index 000000000..c40a897a6
+index 000000000..78f581fdf
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/health/components/SmallInsightsSummary.tsx
-@@ -0,0 +1,100 @@
+@@ -0,0 +1,92 @@
 +import {
++  insightsPeriodLabel,
 +  useInsights,
-+  useInsightsErrored,
 +  useInsightsPeriod,
-+  useIsInsightsNotConfigured,
 +} from "@common/features/health/lib/insights";
 +import { Button } from "@ui/Button";
 +import { Sheet } from "@ui/Sheet";
@@ -1772,26 +1410,24 @@ index 000000000..c40a897a6
 +import { InsightsSummary } from "./InsightsSummary";
 +import { severityForInsightKind } from "./InsightsSummaryListItem";
 +
++const summaryText = {
++  ready: "No issues",
++  notConfigured: "Not configured",
++  error: "Could not load",
++};
++
 +export function SmallInsightsSummary({ onViewAll }: { onViewAll: () => void }) {
-+  const insights = useInsights();
-+  const notConfigured = useIsInsightsNotConfigured();
-+  const errored = useInsightsErrored();
++  const state = useInsights();
 +  const { from } = useInsightsPeriod();
-+  const summaryText = errored
-+    ? "Could not load"
-+    : notConfigured
-+      ? "Not configured"
-+      : "No issues";
-+  const criticalCount =
-+    insights?.filter(
-+      (insight) => severityForInsightKind[insight.kind] === "error",
-+    ).length ?? 0;
-+  const warningCount =
-+    insights?.filter(
-+      (insight) => severityForInsightKind[insight.kind] === "warning",
-+    ).length ?? 0;
++  const insights = state.kind === "ready" ? state.insights : [];
++  const criticalCount = insights.filter(
++    (insight) => severityForInsightKind[insight.kind] === "error",
++  ).length;
++  const warningCount = insights.filter(
++    (insight) => severityForInsightKind[insight.kind] === "warning",
++  ).length;
 +  const closedDescription =
-+    insights !== undefined || errored || notConfigured ? (
++    state.kind === "loading" ? null : (
 +      <span className="flex animate-fadeInFromLoading items-center gap-3 text-xs text-content-secondary">
 +        {criticalCount > 0 && (
 +          <span className="flex items-center gap-1 text-content-error">
@@ -1805,9 +1441,9 @@ index 000000000..c40a897a6
 +            {warningCount} warning{warningCount !== 1 ? "s" : ""}
 +          </span>
 +        )}
-+        {criticalCount === 0 && warningCount === 0 && summaryText}
++        {criticalCount === 0 && warningCount === 0 && summaryText[state.kind]}
 +      </span>
-+    ) : null;
++    );
 +  return (
 +    <DisclosureSection
 +      id="insights"
@@ -1821,24 +1457,19 @@ index 000000000..c40a897a6
 +      >
 +        <div className="flex items-center justify-between p-2">
 +          <span className="text-xs text-content-secondary">
-+            {new Date(from).toLocaleString([], {
-+              year: "numeric",
-+              month: "numeric",
-+              day: "numeric",
-+              hour: "numeric",
-+              minute: undefined,
-+            })}{" "}
-+            – Now
++            {insightsPeriodLabel(from)}
 +          </span>
 +        </div>
 +        <InsightsSummary
-+          insights={insights?.slice(0, 5)}
-+          notConfigured={notConfigured}
-+          errored={errored}
++          state={
++            state.kind === "ready"
++              ? { kind: "ready", insights: state.insights.slice(0, 5) }
++              : state
++          }
 +        />
 +      </Sheet>
 +      <div className="flex">
-+        {insights && insights.length > 0 && (
++        {insights.length > 0 && (
 +          <Button
 +            variant="neutral"
 +            className="m-auto mt-2 w-fit gap-1 hover:bg-background-tertiary"
@@ -1857,66 +1488,39 @@ index 000000000..c40a897a6
 +}
 diff --git a/npm-packages/dashboard-common/src/features/health/components/SparklineForInsight.tsx b/npm-packages/dashboard-common/src/features/health/components/SparklineForInsight.tsx
 new file mode 100644
-index 000000000..0d352c081
+index 000000000..cb49b1e86
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/health/components/SparklineForInsight.tsx
-@@ -0,0 +1,66 @@
+@@ -0,0 +1,39 @@
 +import { Insight } from "@common/features/health/lib/insights";
-+
-+import { LoadingTransition } from "@ui/Loading";
-+
-+export function SparklineForInsight({ insight }: { insight: Insight }) {
-+  switch (insight.kind) {
-+    case "bytesReadLimit":
-+    case "bytesReadThreshold":
-+    case "documentsReadLimit":
-+    case "documentsReadThreshold":
-+    case "occFailedPermanently":
-+    case "occRetried":
-+      return (
-+        <Sparkline data={insight.details.hourlyCounts.map((b) => b.count)} />
-+      );
-+    default: {
-+      insight satisfies never;
-+      return null;
-+    }
-+  }
-+}
 +
 +const HEIGHT = 36;
 +const WIDTH = 240;
 +
-+function Sparkline({ data }: { data: number[] }) {
++export function SparklineForInsight({ insight }: { insight: Insight }) {
++  const points = toPoints(insight.details.hourlyCounts.map((b) => b.count));
 +  return (
-+    <LoadingTransition
-+      loadingProps={{
-+        fullHeight: false,
-+        className: "h-[36px] w-60",
-+      }}
++    <svg
++      className="block animate-fadeInFromLoading"
++      width={WIDTH}
++      height={HEIGHT}
++      viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
++      aria-hidden
 +    >
-+      {data.length > 1 ? (
-+        <svg
-+          width={WIDTH}
-+          height={HEIGHT}
-+          viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
-+          aria-hidden
-+        >
-+          <polygon
-+            fill="var(--chart-line-1)"
-+            fillOpacity={0.1}
-+            points={`0,${HEIGHT} ${toPoints(data)} ${WIDTH},${HEIGHT}`}
-+          />
-+          <polyline
-+            fill="none"
-+            stroke="var(--chart-line-1)"
-+            strokeWidth={1}
-+            strokeLinejoin="round"
-+            strokeLinecap="round"
-+            points={toPoints(data)}
-+          />
-+        </svg>
-+      ) : null}
-+    </LoadingTransition>
++      <polygon
++        fill="var(--chart-line-1)"
++        fillOpacity={0.1}
++        points={`0,${HEIGHT} ${points} ${WIDTH},${HEIGHT}`}
++      />
++      <polyline
++        fill="none"
++        stroke="var(--chart-line-1)"
++        strokeWidth={1}
++        strokeLinejoin="round"
++        strokeLinecap="round"
++        points={points}
++      />
++    </svg>
 +  );
 +}
 +
@@ -1929,22 +1533,22 @@ index 000000000..0d352c081
 +}
 diff --git a/npm-packages/dashboard-common/src/features/health/lib/insights.ts b/npm-packages/dashboard-common/src/features/health/lib/insights.ts
 new file mode 100644
-index 000000000..0229d07b4
+index 000000000..203e71105
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/health/lib/insights.ts
-@@ -0,0 +1,210 @@
+@@ -0,0 +1,272 @@
 +import { UrlObject } from "url";
-+import {
-+  rootComponentPath,
-+  useUsageQuery,
-+} from "@common/features/health/lib/usage";
++import { useMemo } from "react";
++import useSWR, { BareFetcher } from "swr";
++import { deploymentAuthMiddleware } from "@common/lib/deploymentApi";
++import { deploymentFetch } from "@common/lib/fetching";
 +import { useModuleFunctions } from "@common/lib/functions/FunctionsProvider";
-+import { PermissionsContext } from "@common/lib/deploymentContext";
-+import { useContext } from "react";
 +
 +const HOUR_MS = 60 * 60 * 1000;
 +const DAY_MS = 24 * HOUR_MS;
 +const PERIOD_MS = 72 * HOUR_MS;
++const REFRESH_INTERVAL_MS = 10 * 60 * 1000;
++const ROOT_COMPONENT_PATH = "-root-component-";
 +
 +export function useInsightsPeriod() {
 +  const now = Date.now();
@@ -1955,100 +1559,140 @@ index 000000000..0229d07b4
 +  };
 +}
 +
-+export type HourlyCount = {
++export function insightsPeriodLabel(from: string) {
++  const start = new Date(from).toLocaleString([], {
++    year: "numeric",
++    month: "numeric",
++    day: "numeric",
++    hour: "numeric",
++    timeZone: "UTC",
++    timeZoneName: "short",
++  });
++  return `${start} – Now`;
++}
++
++export function utcHour(ms: number) {
++  return `${new Date(ms).toISOString().slice(0, 13).replace("T", " ")}:00:00`;
++}
++
++type HourlyCount = {
 +  hour: string;
 +  count: number;
 +};
 +
-+type OccRecentEvent = {
-+  timestamp: string;
-+  id: string;
-+  request_id: string;
-+  occ_document_id?: string;
-+  occ_write_source?: string;
-+  occ_retry_count: number;
++type OccDetails = {
++  occCalls: number;
++  occTableName?: string;
++  hourlyCounts: HourlyCount[];
++  recentEvents: {
++    timestamp: string;
++    id: string;
++    request_id: string;
++    occ_document_id?: string;
++    occ_write_source?: string;
++    occ_retry_count: number;
++  }[];
 +};
 +
-+type BytesReadRecentEvent = {
-+  timestamp: string;
-+  id: string;
-+  request_id: string;
-+  calls: { table_name: string; bytes_read: number; documents_read: number }[];
-+  success: boolean;
++type ReadDetails = {
++  count: number;
++  limit: number;
++  threshold: number;
++  hourlyCounts: HourlyCount[];
++  recentEvents: {
++    timestamp: string;
++    id: string;
++    request_id: string;
++    calls: { table_name: string; bytes_read: number; documents_read: number }[];
++    success: boolean;
++  }[];
 +};
 +
-+export type Insight = { functionId: string; componentPath: string | null } & (
-+  | {
-+      kind: "occRetried" | "occFailedPermanently";
-+      details: {
-+        occCalls: number;
-+        occTableName?: string;
-+        hourlyCounts: HourlyCount[];
-+        recentEvents: OccRecentEvent[];
-+      };
-+    }
-+  | {
-+      kind:
-+        | "bytesReadLimit"
-+        | "bytesReadThreshold"
-+        | "documentsReadLimit"
-+        | "documentsReadThreshold";
-+      details: {
-+        count: number;
-+        limit: number;
-+        threshold: number;
-+        hourlyCounts: HourlyCount[];
-+        recentEvents: BytesReadRecentEvent[];
-+      };
-+    }
-+);
++type InsightDetails = {
++  occRetried: OccDetails;
++  occFailedPermanently: OccDetails;
++  bytesReadLimit: ReadDetails;
++  bytesReadThreshold: ReadDetails;
++  documentsReadLimit: ReadDetails;
++  documentsReadThreshold: ReadDetails;
++};
 +
-+const insightKinds = new Set<Insight["kind"]>([
-+  "occRetried",
-+  "occFailedPermanently",
-+  "bytesReadLimit",
-+  "bytesReadThreshold",
-+  "documentsReadLimit",
-+  "documentsReadThreshold",
-+]);
++export type Insight = {
++  [K in keyof InsightDetails]: {
++    kind: K;
++    functionId: string;
++    componentPath: string | null;
++    details: InsightDetails[K];
++  };
++}[keyof InsightDetails];
 +
-+function padAndSortHourlyData(
-+  hourlyCounts: HourlyCount[],
-+  periodStart: string,
-+): HourlyCount[] {
-+  const currentTime = new Date();
-+  const hourToCountMap = new Map<string, number>();
-+  hourlyCounts.forEach((item) => {
-+    hourToCountMap.set(item.hour, item.count);
-+  });
-+  const result: HourlyCount[] = [];
-+  const currentDate = new Date(periodStart);
-+  while (currentDate < currentTime) {
-+    const year = currentDate.getUTCFullYear();
-+    const month = String(currentDate.getUTCMonth() + 1).padStart(2, "0");
-+    const day = String(currentDate.getUTCDate()).padStart(2, "0");
-+    const hour = String(currentDate.getUTCHours()).padStart(2, "0");
-+    const formattedHour = `${year}-${month}-${day} ${hour}:00:00`;
-+    const count = hourToCountMap.get(formattedHour) ?? 0;
-+    result.push({
-+      hour: formattedHour,
-+      count,
-+    });
-+    currentDate.setUTCHours(currentDate.getUTCHours() + 1);
-+  }
-+  return result;
++type ReadInsight = Extract<Insight, { details: ReadDetails }>;
++
++export type InsightsState =
++  | { kind: "loading" }
++  | { kind: "notConfigured" }
++  | { kind: "error" }
++  | { kind: "ready"; insights: Insight[] };
++
++const insightOrder: Record<Insight["kind"], number> = {
++  documentsReadLimit: 0,
++  bytesReadLimit: 1,
++  occFailedPermanently: 2,
++  documentsReadThreshold: 3,
++  bytesReadThreshold: 4,
++  occRetried: 5,
++};
++
++function isInsightKind(kind: string): kind is Insight["kind"] {
++  return Object.hasOwn(insightOrder, kind);
 +}
 +
-+function useInsightsUsage() {
-+  const period = useInsightsPeriod();
-+  const result = useUsageQuery({
-+    period: {
-+      from: period.from.split("T")[0],
-+      to: period.to.split("T")[0],
++function isReadInsight(insight: Insight): insight is ReadInsight {
++  return (
++    insight.kind !== "occRetried" && insight.kind !== "occFailedPermanently"
++  );
++}
++
++function mergeReadInsights(a: ReadInsight, b: ReadInsight) {
++  return {
++    ...a,
++    details: {
++      ...a.details,
++      count: a.details.count + b.details.count,
++      hourlyCounts: a.details.hourlyCounts.map(({ hour, count }, i) => ({
++        hour,
++        count: count + b.details.hourlyCounts[i].count,
++      })),
++      recentEvents: [...a.details.recentEvents, ...b.details.recentEvents].sort(
++        (x, y) => Date.parse(y.timestamp) - Date.parse(x.timestamp),
++      ),
 +    },
-+  });
-+  return { period, ...result };
++  };
 +}
++
++function padHourlyCounts(
++  hourlyCounts: HourlyCount[],
++  from: string,
++  until: number,
++) {
++  const counts = new Map(hourlyCounts.map(({ hour, count }) => [hour, count]));
++  const padded: HourlyCount[] = [];
++  for (let ms = Date.parse(from); ms < until; ms += HOUR_MS) {
++    const hour = utcHour(ms);
++    padded.push({ hour, count: counts.get(hour) ?? 0 });
++  }
++  return padded;
++}
++
++const fetchUsage: BareFetcher<string[][]> = async (
++  key: readonly [string, ...unknown[]],
++) => {
++  const data: string[][] | undefined = await deploymentFetch(key);
++  if (data === undefined) {
++    throw new Error("Insights request failed");
++  }
++  return data;
++};
 +
 +function isInsightsNotConfiguredError(error: unknown): boolean {
 +  const status =
@@ -2062,71 +1706,93 @@ index 000000000..0229d07b4
 +  );
 +}
 +
-+export function useInsights(): Insight[] | undefined {
++export function useInsights(): InsightsState {
++  const { from, to } = useInsightsPeriod();
++  const query = new URLSearchParams({
++    from: from.split("T")[0],
++    to: to.split("T")[0],
++  });
++  const { data, error } = useSWR<string[][], unknown>(
++    `/api/insights/usage/query?${query.toString()}`,
++    fetchUsage,
++    {
++      use: [deploymentAuthMiddleware],
++      refreshInterval: REFRESH_INTERVAL_MS,
++      revalidateOnFocus: false,
++    },
++  );
 +  const moduleFunctions = useModuleFunctions();
-+  const { useIsOperationAllowed } = useContext(PermissionsContext);
-+  const canViewData = useIsOperationAllowed("ViewData");
-+  const { period, data: insightsData, error } = useInsightsUsage();
-+  if (error || !insightsData) {
-+    return undefined;
-+  }
-+  const insights = insightsData.flatMap((d) => {
-+    const kind = d[0] as Insight["kind"];
-+    if (!insightKinds.has(kind)) {
-+      return [];
++  const padUntil = Math.ceil(Date.now() / HOUR_MS) * HOUR_MS;
++  return useMemo(() => {
++    if (error) {
++      return {
++        kind: isInsightsNotConfiguredError(error) ? "notConfigured" : "error",
++      };
 +    }
-+    let parsedDetails: Record<string, unknown>;
-+    try {
-+      parsedDetails = JSON.parse(d[3]);
-+    } catch {
-+      return [];
++    if (!data) {
++      return { kind: "loading" };
 +    }
-+    if (Array.isArray(parsedDetails.hourlyCounts)) {
-+      parsedDetails.hourlyCounts = padAndSortHourlyData(
-+        parsedDetails.hourlyCounts,
-+        period.from,
++    const insights = data.flatMap(
++      ([kind, functionId, componentPath, rawDetails]) => {
++        if (!isInsightKind(kind)) {
++          return [];
++        }
++        let details: Insight["details"];
++        try {
++          details = JSON.parse(rawDetails);
++        } catch {
++          return [];
++        }
++        return [
++          {
++            kind,
++            functionId,
++            componentPath:
++              componentPath === ROOT_COMPONENT_PATH ? null : componentPath,
++            details: {
++              ...details,
++              hourlyCounts: padHourlyCounts(
++                details.hourlyCounts,
++                from,
++                padUntil,
++              ),
++            },
++          } as Insight,
++        ];
++      },
++    );
++    const hasFunction = (functionId: string, componentPath: string | null) =>
++      moduleFunctions.some(
++        (mf) =>
++          mf.identifier === functionId &&
++          (mf.componentPath ?? null) === componentPath,
++      );
++    const attributed = new Map<string, Insight>();
++    for (const insight of insights) {
++      const matched = hasFunction(insight.functionId, insight.componentPath)
++        ? insight
++        : isReadInsight(insight) && hasFunction(insight.functionId, null)
++          ? { ...insight, componentPath: null }
++          : null;
++      if (!matched) {
++        continue;
++      }
++      const id = getInsightPageIdentifier(matched);
++      const prior = attributed.get(id);
++      attributed.set(
++        id,
++        prior && isReadInsight(prior) && isReadInsight(matched)
++          ? mergeReadInsights(prior, matched)
++          : matched,
 +      );
 +    }
-+    return [
-+      {
-+        kind,
-+        functionId: d[1],
-+        componentPath: d[2] === rootComponentPath ? null : d[2],
-+        details: parsedDetails,
-+      } as Insight,
-+    ];
-+  });
-+  insights.sort((a, b) => {
-+    const order: Record<Insight["kind"], number> = {
-+      documentsReadLimit: 0,
-+      bytesReadLimit: 1,
-+      occFailedPermanently: 2,
-+      documentsReadThreshold: 3,
-+      bytesReadThreshold: 4,
-+      occRetried: 5,
++    return {
++      kind: "ready",
++      insights: [...attributed.values()].sort(
++        (a, b) => insightOrder[a.kind] - insightOrder[b.kind],
++      ),
 +    };
-+    return order[a.kind] - order[b.kind];
-+  });
-+  if (!canViewData) {
-+    return insights;
-+  }
-+  return insights.filter((insight) =>
-+    moduleFunctions.some(
-+      (mf) =>
-+        mf.identifier === insight.functionId &&
-+        (mf.componentPath ?? null) === insight.componentPath,
-+    ),
-+  );
-+}
-+
-+export function useIsInsightsNotConfigured(): boolean {
-+  const { error } = useInsightsUsage();
-+  return isInsightsNotConfiguredError(error);
-+}
-+
-+export function useInsightsErrored(): boolean {
-+  const { error } = useInsightsUsage();
-+  return Boolean(error) && !isInsightsNotConfiguredError(error);
++  }, [data, error, from, padUntil, moduleFunctions]);
 +}
 +
 +export function getInsightPageIdentifier(insight: Insight): string {
@@ -2143,52 +1809,12 @@ index 000000000..0229d07b4
 +export function insightsViewUrl(view?: string): UrlObject {
 +  return { pathname: "/", query: view ? { view } : {} };
 +}
-diff --git a/npm-packages/dashboard-common/src/features/health/lib/usage.ts b/npm-packages/dashboard-common/src/features/health/lib/usage.ts
-new file mode 100644
-index 000000000..81d72d69e
---- /dev/null
-+++ b/npm-packages/dashboard-common/src/features/health/lib/usage.ts
-@@ -0,0 +1,34 @@
-+import useSWR, { BareFetcher } from "swr";
-+import { deploymentAuthMiddleware } from "@common/lib/deploymentApi";
-+import { deploymentFetch } from "@common/lib/fetching";
-+
-+export type DateRange = { from: string; to: string };
-+
-+const USAGE_REFRESH_INTERVAL_MS = 10 * 60 * 1000;
-+export const rootComponentPath = "-root-component-";
-+
-+export function useUsageQuery({ period }: { period: DateRange | null }) {
-+  const queryParams = new URLSearchParams();
-+  if (period) {
-+    queryParams.set("from", period.from);
-+    queryParams.set("to", period.to);
-+  }
-+  const fetcher: BareFetcher<string[][]> = async (
-+    key: readonly [string, ...unknown[]],
-+  ) => {
-+    const data = await deploymentFetch(key);
-+    if (data === undefined) {
-+      throw new Error("Insights request failed");
-+    }
-+    return data;
-+  };
-+  return useSWR<string[][]>(
-+    `/api/insights/usage/query?${queryParams.toString()}`,
-+    fetcher,
-+    {
-+      use: [deploymentAuthMiddleware],
-+      keepPreviousData: false,
-+      refreshInterval: USAGE_REFRESH_INTERVAL_MS,
-+    },
-+  );
-+}
 diff --git a/npm-packages/dashboard-common/src/features/settings/components/backups/SnapshotExport.tsx b/npm-packages/dashboard-common/src/features/settings/components/backups/SnapshotExport.tsx
 new file mode 100644
-index 000000000..767fa2945
+index 000000000..f25ef6c08
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/settings/components/backups/SnapshotExport.tsx
-@@ -0,0 +1,139 @@
+@@ -0,0 +1,131 @@
 +import { DownloadIcon } from "@radix-ui/react-icons";
 +import { Button } from "@ui/Button";
 +import { Spinner } from "@ui/Spinner";
@@ -2198,10 +1824,7 @@ index 000000000..767fa2945
 +import { Fragment, useContext } from "react";
 +import { useQuery } from "convex/react";
 +import udfs from "@common/udfs";
-+import {
-+  DeploymentInfoContext,
-+  PermissionsContext,
-+} from "@common/lib/deploymentContext";
++import { DeploymentInfoContext } from "@common/lib/deploymentContext";
 +import { CompletedExport } from "system-udfs/convex/_system/frontend/common";
 +
 +function LatestSnapshot({
@@ -2267,12 +1890,7 @@ index 000000000..767fa2945
 +}
 +
 +export function SnapshotExport() {
-+  const { useIsOperationAllowed } = useContext(PermissionsContext);
-+  const canViewBackups = useIsOperationAllowed("ViewBackups");
-+  const existingExport = useQuery(
-+    udfs.latestExport.default,
-+    canViewBackups ? {} : "skip",
-+  );
++  const existingExport = useQuery(udfs.latestExport.default, {});
 +  const requestZipExport = useRequestZipExport();
 +  const inProgress =
 +    existingExport?.state === "requested" ||
@@ -2330,10 +1948,10 @@ index 000000000..767fa2945
 +}
 diff --git a/npm-packages/dashboard-common/src/features/settings/components/backups/SnapshotImport.tsx b/npm-packages/dashboard-common/src/features/settings/components/backups/SnapshotImport.tsx
 new file mode 100644
-index 000000000..4f891b7d3
+index 000000000..1f06fca81
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/features/settings/components/backups/SnapshotImport.tsx
-@@ -0,0 +1,433 @@
+@@ -0,0 +1,434 @@
 +import {
 +  CheckCircledIcon,
 +  CheckIcon,
@@ -2348,8 +1966,7 @@ index 000000000..4f891b7d3
 +import { Sheet } from "@ui/Sheet";
 +import { ConfirmationDialog } from "@ui/ConfirmationDialog";
 +import { useQuery } from "convex/react";
-+import { useContext, useRef, useState } from "react";
-+import { PermissionsContext } from "@common/lib/deploymentContext";
++import { useRef, useState } from "react";
 +import udfs from "@common/udfs";
 +import { Doc, Id } from "system-udfs/convex/_generated/dataModel";
 +import { formatDistanceStrict } from "date-fns";
@@ -2649,7 +2266,12 @@ index 000000000..4f891b7d3
 +  snapshotImport: Doc<"_snapshot_imports">;
 +}) {
 +  return (
-+    <Disclosure>
++    <Disclosure
++      defaultOpen={
++        snapshotImport.state.state !== "completed" &&
++        snapshotImport.state.state !== "failed"
++      }
++    >
 +      {({ open }) => (
 +        <>
 +          <div className="flex flex-wrap items-center justify-between gap-2">
@@ -2693,13 +2315,10 @@ index 000000000..4f891b7d3
 +  );
 +}
 +
-+const useSnapshotImports = () => {
-+  const { useIsOperationAllowed } = useContext(PermissionsContext);
-+  const canViewBackups = useIsOperationAllowed("ViewBackups");
-+  const existingImports =
-+    useQuery(udfs.snapshotImport.list, canViewBackups ? {} : "skip") ?? [];
-+  return existingImports.filter((s) => s.requestor.type === "snapshotImport");
-+};
++const useSnapshotImports = () =>
++  (useQuery(udfs.snapshotImport.list, {}) ?? []).filter(
++    (s) => s.requestor.type === "snapshotImport",
++  );
 +
 +export function SnapshotImport() {
 +  const existingImports = useSnapshotImports();
@@ -2812,38 +2431,53 @@ index 28ae40fc5..2d5875595 100644
  }
 diff --git a/npm-packages/dashboard-common/src/lib/snapshotApi.ts b/npm-packages/dashboard-common/src/lib/snapshotApi.ts
 new file mode 100644
-index 000000000..7120011d8
+index 000000000..e48ecd2be
 --- /dev/null
 +++ b/npm-packages/dashboard-common/src/lib/snapshotApi.ts
-@@ -0,0 +1,185 @@
+@@ -0,0 +1,202 @@
 +import { useCallback, useContext } from "react";
 +import { Id } from "system-udfs/convex/_generated/dataModel";
-+import { useAdminKey, useDeploymentUrl } from "@common/lib/deploymentApi";
++import {
++  useDeploymentAuthHeader,
++  useDeploymentUrl,
++} from "@common/lib/deploymentApi";
 +import { DeploymentInfoContext } from "@common/lib/deploymentContext";
 +import { toast } from "@common/lib/utils";
 +
 +async function deploymentResponseError(res: Response) {
 +  const text = await res.text();
++  let json: unknown;
 +  try {
-+    return JSON.parse(text);
++    json = JSON.parse(text);
 +  } catch {
-+    return {
-+      code: String(res.status),
-+      message: text || `${res.status} ${res.statusText}`,
-+    };
++    json = null;
 +  }
++  if (
++    typeof json === "object" &&
++    json !== null &&
++    "code" in json &&
++    typeof json.code === "string" &&
++    "message" in json &&
++    typeof json.message === "string"
++  ) {
++    return { code: json.code, message: json.message };
++  }
++  return {
++    code: String(res.status),
++    message: text || `${res.status} ${res.statusText}`,
++  };
 +}
 +
 +function useCheckedDeploymentFetch() {
 +  const deploymentUrl = useDeploymentUrl();
-+  const adminKey = useAdminKey();
++  const authHeader = useDeploymentAuthHeader();
 +  const { reportHttpError } = useContext(DeploymentInfoContext);
 +  return useCallback(
 +    async (path: string, init: RequestInit = {}): Promise<Response | null> => {
 +      try {
 +        const res = await fetch(`${deploymentUrl}${path}`, {
 +          ...init,
-+          headers: { Authorization: `Convex ${adminKey}`, ...init.headers },
++          headers: { Authorization: authHeader, ...init.headers },
 +        });
 +        if (res.ok) {
 +          return res;
@@ -2856,7 +2490,7 @@ index 000000000..7120011d8
 +      }
 +      return null;
 +    },
-+    [deploymentUrl, adminKey, reportHttpError],
++    [deploymentUrl, authHeader, reportHttpError],
 +  );
 +}
 +
@@ -2874,7 +2508,8 @@ index 000000000..7120011d8
 +      }
 +      let token: string;
 +      try {
-+        ({ token } = await res.json());
++        const body: { token: string } = await res.json();
++        token = body.token;
 +      } catch (e) {
 +        toast("error", e instanceof Error ? e.message : String(e));
 +        return;
@@ -2914,7 +2549,7 @@ index 000000000..7120011d8
 +        if (!start) {
 +          return;
 +        }
-+        const { uploadToken } = await start.json();
++        const { uploadToken }: { uploadToken: string } = await start.json();
 +        const chunkSize = Math.max(
 +          5 * 1024 * 1024,
 +          Math.ceil(file.size / 9999),
@@ -2938,7 +2573,8 @@ index 000000000..7120011d8
 +          if (!part) {
 +            return;
 +          }
-+          partTokens.push(await part.json());
++          const partToken: string = await part.json();
++          partTokens.push(partToken);
 +        }
 +        const finish = await checkedFetch("/api/import/finish_upload", {
 +          method: "POST",
@@ -3034,16 +2670,3 @@ index 000000000..054b1a708
 +import { SnapshotsView } from "@common/features/settings/components/backups/SnapshotsView";
 +
 +export default SnapshotsView;
-diff --git a/npm-packages/demo_browser_tests/package.json b/npm-packages/demo_browser_tests/package.json
-index b1630b587..01efba717 100644
---- a/npm-packages/demo_browser_tests/package.json
-+++ b/npm-packages/demo_browser_tests/package.json
-@@ -10,7 +10,7 @@
-     "commander": "^14.0.3"
-   },
-   "scripts": {
--    "postinstall": "node ./install-browser.mjs",
-+    "postinstall": "node ./install-browser.mjs || true",
-     "build": "tsc",
-     "test-relational-data-modeling": "node ./dist/relational-data-modeling.js",
-     "test-users-and-auth": "node ./dist/users-and-auth.js",

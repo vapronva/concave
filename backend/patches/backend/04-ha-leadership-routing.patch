@@ -1,42 +1,46 @@
 diff --git a/crates/local_backend/src/config.rs b/crates/local_backend/src/config.rs
-index 4512444b7..2f5702384 100644
+index 4512444b7..defcb2bdc 100644
 --- a/crates/local_backend/src/config.rs
 +++ b/crates/local_backend/src/config.rs
-@@ -23,6 +23,8 @@ use model::database_globals::types::StorageTagInitializer;
- use serde_json::Value as JsonValue;
- use url::Url;
+@@ -25,9 +25,11 @@ use url::Url;
  
-+use crate::leadership::BackendRole;
-+
  #[derive(Parser, Clone)]
  #[clap(version = &**SERVER_VERSION_STR, author = "Convex, Inc. <no-reply@convex.dev>", group(clap::ArgGroup::new("storage").multiple(false)))]
++#[clap(subcommand_negates_reqs = true)]
  pub struct LocalConfig {
-@@ -34,6 +36,9 @@ pub struct LocalConfig {
-     #[clap(short, long, value_enum, default_value_t = DbDriverTag::Sqlite)]
-     pub db: DbDriverTag,
+     /// File path for SQLite, the file path; for postgres, a server URL.
+     #[clap(default_value = "convex_local_backend.sqlite3")]
++    #[clap(env = "CONVEX_DB_SPEC", hide_env_values = true)]
+     pub db_spec: String,
  
-+    #[clap(long, value_enum, default_value_t = BackendRole::Leader, env = "CONVEX_BACKEND_ROLE")]
-+    pub role: BackendRole,
-+
-     /// Host interface to bind to
-     #[clap(short, long, default_value = "0.0.0.0")]
-     pub interface: ::std::net::Ipv4Addr,
-@@ -254,5 +259,4 @@ impl LocalConfig {
-             }
-         }
-     }
--
- }
+     /// Database driver type.
+@@ -84,6 +86,7 @@ pub struct LocalConfig {
+ 
+     /// Instance secret for this backend.
+     #[clap(long, requires = "instance_name")]
++    #[clap(env = "INSTANCE_SECRET", hide_env_values = true)]
+     pub instance_secret: Option<String>,
+ 
+     /// Credential injected by the authenticated CLI for calls from this local
 diff --git a/crates/local_backend/src/cors.rs b/crates/local_backend/src/cors.rs
 new file mode 100644
-index 000000000..d2e634c3f
+index 000000000..2c11800e0
 --- /dev/null
 +++ b/crates/local_backend/src/cors.rs
-@@ -0,0 +1,51 @@
+@@ -0,0 +1,60 @@
++use std::sync::LazyLock;
++
 +use tower_http::cors::{
 +    AllowOrigin,
 +    CorsLayer,
 +};
++
++static LAYER: LazyLock<CorsLayer> =
++    LazyLock::new(|| restrict_origins(crate::router::upstream_cors()));
++
++pub fn layer() -> CorsLayer {
++    LAYER.clone()
++}
 +
 +fn allowed_origins() -> Vec<http::HeaderValue> {
 +    let Ok(raw) = std::env::var("CONVEX_ALLOWED_ORIGINS") else {
@@ -71,39 +75,50 @@ index 000000000..d2e634c3f
 +        .collect()
 +}
 +
-+pub fn restrict_origins(layer: CorsLayer) -> CorsLayer {
++fn restrict_origins(layer: CorsLayer) -> CorsLayer {
 +    let allowed = allowed_origins();
 +    if allowed.is_empty() {
 +        tracing::warn!(
 +            "[concave] CONVEX_ALLOWED_ORIGINS unset; CORS responses will include no \
 +             Access-Control-Allow-Origin header"
 +        );
-+        return layer.allow_origin(AllowOrigin::list(Vec::<http::HeaderValue>::new()));
++        return layer
++            .allow_credentials(false)
++            .allow_origin(AllowOrigin::list(Vec::<http::HeaderValue>::new()));
 +    }
-+    layer
-+        .allow_credentials(true)
-+        .allow_origin(AllowOrigin::list(allowed))
++    layer.allow_origin(AllowOrigin::list(allowed))
 +}
 diff --git a/crates/local_backend/src/leadership.rs b/crates/local_backend/src/leadership.rs
 new file mode 100644
-index 000000000..4ae6b1148
+index 000000000..0a84189c1
 --- /dev/null
 +++ b/crates/local_backend/src/leadership.rs
-@@ -0,0 +1,681 @@
+@@ -0,0 +1,1111 @@
 +use std::{
++    convert::Infallible,
++    future::Future,
++    net::SocketAddr,
 +    sync::{
 +        Arc,
-+        LazyLock,
++        OnceLock,
 +    },
-+    time::Duration,
++    task::{
++        Context,
++        Poll,
++    },
++    time::{
++        Duration,
++        Instant,
++    },
 +};
 +
-+use anyhow::Context;
++use anyhow::Context as _;
 +use axum::{
 +    body::Body,
 +    extract::{
 +        Query,
 +        Request,
++        State,
 +    },
 +    middleware::Next,
 +    response::{
@@ -117,72 +132,575 @@ index 000000000..4ae6b1148
 +    Router,
 +};
 +use clusters::DbDriverTag;
-+use cmd_util::env::env_config;
 +use common::{
-+    http::extract::{
-+        FromMtState,
-+        MtState,
++    http::{
++        serve_http,
++        ConvexHttpService,
++        MakeSocket,
 +    },
-+    persistence::{
-+        Persistence,
-+        PersistenceReader,
++    knobs::{
++        HTTP_SERVER_MAX_CONCURRENT_REQUESTS,
++        HTTP_SERVER_TIMEOUT_DURATION,
 +    },
++    persistence::Persistence,
 +    runtime::Runtime,
 +    shutdown::ShutdownSignal,
-+    types::Timestamp,
++    types::{
++        DeploymentId,
++        EnvVarValue,
++    },
++    version::SERVER_VERSION_STR,
 +};
++use database::Database;
 +use db_connection::{
 +    connect_persistence,
++    connect_persistence_reader,
 +    persistence_seed,
 +    ConnectPersistenceFlags,
 +    PersistenceSeed,
 +};
-+use futures::{
-+    future::BoxFuture,
-+    FutureExt,
++use function_runner::{
++    remote::RemoteFunctionRunner,
++    FunctionRunner,
 +};
++use futures::FutureExt;
 +use http::StatusCode;
++use model::database_globals::{
++    types::{
++        StorageTagInitializer,
++        StorageType,
++    },
++    DatabaseGlobalsModel,
++    DATABASE_GLOBALS_TABLE,
++};
 +use postgres::{
 +    PostgresPersistence,
 +    PostgresReaderOptions,
 +};
 +use runtime::prod::ProdRuntime;
++use search::searcher::InProcessSearcher;
 +use serde::{
 +    Deserialize,
 +    Serialize,
 +};
++use storage::StorageUseCase;
++use tower::{
++    util::Oneshot,
++    Service,
++    ServiceExt,
++};
++use value::TableNamespace;
 +
 +use crate::{
 +    config::LocalConfig,
++    make_app,
++    new_rate_limiter,
++    usage_forwarder::InsightsProxy,
++    virtual_system_mapping,
++    HttpActionRouteMapper,
++    IndexCache,
 +    LocalAppState,
++    Quota,
++    DOCUMENT_RETENTION_RATE_LIMIT,
++    INDEX_CACHE_SIZE,
 +};
 +
 +const CONTROL_PLANE_TOKEN_HEADER: &str = "X-Convex-Control-Plane-Token";
 +const FOLLOWER_GATE_HEADER: &str = "X-Concave-Follower-Gate";
-+static PROMOTION_TIMEOUT: LazyLock<Duration> =
-+    LazyLock::new(|| Duration::from_secs(env_config("PROMOTION_TIMEOUT_SECS", 300)));
++const PROMOTION_TIMEOUT: Duration = Duration::from_secs(300);
++const LEASE_POLL_INTERVAL: Duration = Duration::from_millis(1500);
++const MAX_NON_TRANSIENT_PROBE_FAILURES: usize = 3;
++const TRANSIENT_HEARTBEAT_EVERY: usize = 20;
 +
-+pub async fn postgres_database_initialized<RT: Runtime>(
-+    db: DbDriverTag,
-+    db_spec: &str,
-+    require_ssl: bool,
-+    deployment_name: &str,
-+    runtime: RT,
++#[derive(Copy, Clone)]
++enum BackendRole {
++    Leader,
++    Follower,
++}
++
++impl BackendRole {
++    fn from_env() -> anyhow::Result<Self> {
++        match std::env::var("CONVEX_BACKEND_ROLE")
++            .unwrap_or_default()
++            .as_str()
++        {
++            "" | "leader" => Ok(Self::Leader),
++            "follower" => Ok(Self::Follower),
++            other => anyhow::bail!("CONVEX_BACKEND_ROLE must be leader or follower, got {other:?}"),
++        }
++    }
++}
++
++enum Role {
++    Follower,
++    Promoting,
++    Leader(Arc<dyn Persistence>),
++}
++
++struct RoleState {
++    role: parking_lot::Mutex<Role>,
++    lease_probe_last_ok: parking_lot::Mutex<Option<Instant>>,
++    preempt_signal: ShutdownSignal,
++}
++
++enum PromotionAttempt {
++    Started,
++    AlreadyInProgress,
++    AlreadyLeader,
++}
++
++enum DemotionCheck {
++    Leader,
++    Follower,
++    Promoting,
++    LeaseChanged,
++}
++
++struct RoleSnapshot {
++    label: &'static str,
++    is_leader: bool,
++    lease_ts: Option<u64>,
++}
++
++impl RoleState {
++    fn new(preempt_signal: ShutdownSignal) -> Self {
++        Self {
++            role: parking_lot::Mutex::new(Role::Follower),
++            lease_probe_last_ok: parking_lot::Mutex::new(None),
++            preempt_signal,
++        }
++    }
++
++    fn snapshot(&self) -> RoleSnapshot {
++        let role = self.role.lock();
++        let (label, lease_ts) = match &*role {
++            Role::Follower => ("follower", None),
++            Role::Promoting => ("promoting", None),
++            Role::Leader(persistence) => ("leader", persistence.lease_ts()),
++        };
++        RoleSnapshot {
++            label,
++            is_leader: matches!(&*role, Role::Leader(_)),
++            lease_ts,
++        }
++    }
++
++    fn is_leader(&self) -> bool {
++        matches!(&*self.role.lock(), Role::Leader(_))
++    }
++
++    fn begin_promotion(&self) -> PromotionAttempt {
++        let mut role = self.role.lock();
++        match &*role {
++            Role::Follower => {},
++            Role::Promoting => return PromotionAttempt::AlreadyInProgress,
++            Role::Leader(_) => return PromotionAttempt::AlreadyLeader,
++        }
++        *role = Role::Promoting;
++        PromotionAttempt::Started
++    }
++
++    fn install(&self, persistence: Arc<dyn Persistence>) {
++        *self.role.lock() = Role::Leader(persistence);
++    }
++
++    fn abort_promotion(&self) {
++        *self.role.lock() = Role::Follower;
++    }
++
++    fn check_demotion(&self, expected_lease_ts: Option<u64>) -> DemotionCheck {
++        let persistence = match &*self.role.lock() {
++            Role::Leader(persistence) => persistence.clone(),
++            Role::Promoting => return DemotionCheck::Promoting,
++            Role::Follower => return DemotionCheck::Follower,
++        };
++        if expected_lease_ts.is_some_and(|expected| persistence.lease_ts() != Some(expected)) {
++            return DemotionCheck::LeaseChanged;
++        }
++        DemotionCheck::Leader
++    }
++
++    fn lease_unverified_secs(&self) -> Option<u64> {
++        self.lease_probe_last_ok
++            .lock()
++            .map(|t| t.elapsed().as_secs())
++    }
++
++    fn record_lease_probe(&self) {
++        *self.lease_probe_last_ok.lock() = Some(Instant::now());
++    }
++
++    async fn watch_lease(&self, runtime: ProdRuntime, rw_persistence: Arc<dyn Persistence>) {
++        let mut non_transient_failures = 0;
++        let mut transient_failures: usize = 0;
++        loop {
++            match rw_persistence.lease_held().await {
++                Ok(true) => {
++                    non_transient_failures = 0;
++                    transient_failures = 0;
++                    self.record_lease_probe();
++                },
++                Ok(false) => {
++                    self.record_lease_probe();
++                    break;
++                },
++                Err(e) if common::errors::is_transient_db_error(&e) => {
++                    non_transient_failures = 0;
++                    transient_failures += 1;
++                    if transient_failures % TRANSIENT_HEARTBEAT_EVERY == 0 {
++                        tracing::warn!(
++                            "[lease-watch] {transient_failures} consecutive transient probe \
++                             errors; lease ownership unverified: {e:#}"
++                        );
++                    }
++                },
++                Err(e) => {
++                    transient_failures = 0;
++                    non_transient_failures += 1;
++                    if non_transient_failures >= MAX_NON_TRANSIENT_PROBE_FAILURES {
++                        tracing::error!(
++                            "[lease-watch] probe failed {non_transient_failures} times with \
++                             non-transient errors; firing preempt: {e:#}"
++                        );
++                        self.preempt_signal.signal(anyhow::anyhow!(
++                            "lease-watch cannot verify lease ownership after \
++                             {non_transient_failures} non-transient failures: {e:#}"
++                        ));
++                        return;
++                    }
++                    tracing::warn!(
++                        "[lease-watch] non-transient probe error \
++                         ({non_transient_failures}/{MAX_NON_TRANSIENT_PROBE_FAILURES}): {e:#}"
++                    );
++                },
++            }
++            runtime.wait(LEASE_POLL_INTERVAL).await;
++        }
++        self.preempt_signal
++            .signal(anyhow::anyhow!("lease lost; restarting"));
++    }
++}
++
++pub struct HaNode {
++    runtime: ProdRuntime,
++    config: LocalConfig,
++    zombify_rx: async_broadcast::Receiver<()>,
++    role: RoleState,
++    configured_role: BackendRole,
++    control_plane_token: Option<String>,
++    database: Database<ProdRuntime>,
++    searcher: Arc<InProcessSearcher<ProdRuntime>>,
++    app: OnceLock<LocalAppState>,
++    router: Arc<OnceLock<Router>>,
++}
++
++pub async fn boot(
++    runtime: ProdRuntime,
++    config: LocalConfig,
++    zombify_rx: async_broadcast::Receiver<()>,
++    preempt_signal: ShutdownSignal,
++) -> anyhow::Result<Arc<HaNode>> {
++    let configured_role = BackendRole::from_env()?;
++    let control_plane_token = control_plane_token_from_env();
++    anyhow::ensure!(
++        control_plane_token.is_some() || matches!(configured_role, BackendRole::Leader),
++        "a follower requires CONVEX_CONTROL_PLANE_TOKEN: without it nothing can promote it"
++    );
++    anyhow::ensure!(
++        control_plane_token.is_none() || matches!(config.db, DbDriverTag::Postgres(_)),
++        "dynamic backend roles require Postgres because MySQL/SQLite do not implement the HA \
++         lease fencing contract"
++    );
++    let boot_as_follower = match configured_role {
++        BackendRole::Follower => true,
++        BackendRole::Leader => {
++            control_plane_token.is_some()
++                && postgres_database_initialized(&config, runtime.clone()).await?
++        },
++    };
++    let rw_persistence = if boot_as_follower {
++        None
++    } else {
++        Some(connect_rw(&config, runtime.clone(), preempt_signal.clone()).await?)
++    };
++    let searcher = Arc::new(InProcessSearcher::new(runtime.clone())?);
++    let (deleted_tablet_sender, deleted_tablet_receiver) = tokio::sync::mpsc::channel(100);
++    let database = match &rw_persistence {
++        Some(rw_persistence) => {
++            Database::load(
++                rw_persistence.clone(),
++                runtime.clone(),
++                searcher.clone(),
++                preempt_signal.clone(),
++                virtual_system_mapping().clone(),
++                IndexCache::new(*INDEX_CACHE_SIZE).new_handle(),
++                Arc::new(new_rate_limiter(
++                    runtime.clone(),
++                    Quota::per_second(*DOCUMENT_RETENTION_RATE_LIMIT),
++                )),
++                deleted_tablet_sender,
++                config.name(),
++            )
++            .await?
++        },
++        None => {
++            if matches!(configured_role, BackendRole::Leader) {
++                tracing::info!(
++                    "[concave] database already initialized; booting as follower and awaiting \
++                     promotion"
++                );
++            }
++            let reader = connect_persistence_reader(
++                config.db,
++                &config.db_spec,
++                !config.do_not_require_ssl,
++                &config.name(),
++                deployment_id(&config),
++                runtime.clone(),
++            )
++            .await?;
++            tracing::info!("[concave] starting in FOLLOWER mode (read-only, no lease)");
++            Database::load_follower(
++                reader,
++                runtime.clone(),
++                searcher.clone(),
++                virtual_system_mapping().clone(),
++                database::FollowerOptions::BACKEND,
++            )
++            .await?
++        },
++    };
++    let node = Arc::new(HaNode {
++        runtime: runtime.clone(),
++        config: config.clone(),
++        zombify_rx: zombify_rx.clone(),
++        role: RoleState::new(preempt_signal.clone()),
++        configured_role,
++        control_plane_token,
++        database: database.clone(),
++        searcher: searcher.clone(),
++        app: OnceLock::new(),
++        router: Arc::default(),
++    });
++    let Some(rw_persistence) = rw_persistence else {
++        preflight(&runtime, &config, &database).await?;
++        return Ok(node);
++    };
++    node.start_lease_watch(rw_persistence.clone());
++    let app = make_app(
++        runtime,
++        config,
++        rw_persistence.clone(),
++        database,
++        searcher,
++        deleted_tablet_receiver,
++        zombify_rx,
++        preempt_signal,
++    )
++    .await?;
++    node.install_leader(app, rw_persistence)?;
++    Ok(node)
++}
++
++impl HaNode {
++    pub async fn shutdown(&self) -> anyhow::Result<()> {
++        match self.app.get() {
++            Some(app) => app.clone().shutdown().await,
++            None => self.database.shutdown().await,
++        }
++    }
++
++    fn start_lease_watch(self: &Arc<Self>, rw_persistence: Arc<dyn Persistence>) {
++        if rw_persistence.lease_ts().is_none() {
++            tracing::info!("[concave] no lease; skipping lease-watch (commit-time fencing)");
++            return;
++        }
++        self.role.record_lease_probe();
++        let node = self.clone();
++        self.runtime.spawn_background("lease_watch", async move {
++            node.role
++                .watch_lease(node.runtime.clone(), rw_persistence)
++                .await
++        });
++    }
++
++    async fn start_leader(
++        self: &Arc<Self>,
++        rw_persistence: Arc<dyn Persistence>,
++    ) -> anyhow::Result<()> {
++        let deleted_tablet_receiver = self
++            .database
++            .become_leader(
++                rw_persistence.clone(),
++                self.role.preempt_signal.clone(),
++                self.config.name(),
++            )
++            .await?;
++        let app = make_app(
++            self.runtime.clone(),
++            self.config.clone(),
++            rw_persistence.clone(),
++            self.database.clone(),
++            self.searcher.clone(),
++            deleted_tablet_receiver,
++            self.zombify_rx.clone(),
++            self.role.preempt_signal.clone(),
++        )
++        .await?;
++        tracing::info!("[promote] leader app built");
++        self.install_leader(app, rw_persistence)
++    }
++
++    fn install_leader(
++        self: &Arc<Self>,
++        app: LocalAppState,
++        rw_persistence: Arc<dyn Persistence>,
++    ) -> anyhow::Result<()> {
++        let router = admitted(
++            crate::router::router(app.clone()),
++            "backend",
++            *HTTP_SERVER_MAX_CONCURRENT_REQUESTS,
++            control_routes(self.clone()).nest(
++                "/api/actions",
++                crate::node_action_callbacks::funrun_snapshot_routes(app.clone()),
++            ),
++        );
++        anyhow::ensure!(
++            self.app.set(app).is_ok() && self.router.set(router).is_ok(),
++            "a leader is already installed in this process"
++        );
++        self.role.install(rw_persistence);
++        Ok(())
++    }
++}
++
++async fn preflight(
++    runtime: &ProdRuntime,
++    config: &LocalConfig,
++    database: &Database<ProdRuntime>,
++) -> anyhow::Result<()> {
++    config.key_broker()?;
++    config.convex_origin_url()?.parse::<EnvVarValue>()?;
++    config.convex_site_url()?.parse::<EnvVarValue>()?;
++    InsightsProxy::from_env()?;
++    isolate::client::initialize_v8();
++    if let Ok(funrun_addr) = std::env::var("CONVEX_FUNRUN_ADDR")
++        && !funrun_addr.is_empty()
++    {
++        function_runner::remote::preflight(&funrun_addr)?;
++    }
++    let mut tx = database.begin_system().await?;
++    if !tx
++        .table_mapping()
++        .namespace(TableNamespace::Global)
++        .name_exists(&DATABASE_GLOBALS_TABLE)
++    {
++        return Ok(());
++    }
++    let Some(storage_type) = DatabaseGlobalsModel::new(&mut tx)
++        .database_globals()
++        .await?
++        .into_value()
++        .storage_type
++    else {
++        return Ok(());
++    };
++    match (config.storage_tag_initializer(), &storage_type) {
++        (StorageTagInitializer::Local { dir }, StorageType::Local { dir: db_dir })
++            if dir.to_string_lossy() == db_dir.as_str() => {},
++        (StorageTagInitializer::S3, StorageType::S3 { s3_prefix })
++            if s3_prefix.starts_with(&format!("{}-", config.name())) => {},
++        (configured, _) => anyhow::bail!(
++            "database storage is {storage_type:?} but this backend is configured for \
++             {configured:?}"
++        ),
++    }
++    for use_case in [
++        StorageUseCase::Files,
++        StorageUseCase::Modules,
++        StorageUseCase::SearchIndexes,
++        StorageUseCase::Exports,
++        StorageUseCase::SnapshotImports,
++    ] {
++        application::create_storage(runtime.clone(), &storage_type, use_case)
++            .await
++            .with_context(|| format!("preflight: {use_case} storage for {storage_type:?}"))?;
++    }
++    tracing::info!("[concave] follower preflight passed");
++    Ok(())
++}
++
++pub fn with_funrun(
++    local: Arc<dyn FunctionRunner<ProdRuntime>>,
++    config: &LocalConfig,
++    database: &Database<ProdRuntime>,
++    runtime: ProdRuntime,
++) -> anyhow::Result<Arc<dyn FunctionRunner<ProdRuntime>>> {
++    let Some(funrun_addr) = std::env::var("CONVEX_FUNRUN_ADDR")
++        .ok()
++        .filter(|addr| !addr.is_empty())
++    else {
++        return Ok(local);
++    };
++    tracing::info!("[funrun] offloading UDF execution to remote funrun fleet at {funrun_addr}");
++    Ok(Arc::new(RemoteFunctionRunner::new(
++        funrun_addr,
++        config.name(),
++        config.key_broker()?,
++        config.secret()?,
++        config.convex_origin_url()?,
++        runtime,
++        local,
++        database.clone(),
++    )?))
++}
++
++fn deployment_id(config: &LocalConfig) -> Option<DeploymentId> {
++    Some(DeploymentId::stable_from_name(&config.name()))
++}
++
++async fn connect_rw(
++    config: &LocalConfig,
++    runtime: ProdRuntime,
++    preempt_signal: ShutdownSignal,
++) -> anyhow::Result<Arc<dyn Persistence>> {
++    connect_persistence(
++        config.db,
++        &config.db_spec,
++        ConnectPersistenceFlags {
++            require_ssl: !config.do_not_require_ssl,
++            allow_read_only: false,
++            skip_index_creation: false,
++        },
++        &config.name(),
++        deployment_id(config),
++        runtime,
++        preempt_signal,
++    )
++    .await
++}
++
++async fn postgres_database_initialized(
++    config: &LocalConfig,
++    runtime: ProdRuntime,
 +) -> anyhow::Result<bool> {
 +    match persistence_seed(
-+        db,
-+        db_spec,
++        config.db,
++        &config.db_spec,
 +        ConnectPersistenceFlags {
-+            require_ssl,
++            require_ssl: !config.do_not_require_ssl,
 +            allow_read_only: true,
 +            skip_index_creation: false,
 +        },
-+        deployment_name,
++        &config.name(),
 +        None,
 +        runtime,
 +    )? {
-+        PersistenceSeed::Postgres { config, options } => {
-+            let pool = PostgresPersistence::create_pool(config)
++        PersistenceSeed::Postgres {
++            config: pg_config,
++            options,
++        } => {
++            let pool = PostgresPersistence::create_pool(pg_config)
 +                .context("failed to create postgres pool")?;
 +            let reader_options = PostgresReaderOptions {
 +                version: options.version,
@@ -198,196 +716,10 @@ index 000000000..4ae6b1148
 +    }
 +}
 +
-+pub enum RolePersistence {
-+    Leader(Arc<dyn Persistence>),
-+    Follower(Arc<dyn PersistenceReader>),
-+}
-+
-+impl RolePersistence {
-+    pub fn reader(&self) -> Arc<dyn PersistenceReader> {
-+        match self {
-+            RolePersistence::Leader(p) => p.reader(),
-+            RolePersistence::Follower(r) => r.clone(),
-+        }
-+    }
-+
-+    pub fn as_persistence(&self) -> Option<Arc<dyn Persistence>> {
-+        match self {
-+            RolePersistence::Leader(p) => Some(p.clone()),
-+            RolePersistence::Follower(_) => None,
-+        }
-+    }
-+
-+    pub fn boot_role(&self) -> BackendRole {
-+        match self {
-+            RolePersistence::Leader(_) => BackendRole::Leader,
-+            RolePersistence::Follower(_) => BackendRole::Follower,
-+        }
-+    }
-+}
-+
-+#[derive(Copy, Clone, Debug, clap::ValueEnum)]
-+pub enum BackendRole {
-+    Leader,
-+    Follower,
-+}
-+
-+impl BackendRole {
-+    pub fn is_leader(&self) -> bool {
-+        matches!(self, BackendRole::Leader)
-+    }
-+}
-+
-+enum Role {
-+    Follower,
-+    Promoting(Option<Arc<dyn Persistence>>),
-+    Leader(Arc<dyn Persistence>),
-+}
-+
-+pub struct RoleState {
-+    role: parking_lot::Mutex<Role>,
-+    pub preempt_signal: ShutdownSignal,
-+}
-+
-+enum PromotionAttempt {
-+    Started,
-+    AlreadyInProgress,
-+    AlreadyLeader,
-+}
-+
-+pub(crate) enum DemotionCheck {
-+    Leader,
-+    Follower,
-+    Promoting,
-+    LeaseChanged,
-+}
-+
-+pub struct RoleSnapshot {
-+    pub label: &'static str,
-+    pub is_leader: bool,
-+    pub lease_ts: Option<u64>,
-+}
-+
-+impl RoleState {
-+    pub fn new(
-+        rw_persistence: Option<Arc<dyn Persistence>>,
-+        preempt_signal: ShutdownSignal,
-+    ) -> Self {
-+        let role = match rw_persistence {
-+            Some(persistence) => Role::Leader(persistence),
-+            None => Role::Follower,
-+        };
-+        Self {
-+            role: parking_lot::Mutex::new(role),
-+            preempt_signal,
-+        }
-+    }
-+
-+    pub fn snapshot(&self) -> RoleSnapshot {
-+        let role = self.role.lock();
-+        let (label, lease_ts) = match &*role {
-+            Role::Follower => ("follower", None),
-+            Role::Promoting(None) => ("promoting", None),
-+            Role::Promoting(Some(persistence)) => ("promoting", persistence.lease_ts()),
-+            Role::Leader(persistence) => ("leader", persistence.lease_ts()),
-+        };
-+        RoleSnapshot {
-+            label,
-+            is_leader: matches!(&*role, Role::Leader(_)),
-+            lease_ts,
-+        }
-+    }
-+
-+    pub fn is_leader(&self) -> bool {
-+        matches!(&*self.role.lock(), Role::Leader(_))
-+    }
-+
-+    pub fn rw_persistence(&self) -> Option<Arc<dyn Persistence>> {
-+        match &*self.role.lock() {
-+            Role::Leader(persistence) => Some(persistence.clone()),
-+            Role::Follower | Role::Promoting(_) => None,
-+        }
-+    }
-+
-+    fn begin_promotion(&self) -> PromotionAttempt {
-+        let mut role = self.role.lock();
-+        match &*role {
-+            Role::Follower => {},
-+            Role::Promoting(_) => return PromotionAttempt::AlreadyInProgress,
-+            Role::Leader(_) => return PromotionAttempt::AlreadyLeader,
-+        }
-+        *role = Role::Promoting(None);
-+        PromotionAttempt::Started
-+    }
-+
-+    fn lease_acquired(&self, persistence: Arc<dyn Persistence>) {
-+        *self.role.lock() = Role::Promoting(Some(persistence));
-+    }
-+
-+    fn finish_promotion(&self, persistence: Arc<dyn Persistence>) {
-+        *self.role.lock() = Role::Leader(persistence);
-+    }
-+
-+    fn abort_promotion(&self) {
-+        *self.role.lock() = Role::Follower;
-+    }
-+
-+    pub(crate) fn check_demotion(&self, expected_lease_ts: Option<u64>) -> DemotionCheck {
-+        let persistence = match &*self.role.lock() {
-+            Role::Leader(persistence) => persistence.clone(),
-+            Role::Promoting(_) => return DemotionCheck::Promoting,
-+            Role::Follower => return DemotionCheck::Follower,
-+        };
-+        if expected_lease_ts.is_some_and(|expected| persistence.lease_ts() != Some(expected)) {
-+            return DemotionCheck::LeaseChanged;
-+        }
-+        DemotionCheck::Leader
-+    }
-+}
-+
-+pub type PersistenceFactory =
-+    Arc<dyn Fn() -> BoxFuture<'static, anyhow::Result<Arc<dyn Persistence>>> + Send + Sync>;
-+
-+pub fn persistence_factory(
-+    config: &LocalConfig,
-+    runtime: ProdRuntime,
-+    preempt: ShutdownSignal,
-+) -> PersistenceFactory {
-+    let db = config.db;
-+    let db_spec = config.db_spec.clone();
-+    let require_ssl = !config.do_not_require_ssl;
-+    let name = config.name();
-+    let factory_runtime = runtime.clone();
-+    Arc::new(move || {
-+        let db_spec = db_spec.clone();
-+        let name = name.clone();
-+        let runtime = factory_runtime.clone();
-+        let preempt = preempt.clone();
-+        Box::pin(async move {
-+            let persistence = connect_persistence(
-+                db,
-+                &db_spec,
-+                ConnectPersistenceFlags {
-+                    require_ssl,
-+                    allow_read_only: false,
-+                    skip_index_creation: false,
-+                },
-+                &name,
-+                None,
-+                runtime,
-+                preempt,
-+            )
-+            .await?;
-+            Ok(persistence)
-+        })
-+    })
-+}
-+
-+pub fn control_plane_token_from_env() -> Option<Arc<String>> {
++fn control_plane_token_from_env() -> Option<String> {
 +    let token = std::env::var("CONVEX_CONTROL_PLANE_TOKEN")
 +        .ok()
-+        .filter(|t| !t.is_empty())
-+        .map(Arc::new);
++        .filter(|t| !t.is_empty());
 +    if token.is_some() {
 +        tracing::info!(
 +            "[concave] CONVEX_CONTROL_PLANE_TOKEN set; /instance/promote and /instance/demote \
@@ -402,74 +734,177 @@ index 000000000..4ae6b1148
 +    token
 +}
 +
-+pub fn install_boot_lease_watch(st: &LocalAppState) {
-+    let Some(rw_persistence) = st.role.rw_persistence() else {
-+        return;
-+    };
-+    if rw_persistence.lease_ts().is_none() {
-+        tracing::info!("[concave] no lease; skipping lease-watch (commit-time fencing)");
-+        return;
-+    }
-+    st.application
-+        .database()
-+        .spawn_lease_watch(rw_persistence, st.role.preempt_signal.clone());
++#[derive(Clone)]
++pub struct RoleRouter {
++    follower: Router,
++    leader: Arc<OnceLock<Router>>,
 +}
 +
-+fn reject_unauthorized_control_plane(
-+    control_plane_token: &Option<Arc<String>>,
-+    headers: &http::HeaderMap,
-+) -> Option<Response> {
-+    let Some(expected) = control_plane_token.as_ref() else {
-+        return Some(
-+            (
-+                StatusCode::FORBIDDEN,
-+                "Control plane is disabled because CONVEX_CONTROL_PLANE_TOKEN is unset.",
-+            )
-+                .into_response(),
-+        );
++impl Service<Request> for RoleRouter {
++    type Error = Infallible;
++    type Future = Oneshot<Router, Request>;
++    type Response = Response;
++
++    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
++        Poll::Ready(Ok(()))
++    }
++
++    fn call(&mut self, req: Request) -> Self::Future {
++        let router = match self.leader.get() {
++            Some(leader) => leader.clone(),
++            None => self.follower.clone(),
++        };
++        router.oneshot(req)
++    }
++}
++
++impl RoleRouter {
++    pub async fn serve<F: Future<Output = ()> + Send + 'static>(
++        self,
++        addr: SocketAddr,
++        shutdown: F,
++    ) -> anyhow::Result<()> {
++        let socket = addr.make_socket()?;
++        let local_addr = socket.local_addr()?;
++        tracing::info!("backend listening on {local_addr}");
++        let make_svc =
++            axum::ServiceExt::<Request>::into_make_service_with_connect_info::<SocketAddr>(self);
++        serve_http(make_svc, socket, shutdown)
++            .await
++            .with_context(|| format!("Could not start backend on {local_addr}"))
++    }
++}
++
++pub fn http_service(node: &Arc<HaNode>) -> RoleRouter {
++    let follower = match node.router.get() {
++        Some(_) => Router::new(),
++        None => admitted(
++            follower_routes(node.config.name()),
++            "backend_follower",
++            *HTTP_SERVER_MAX_CONCURRENT_REQUESTS,
++            control_routes(node.clone()),
++        ),
++    };
++    RoleRouter {
++        follower,
++        leader: node.router.clone(),
++    }
++}
++
++fn admitted(
++    router: Router,
++    service_name: &'static str,
++    max_concurrency: usize,
++    control: Router,
++) -> Router {
++    ConvexHttpService::new(
++        router,
++        service_name,
++        SERVER_VERSION_STR.to_string(),
++        max_concurrency,
++        *HTTP_SERVER_TIMEOUT_DURATION,
++        HttpActionRouteMapper,
++    )
++    .into_router()
++    .merge(control)
++}
++
++fn follower_routes(instance_name: String) -> Router {
++    let version = SERVER_VERSION_STR.to_string();
++    Router::new()
++        .route(
++            "/",
++            get(|| async { "This Convex deployment is running. See https://docs.convex.dev/." }),
++        )
++        .route("/instance_name", get(|| async move { instance_name }))
++        .route("/instance_version", get(|| async move { version }))
++        .layer(crate::router::cors())
++        .fallback(follower_gate)
++}
++
++async fn follower_gate() -> Response {
++    (
++        StatusCode::MISDIRECTED_REQUEST,
++        [(FOLLOWER_GATE_HEADER, "1")],
++        "This backend is a follower (warm standby) and does not serve client traffic. Route to \
++         the leader (or POST /instance/promote to promote it).",
++    )
++        .into_response()
++}
++
++fn control_routes(node: Arc<HaNode>) -> Router {
++    let gated = Router::new()
++        .route("/instance/promote", post(promote))
++        .route("/instance/demote", post(demote))
++        .route_layer(axum::middleware::from_fn_with_state(
++            node.clone(),
++            control_plane_gate,
++        ));
++    Router::new()
++        .route("/readyz", get(readyz))
++        .route("/instance/leadership", get(leadership))
++        .merge(gated)
++        .with_state(node)
++}
++
++async fn control_plane_gate(
++    State(node): State<Arc<HaNode>>,
++    headers: http::HeaderMap,
++    req: Request<Body>,
++    next: Next,
++) -> Response {
++    let Some(expected) = node.control_plane_token.as_ref() else {
++        return (
++            StatusCode::FORBIDDEN,
++            "Control plane is disabled because CONVEX_CONTROL_PLANE_TOKEN is unset.",
++        )
++            .into_response();
 +    };
 +    let presented = headers
 +        .get(CONTROL_PLANE_TOKEN_HEADER)
 +        .map(|v| v.as_bytes())
 +        .unwrap_or_default();
 +    if keybroker::constant_time_eq_sha256(presented, expected.as_bytes()) {
-+        return None;
++        return next.run(req).await;
 +    }
-+    Some(
-+        (
-+            StatusCode::FORBIDDEN,
-+            "Missing or invalid X-Convex-Control-Plane-Token.",
-+        )
-+            .into_response(),
++    tracing::warn!(
++        "[concave] rejected {} {}: missing or invalid control-plane token",
++        req.method(),
++        req.uri().path()
++    );
++    (
++        StatusCode::FORBIDDEN,
++        "Missing or invalid X-Convex-Control-Plane-Token.",
 +    )
++        .into_response()
 +}
 +
 +#[derive(Serialize)]
-+pub struct LeadershipResponse {
-+    pub role: String,
-+    pub is_leader: bool,
-+    pub lease_ts: Option<u64>,
-+    pub lease_unverified_secs: Option<u64>,
-+    pub latest_ts: u64,
-+    pub tailer_healthy: Option<bool>,
++struct LeadershipResponse {
++    role: &'static str,
++    is_leader: bool,
++    lease_ts: Option<u64>,
++    lease_unverified_secs: Option<u64>,
++    latest_ts: u64,
++    tailer_healthy: Option<bool>,
 +}
 +
-+pub async fn leadership(MtState(st): MtState<LocalAppState>) -> Response {
-+    let latest_ts: Timestamp = *st.application.now_ts_for_reads();
-+    let role = st.role.snapshot();
-+    let database = st.application.database();
++async fn leadership(State(node): State<Arc<HaNode>>) -> Response {
++    let latest_ts = *node.database.now_ts_for_reads();
++    let role = node.role.snapshot();
 +    let lease_unverified_secs = if role.is_leader {
-+        database.lease_unverified_secs()
++        node.role.lease_unverified_secs()
 +    } else {
 +        None
 +    };
-+    let tailer_healthy = database
++    let tailer_healthy = node
++        .database
 +        .follower_tailer_client()
 +        .await
 +        .ok()
 +        .map(|tailer| tailer.is_healthy());
 +    axum::Json(LeadershipResponse {
-+        role: role.label.to_string(),
++        role: role.label,
 +        is_leader: role.is_leader,
 +        lease_ts: role.lease_ts,
 +        lease_unverified_secs,
@@ -479,13 +914,10 @@ index 000000000..4ae6b1148
 +    .into_response()
 +}
 +
-+pub async fn readyz<S>(MtState(st): MtState<LocalAppState>) -> Response
-+where
-+    LocalAppState: FromMtState<S>,
-+{
-+    let healthy = match st.configured_role {
-+        BackendRole::Leader => st.role.is_leader(),
-+        BackendRole::Follower => !st.role.is_leader(),
++async fn readyz(State(node): State<Arc<HaNode>>) -> Response {
++    let healthy = match node.configured_role {
++        BackendRole::Leader => node.role.is_leader(),
++        BackendRole::Follower => !node.role.is_leader(),
 +    };
 +    if healthy {
 +        return (StatusCode::OK, "ready").into_response();
@@ -497,8 +929,8 @@ index 000000000..4ae6b1148
 +        .into_response()
 +}
 +
-+pub async fn promote(MtState(st): MtState<LocalAppState>) -> Response {
-+    match st.role.begin_promotion() {
++async fn promote(State(node): State<Arc<HaNode>>) -> Response {
++    match node.role.begin_promotion() {
 +        PromotionAttempt::AlreadyLeader => {
 +            return (StatusCode::OK, "already leader").into_response();
 +        },
@@ -507,49 +939,46 @@ index 000000000..4ae6b1148
 +        },
 +        PromotionAttempt::Started => {},
 +    }
-+    st.application
-+        .runtime()
-+        .spawn_background("in_process_promotion", async move {
-+            let budget = *PROMOTION_TIMEOUT;
-+            let promotion = perform_promotion(st.clone()).fuse();
-+            let deadline = st.application.runtime().wait(budget).fuse();
-+            futures::pin_mut!(promotion, deadline);
-+            futures::select_biased! {
-+                _ = promotion => {},
-+                _ = deadline => st.role.preempt_signal.signal(anyhow::anyhow!(
-+                    "in-process promotion did not finish within {budget:?}"
-+                )),
-+            }
-+        });
++    let runtime = node.runtime.clone();
++    runtime.spawn_background("in_process_promotion", async move {
++        let promotion = perform_promotion(node.clone()).fuse();
++        let deadline = node.runtime.wait(PROMOTION_TIMEOUT).fuse();
++        futures::pin_mut!(promotion, deadline);
++        futures::select_biased! {
++            _ = promotion => {},
++            _ = deadline => node.role.preempt_signal.signal(anyhow::anyhow!(
++                "in-process promotion did not finish within {PROMOTION_TIMEOUT:?}"
++            )),
++        }
++    });
 +    (StatusCode::ACCEPTED, "promotion started").into_response()
 +}
 +
-+async fn perform_promotion(st: LocalAppState) {
++async fn perform_promotion(node: Arc<HaNode>) {
 +    tracing::info!("[concave] promotion started; acquiring read-write lease");
-+    let rw_persistence = match (st.persistence_factory)().await {
++    let rw_persistence = match connect_rw(
++        &node.config,
++        node.runtime.clone(),
++        node.role.preempt_signal.clone(),
++    )
++    .await
++    {
 +        Ok(p) => p,
 +        Err(e) => {
 +            tracing::warn!(
 +                "[concave] promotion could not acquire the lease; staying follower: {e:#}"
 +            );
-+            st.role.abort_promotion();
++            node.role.abort_promotion();
 +            return;
 +        },
 +    };
 +    tracing::info!("[concave] promotion lease acquired; promoting in-process");
-+    st.role.lease_acquired(rw_persistence.clone());
-+    match st
-+        .application
-+        .become_leader(rw_persistence.clone(), st.role.preempt_signal.clone())
-+        .await
-+    {
-+        Ok(()) => {
-+            st.role.finish_promotion(rw_persistence);
-+            tracing::info!("[concave] promotion succeeded; now serving as leader");
-+        },
++    node.start_lease_watch(rw_persistence.clone());
++    match node.start_leader(rw_persistence).await {
++        Ok(()) => tracing::info!("[concave] promotion succeeded; now serving as leader"),
 +        Err(e) => {
 +            tracing::error!("[concave] promotion failed after lease acquisition: {e:#}");
-+            st.role.preempt_signal.signal(anyhow::anyhow!(
++            node.role.preempt_signal.signal(anyhow::anyhow!(
 +                "in-process promotion failed after acquiring the lease: {e:#}"
 +            ));
 +        },
@@ -557,15 +986,12 @@ index 000000000..4ae6b1148
 +}
 +
 +#[derive(Deserialize)]
-+pub struct DemoteParams {
++struct DemoteParams {
 +    lease_ts: Option<u64>,
 +}
 +
-+pub async fn demote(
-+    MtState(st): MtState<LocalAppState>,
-+    Query(params): Query<DemoteParams>,
-+) -> Response {
-+    match st.role.check_demotion(params.lease_ts) {
++async fn demote(State(node): State<Arc<HaNode>>, Query(params): Query<DemoteParams>) -> Response {
++    match node.role.check_demotion(params.lease_ts) {
 +        DemotionCheck::Leader => {},
 +        DemotionCheck::LeaseChanged => {
 +            return (
@@ -589,76 +1015,24 @@ index 000000000..4ae6b1148
 +                .into_response();
 +        },
 +    };
-+    st.role
++    node.role
 +        .preempt_signal
 +        .signal(anyhow::anyhow!("backend demoted; restarting"));
 +    (StatusCode::ACCEPTED, "demotion started").into_response()
 +}
 +
-+async fn control_plane_gate(
-+    axum::extract::State(control_plane_token): axum::extract::State<Option<Arc<String>>>,
-+    headers: http::HeaderMap,
-+    req: Request<Body>,
-+    next: Next,
-+) -> Response {
-+    if let Some(rejection) = reject_unauthorized_control_plane(&control_plane_token, &headers) {
-+        return rejection;
-+    }
-+    next.run(req).await
-+}
-+
-+pub fn leadership_routes(control_plane_token: Option<Arc<String>>) -> Router<LocalAppState> {
-+    let control = Router::new()
-+        .route("/instance/promote", post(promote))
-+        .route("/instance/demote", post(demote))
-+        .layer(axum::middleware::from_fn_with_state(
-+            control_plane_token,
-+            control_plane_gate,
-+        ));
-+    Router::new()
-+        .route("/instance/leadership", get(leadership))
-+        .merge(control)
-+}
-+
-+pub fn follower_router(st: LocalAppState) -> Router {
-+    let role = st.role.clone();
-+    crate::router::router(st).layer(axum::middleware::from_fn_with_state(role, role_gate))
-+}
-+
-+fn is_gate_exempt(path: &str) -> bool {
-+    matches!(
-+        path,
-+        "/" | "/readyz"
-+            | "/instance/leadership"
-+            | "/instance/promote"
-+            | "/instance/demote"
-+            | "/instance_name"
-+            | "/instance_version"
-+    )
-+}
-+
-+async fn role_gate(
-+    axum::extract::State(role): axum::extract::State<Arc<RoleState>>,
-+    req: Request<Body>,
-+    next: Next,
-+) -> Response {
-+    if role.is_leader() || is_gate_exempt(req.uri().path()) {
-+        return next.run(req).await;
-+    }
-+    (
-+        StatusCode::MISDIRECTED_REQUEST,
-+        [(FOLLOWER_GATE_HEADER, "1")],
-+        "This backend is a follower (warm standby) and does not serve client traffic. Route to \
-+         the leader (or POST /instance/promote to promote it).",
-+    )
-+        .into_response()
-+}
-+
 +#[cfg(test)]
 +mod tests {
-+    use std::sync::Arc;
++    use std::{
++        sync::{
++            Arc,
++            OnceLock,
++        },
++        time::Duration,
++    };
 +
 +    use axum::{
++        body::Body,
 +        response::Response,
 +        routing::{
 +            get,
@@ -671,62 +1045,56 @@ index 000000000..4ae6b1148
 +        shutdown::ShutdownSignal,
 +    };
 +    use http::StatusCode;
-+    use tower::ServiceExt;
++    use tokio::sync::Notify;
++    use tower::{
++        Service,
++        ServiceExt,
++    };
 +
 +    use super::{
-+        role_gate,
++        admitted,
++        follower_routes,
 +        DemotionCheck,
 +        PromotionAttempt,
++        RoleRouter,
 +        RoleState,
 +        FOLLOWER_GATE_HEADER,
 +    };
 +
-+    fn sqlite_persistence(dir: &tempfile::TempDir) -> Arc<dyn Persistence> {
-+        let path = dir.path().join("role.sqlite3");
-+        Arc::new(sqlite::SqlitePersistence::new(path.to_str().unwrap()).unwrap())
-+    }
-+
-+    fn leader(dir: &tempfile::TempDir) -> Arc<RoleState> {
-+        Arc::new(RoleState::new(
-+            Some(sqlite_persistence(dir)),
-+            ShutdownSignal::panic(),
-+        ))
-+    }
-+
-+    fn follower() -> Arc<RoleState> {
-+        Arc::new(RoleState::new(None, ShutdownSignal::panic()))
-+    }
-+
-+    fn gated_router(role: Arc<RoleState>) -> Router {
-+        Router::new()
-+            .route("/api/query", post(|| async { "ok" }))
-+            .route("/instance_name", get(|| async { "name" }))
-+            .route("/instance_version", get(|| async { "version" }))
-+            .route("/instance/leadership", get(|| async { "leadership" }))
-+            .route("/instance/promote", post(|| async { "promote" }))
-+            .route("/instance/demote", post(|| async { "demote" }))
-+            .route("/", get(|| async { "health" }))
-+            .route("/readyz", get(|| async { "ready" }))
-+            .layer(axum::middleware::from_fn_with_state(role, role_gate))
-+    }
-+
-+    async fn respond(router: Router, method: &str, path: &str) -> Response {
-+        let req = http::Request::builder()
++    fn request(method: &str, path: &str) -> http::Request<Body> {
++        http::Request::builder()
 +            .method(method)
 +            .uri(path)
-+            .body(axum::body::Body::empty())
-+            .unwrap();
-+        router.oneshot(req).await.unwrap()
++            .body(Body::empty())
++            .unwrap()
 +    }
 +
-+    async fn status_of(router: Router, method: &str, path: &str) -> StatusCode {
-+        respond(router, method, path).await.status()
++    fn control() -> Router {
++        Router::new()
++            .route("/readyz", get(|| async { "ready" }))
++            .route("/instance/promote", post(|| async { "promote" }))
++    }
++
++    async fn text(response: Response) -> String {
++        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
++            .await
++            .unwrap();
++        String::from_utf8(bytes.to_vec()).unwrap()
 +    }
 +
 +    #[tokio::test]
-+    async fn follower_is_gated_but_promotable() {
-+        let role = follower();
-+        let gated = respond(gated_router(role.clone()), "POST", "/api/query").await;
++    async fn follower_gates_everything_but_the_exempt_paths() {
++        let service = admitted(
++            follower_routes("instance".to_string()),
++            "test_follower_gate",
++            16,
++            control(),
++        );
++        let gated = service
++            .clone()
++            .oneshot(request("POST", "/api/query"))
++            .await
++            .unwrap();
 +        assert_eq!(gated.status(), StatusCode::MISDIRECTED_REQUEST);
 +        assert_eq!(
 +            gated
@@ -737,29 +1105,95 @@ index 000000000..4ae6b1148
 +        );
 +        for (method, path) in [
 +            ("GET", "/"),
-+            ("GET", "/readyz"),
 +            ("GET", "/instance_name"),
 +            ("GET", "/instance_version"),
-+            ("GET", "/instance/leadership"),
++            ("GET", "/version"),
++            ("GET", "/readyz"),
 +            ("POST", "/instance/promote"),
-+            ("POST", "/instance/demote"),
 +        ] {
-+            assert_eq!(
-+                status_of(gated_router(role.clone()), method, path).await,
-+                StatusCode::OK,
-+                "{method} {path}"
-+            );
++            let response = service
++                .clone()
++                .oneshot(request(method, path))
++                .await
++                .unwrap();
++            assert_eq!(response.status(), StatusCode::OK, "{method} {path}");
 +        }
++    }
++
++    #[tokio::test]
++    async fn control_routes_bypass_admission() {
++        let entered = Arc::new(Notify::new());
++        let release = Arc::new(Notify::new());
++        let held = Router::new().route(
++            "/hold",
++            get({
++                let entered = entered.clone();
++                let release = release.clone();
++                move || async move {
++                    entered.notify_one();
++                    release.notified().await;
++                    "held"
++                }
++            }),
++        );
++        let service = admitted(held, "test_admission", 1, control());
++        let holder = tokio::spawn(service.clone().oneshot(request("GET", "/hold")));
++        entered.notified().await;
++        let ready = tokio::time::timeout(
++            Duration::from_secs(5),
++            service.clone().oneshot(request("GET", "/readyz")),
++        )
++        .await
++        .expect("a control route waited behind the concurrency limit")
++        .unwrap();
++        assert_eq!(ready.status(), StatusCode::OK);
++        let queued = tokio::time::timeout(
++            Duration::from_millis(200),
++            service.clone().oneshot(request("GET", "/hold")),
++        )
++        .await;
++        assert!(queued.is_err(), "the limiter admitted a second request");
++        release.notify_one();
++        assert_eq!(holder.await.unwrap().unwrap().status(), StatusCode::OK);
++    }
++
++    #[tokio::test]
++    async fn role_router_switches_on_the_next_request_of_a_connection() {
++        let leader = Arc::new(OnceLock::new());
++        let mut connection = RoleRouter {
++            follower: Router::new().fallback(|| async { "follower" }),
++            leader: leader.clone(),
++        };
++        let before = connection
++            .ready()
++            .await
++            .unwrap()
++            .call(request("GET", "/api/query"))
++            .await
++            .unwrap();
++        assert_eq!(text(before).await, "follower");
++        assert!(leader
++            .set(Router::new().fallback(|| async { "leader" }))
++            .is_ok());
++        let after = connection
++            .ready()
++            .await
++            .unwrap()
++            .call(request("GET", "/api/query"))
++            .await
++            .unwrap();
++        assert_eq!(text(after).await, "leader");
 +    }
 +
 +    #[tokio::test]
 +    async fn demotion_is_compared_against_the_current_lease() {
 +        let dir = tempfile::TempDir::new().unwrap();
-+        let role = leader(&dir);
-+        assert_eq!(
-+            status_of(gated_router(role.clone()), "POST", "/api/query").await,
-+            StatusCode::OK,
-+        );
++        let path = dir.path().join("role.sqlite3");
++        let persistence: Arc<dyn Persistence> =
++            Arc::new(sqlite::SqlitePersistence::new(path.to_str().unwrap()).unwrap());
++        let role = RoleState::new(ShutdownSignal::panic());
++        assert!(matches!(role.check_demotion(None), DemotionCheck::Follower));
++        role.install(persistence);
 +        assert!(matches!(
 +            role.check_demotion(Some(7)),
 +            DemotionCheck::LeaseChanged
@@ -772,21 +1206,10 @@ index 000000000..4ae6b1148
 +    }
 +}
 diff --git a/crates/local_backend/src/router.rs b/crates/local_backend/src/router.rs
-index 608ff8589..99a95e01b 100644
+index 608ff8589..f20704671 100644
 --- a/crates/local_backend/src/router.rs
 +++ b/crates/local_backend/src/router.rs
-@@ -1,6 +1,9 @@
- use std::{
-     convert::Infallible,
--    sync::Arc,
-+    sync::{
-+        Arc,
-+        LazyLock,
-+    },
-     time::Duration,
- };
- 
-@@ -18,12 +21,9 @@ use axum::{
+@@ -18,12 +18,9 @@ use axum::{
      Router,
  };
  use common::{
@@ -802,11 +1225,7 @@ index 608ff8589..99a95e01b 100644
      },
      knobs::{
          AIRBYTE_STREAMING_IMPORT_REQUEST_SIZE_LIMIT,
-@@ -41,10 +41,10 @@ use tower::ServiceBuilder;
- use tower_http::{
-     cors::{
-         AllowHeaders,
--        AllowOrigin,
+@@ -45,6 +42,7 @@ use tower_http::{
          CorsLayer,
      },
      decompression::RequestDecompressionLayer,
@@ -814,7 +1233,7 @@ index 608ff8589..99a95e01b 100644
  };
  use utoipa::{
      openapi::security::{
-@@ -103,11 +103,14 @@ use crate::{
+@@ -103,11 +101,14 @@ use crate::{
          internal_action_post,
          internal_mutation_post,
          internal_query_post,
@@ -829,36 +1248,7 @@ index 608ff8589..99a95e01b 100644
          vector_search,
      },
      public_api::public_api_router,
-@@ -306,16 +309,23 @@ pub fn router(st: LocalAppState) -> Router {
-     let dashboard_routes = common_dashboard_routes()
-         .merge(local_only_dashboard_routes)
-         // Environment variable routes
--        .route("/update_environment_variables", post(update_environment_variables))
--        .route("/list_environment_variables", get(list_environment_variables))
-+        .route(
-+            "/update_environment_variables",
-+            post(update_environment_variables),
-+        )
-+        .route(
-+            "/list_environment_variables",
-+            get(list_environment_variables),
-+        )
-         // Canonical URL routes
-         .route("/update_canonical_url", post(update_canonical_url))
-         // Scheduled jobs routes
-         .route("/cancel_all_jobs", post(cancel_all_jobs))
-         .route("/cancel_job", post(cancel_job))
--        .route("/dashboard_openapi.json", axum::routing::get({
--            move || async { dashboard_openapi_json }
--        }))
-+        .route(
-+            "/dashboard_openapi.json",
-+            axum::routing::get({ move || async { dashboard_openapi_json } }),
-+        )
-         .layer(ServiceBuilder::new());
- 
-     let cli_routes = Router::new()
-@@ -353,8 +363,7 @@ pub fn router(st: LocalAppState) -> Router {
+@@ -353,8 +354,7 @@ pub fn router(st: LocalAppState) -> Router {
          .route("/schema_state/{schema_id}", get(schema_state))
          .route("/stream_udf_execution", get(stream_udf_execution))
          .route("/stream_function_logs", get(stream_function_logs))
@@ -868,7 +1258,7 @@ index 608ff8589..99a95e01b 100644
  
      let snapshot_export_routes = Router::new()
          .route("/request/zip", post(request_zip_export))
-@@ -388,6 +397,10 @@ pub fn router(st: LocalAppState) -> Router {
+@@ -388,6 +388,10 @@ pub fn router(st: LocalAppState) -> Router {
          .nest("/actions", action_callback_routes(st.clone()))
          .nest("/export", snapshot_export_routes)
          .nest("/streaming_import", streaming_import_routes())
@@ -879,25 +1269,7 @@ index 608ff8589..99a95e01b 100644
          .nest("/v1", platform_routes);
  
      // Endpoints migrated to use the RouterState trait instead of application.
-@@ -427,6 +440,9 @@ pub fn router(st: LocalAppState) -> Router {
-         .nest("/api", api_routes)
-         .merge(health_check_routes(version))
-         .route("/.well-known/jwks.json", get(deployment_jwks))
-+        .merge(crate::leadership::leadership_routes(
-+            st.control_plane_token.clone(),
-+        ))
-         .layer(cors())
-         .with_state(st)
-         .merge(migrated)
-@@ -468,14 +484,23 @@ where
-         .route("/cancel_job", post(cancel_developer_job))
-         .route("/create_function_handle", post(create_function_handle))
-         // file storage endpoints
--        .route("/storage_generate_upload_url", post(storage_generate_upload_url))
-+        .route(
-+            "/storage_generate_upload_url",
-+            post(storage_generate_upload_url),
-+        )
+@@ -472,6 +476,9 @@ where
          .route("/storage_get_url", post(storage_get_url))
          .route("/storage_get_metadata", post(storage_get_metadata))
          .route("/storage_delete", post(storage_delete))
@@ -907,15 +1279,7 @@ index 608ff8589..99a95e01b 100644
          .route("/audit_log", post(audit_log))
          // All routes above this line get the increased limit
          .layer(DefaultBodyLimit::max(*MAX_BACKEND_RPC_REQUEST_SIZE))
--        .layer(axum::middleware::from_fn_with_state(state, action_callbacks_middleware::<S>))
-+        .layer(axum::middleware::from_fn_with_state(
-+            state,
-+            action_callbacks_middleware::<S>,
-+        ))
- }
- 
- pub fn import_routes<S>() -> Router<S>
-@@ -492,10 +517,13 @@ where
+@@ -492,10 +499,13 @@ where
          .route("/cancel_import", post(cancel_import))
  }
  
@@ -929,47 +1293,14 @@ index 608ff8589..99a95e01b 100644
  }
  
  pub fn app_metrics_routes<S>() -> Router<S>
-@@ -551,6 +579,7 @@ where
-             get(|MtState(st): MtState<LocalAppState>| async move { st.instance_name.clone() }),
-         )
-         .route("/instance_version", get(|| async move { version }))
-+        .route("/readyz", get(crate::leadership::readyz::<S>))
-         .route(
-             "/",
-             get(|| async { "This Convex deployment is running. See https://docs.convex.dev/." }),
-@@ -558,8 +587,8 @@ where
-         .route(
-             "/echo",
-             post(|body: axum::body::Body| async move { body })
--        // Limit requests to 128MiB to help mitigate DDoS attacks.
--        .layer(DefaultBodyLimit::max(*MAX_ECHO_BYTES)),
-+                // Limit requests to 128MiB to help mitigate DDoS attacks.
-+                .layer(DefaultBodyLimit::max(*MAX_ECHO_BYTES)),
-         )
-         .layer(cors())
- }
-@@ -617,10 +646,16 @@ where
-         )
+@@ -618,6 +628,10 @@ where
  }
  
-+static CORS_LAYER: LazyLock<CorsLayer> =
-+    LazyLock::new(|| crate::cors::restrict_origins(build_cors()));
-+
  pub fn cors() -> CorsLayer {
-+    CORS_LAYER.clone()
++    crate::cors::layer()
 +}
 +
-+fn build_cors() -> CorsLayer {
++pub(crate) fn upstream_cors() -> CorsLayer {
      CorsLayer::new()
          .allow_headers(AllowHeaders::mirror_request())
--        .allow_credentials(true)
-         .allow_methods(vec![
-             Method::GET,
-             Method::POST,
-@@ -629,6 +664,5 @@ pub fn cors() -> CorsLayer {
-             Method::DELETE,
-             Method::PUT,
-         ])
--        .allow_origin(AllowOrigin::mirror_request())
-         .max_age(Duration::from_secs(86400))
- }
+         .allow_credentials(true)

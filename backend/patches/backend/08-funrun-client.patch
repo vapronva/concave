@@ -1,38 +1,24 @@
-diff --git a/crates/common/src/components/mod.rs b/crates/common/src/components/mod.rs
-index bbdcaec82..9db9f167f 100644
---- a/crates/common/src/components/mod.rs
-+++ b/crates/common/src/components/mod.rs
-@@ -25,6 +25,7 @@ pub use self::{
-         ExportPath,
-         PublicFunctionPath,
-         ResolvedComponentFunctionPath,
-+        SerializedComponentFunctionPath,
-     },
-     module_paths::CanonicalizedComponentModulePath,
-     reference::Reference,
 diff --git a/crates/common/src/http/mod.rs b/crates/common/src/http/mod.rs
-index 15fb45e78..305a3da30 100644
+index 15fb45e78..439b48e21 100644
 --- a/crates/common/src/http/mod.rs
 +++ b/crates/common/src/http/mod.rs
-@@ -212,8 +212,7 @@ impl From<HttpRequest> for HttpRequestStream {
+@@ -564,6 +564,15 @@ impl ConvexHttpService {
+         self.meta_routes_enabled = enabled;
      }
- }
  
--impl HttpRequestStream {
--}
-+impl HttpRequestStream {}
- 
- impl HeapSize for HttpRequest {
-     fn heap_size(&self) -> usize {
-@@ -634,7 +633,6 @@ impl ConvexHttpService {
-             .await
-         }
-     }
--
- }
- 
- /// Serves an HTTP server using the given service.
-@@ -1015,6 +1013,11 @@ where
++    pub fn into_router(self) -> Router {
++        let extra = self.meta_routes();
++        if self.meta_routes_enabled {
++            self.router.merge(extra)
++        } else {
++            self.router
++        }
++    }
++
+     /// Routes not handled by the passed-in router.
+     fn meta_routes(&self) -> Router {
+         let version = self.version.clone();
+@@ -1015,6 +1024,11 @@ where
  
  #[allow(clippy::declare_interior_mutable_const)]
  pub const CONVEX_REQUEST_ID_HEADER: HeaderName = HeaderName::from_static("convex-request-id");
@@ -44,7 +30,7 @@ index 15fb45e78..305a3da30 100644
  
  pub struct ExtractRequestId(pub RequestId);
  
-@@ -1296,23 +1299,6 @@ impl<T: fmt::Display> fmt::Display for LogOptFmt<T> {
+@@ -1296,23 +1310,6 @@ impl<T: fmt::Display> fmt::Display for LogOptFmt<T> {
      }
  }
  
@@ -102,23 +88,1093 @@ index 5bc866196..3c9a6076e 100644
  usage_tracking = { workspace = true }
  value = { workspace = true }
 diff --git a/crates/function_runner/src/lib.rs b/crates/function_runner/src/lib.rs
-index 5c1665f6f..c94be5c4b 100644
+index 5c1665f6f..55c8b757e 100644
 --- a/crates/function_runner/src/lib.rs
 +++ b/crates/function_runner/src/lib.rs
-@@ -81,6 +81,8 @@ mod in_memory_indexes;
+@@ -81,6 +81,7 @@ mod in_memory_indexes;
  pub mod in_process_function_runner;
  mod metrics;
  mod module_cache;
-+mod proto;
 +pub mod remote;
  pub mod server;
  
  #[async_trait]
-diff --git a/crates/function_runner/src/proto.rs b/crates/function_runner/src/proto.rs
+diff --git a/crates/function_runner/src/remote.rs b/crates/function_runner/src/remote.rs
+new file mode 100644
+index 000000000..fcd800a10
+--- /dev/null
++++ b/crates/function_runner/src/remote.rs
+@@ -0,0 +1,1065 @@
++use std::{
++    collections::{
++        BTreeMap,
++        BTreeSet,
++    },
++    net::SocketAddr,
++    sync::{
++        Arc,
++        LazyLock,
++    },
++    time::{
++        Duration,
++        Instant,
++        SystemTime,
++    },
++};
++
++use anyhow::Context as _;
++use async_trait::async_trait;
++use authentication::token_to_authorization_header;
++use cmd_util::env::env_config;
++use common::{
++    auth::AuthConfig,
++    bootstrap_model::components::definition::ComponentDefinitionMetadata,
++    components::{
++        ComponentDefinitionPath,
++        ComponentName,
++        Resource,
++    },
++    errors::JsError,
++    execution_context::ExecutionContext,
++    grpc::is_connect_error,
++    identity::InertIdentity,
++    log_lines::LogLine,
++    runtime::{
++        Runtime,
++        UnixTimestamp,
++    },
++    schemas::DatabaseSchema,
++    types::{
++        ConvexOrigin,
++        IndexId,
++        RepeatableTimestamp,
++        UdfRuntime,
++        UdfType,
++    },
++};
++use errors::ErrorMetadata;
++use futures::{
++    select_biased,
++    FutureExt,
++    StreamExt,
++};
++use keybroker::{
++    funrun_auth::{
++        funrun_auth_header,
++        FUNRUN_AUTH_METADATA_KEY,
++    },
++    DeploymentSecret,
++    Identity,
++    KeyBroker,
++};
++use metrics::{
++    log_counter_with_labels,
++    register_convex_counter,
++    StaticMetricLabel,
++};
++use model::{
++    components::auth::propagate_component_auth,
++    config::types::ModuleConfig,
++    environment_variables::types::{
++        EnvVarName,
++        EnvVarValue,
++    },
++    modules::module_versions::{
++        AnalyzedModule,
++        ModuleSource,
++        SourceMap,
++    },
++    udf_config::types::UdfConfig,
++};
++use pb::funrun_status::{
++    status_error_metadata,
++    status_into_anyhow,
++};
++use sync_types::{
++    CanonicalizedModulePath,
++    Timestamp,
++};
++use tokio::{
++    net::lookup_host,
++    sync::{
++        mpsc,
++        watch,
++    },
++    time::timeout,
++};
++use tonic::transport::{
++    channel::Change,
++    Channel,
++    Endpoint,
++};
++use udf::{
++    ActionCallbacks,
++    EvaluateAppDefinitionsResult,
++    FunctionOutcome,
++    HttpActionResponseStreamer,
++};
++use usage_tracking::FunctionUsageStats;
++use value::identifier::Identifier;
++
++use self::snapshot_rpc::SnapshotPins;
++use crate::{
++    server::{
++        FunctionMetadata,
++        HttpActionMetadata,
++    },
++    FunctionFinalTransaction,
++    FunctionRunner,
++    FunctionWrites,
++};
++
++mod proto;
++pub mod snapshot_rpc;
++
++static FUNRUN_LB_REFRESH_INTERVAL: LazyLock<Duration> =
++    LazyLock::new(|| Duration::from_secs(env_config("FUNRUN_LB_REFRESH_INTERVAL_SECONDS", 3)));
++const FUNRUN_RESPONSE_TIMEOUT: Duration = Duration::from_secs(600);
++const FUNRUN_MAX_ATTEMPTS: u32 = 3;
++const FUNRUN_MAX_NOT_SENT_RETRIES: u32 = 8;
++const FUNRUN_EMPTY_ENDPOINTS_FAIL_FAST: Duration = Duration::from_secs(30);
++const FUNRUN_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
++const FUNRUN_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
++const FUNRUN_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(5);
++
++register_convex_counter!(
++    FUNRUN_CLIENT_RETRY_TOTAL,
++    "Funrun client RPC attempt retries, by reason",
++    &["reason"]
++);
++fn log_funrun_client_retry(reason: &'static str) {
++    log_counter_with_labels(
++        &FUNRUN_CLIENT_RETRY_TOTAL,
++        1,
++        vec![StaticMetricLabel::new_const("reason", reason)],
++    );
++}
++
++fn callback_token_issued_at(identity: &Identity) -> SystemTime {
++    let now = SystemTime::now();
++    match identity {
++        Identity::User(user) => user
++            .expiration
++            .checked_sub(Duration::from_secs(1))
++            .map_or(now, |last_valid| now.min(last_valid)),
++        _ => now,
++    }
++}
++
++fn parse_funrun_target(addr: &str) -> anyhow::Result<(String, u16)> {
++    anyhow::ensure!(
++        !addr.starts_with("https://"),
++        "CONVEX_FUNRUN_ADDR is plaintext (http:// or host:port); the funrun hop has no TLS: {addr}"
++    );
++    let rest = addr
++        .strip_prefix("http://")
++        .unwrap_or(addr)
++        .trim_end_matches('/');
++    let (host, port) = if let Some(bracketed) = rest.strip_prefix('[') {
++        let (host, after) = bracketed
++            .split_once(']')
++            .with_context(|| format!("unclosed IPv6 bracket in {addr}"))?;
++        let port = after
++            .strip_prefix(':')
++            .with_context(|| format!("CONVEX_FUNRUN_ADDR must include a port: {addr}"))?;
++        (host, port)
++    } else {
++        rest.rsplit_once(':')
++            .with_context(|| format!("CONVEX_FUNRUN_ADDR must include a port: {addr}"))?
++    };
++    let port: u16 = port
++        .parse()
++        .with_context(|| format!("invalid funrun port in {addr}"))?;
++    anyhow::ensure!(!host.is_empty(), "empty funrun host in {addr}");
++    Ok((host.to_string(), port))
++}
++
++pub fn preflight(funrun_addr: &str) -> anyhow::Result<()> {
++    parse_funrun_target(funrun_addr)?;
++    isolate::client::initialize_v8();
++    Ok(())
++}
++
++fn funrun_endpoint(uri: &str) -> anyhow::Result<Endpoint> {
++    Ok(Endpoint::from_shared(uri.to_string())
++        .with_context(|| format!("invalid funrun endpoint {uri}"))?
++        .tcp_nodelay(true)
++        .connect_timeout(FUNRUN_CONNECT_TIMEOUT)
++        .http2_keep_alive_interval(FUNRUN_KEEPALIVE_INTERVAL)
++        .keep_alive_timeout(FUNRUN_KEEPALIVE_TIMEOUT)
++        .keep_alive_while_idle(true)
++        .http2_max_local_error_reset_streams(None))
++}
++
++fn spawn_endpoint_refresher<RT: Runtime>(
++    rt: &RT,
++    host: String,
++    port: u16,
++    tx: tokio::sync::mpsc::Sender<Change<SocketAddr, Endpoint>>,
++    empty_since: watch::Sender<Option<Instant>>,
++) {
++    let refresh_rt = rt.clone();
++    rt.spawn_background("funrun_lb_refresh", async move {
++        let mut current = BTreeSet::new();
++        loop {
++            match lookup_host((host.as_str(), port)).await {
++                Ok(addrs) => {
++                    let unique: BTreeSet<SocketAddr> = addrs.collect();
++                    if !unique.is_empty() {
++                        let mut next: BTreeSet<SocketAddr> =
++                            unique.intersection(&current).copied().collect();
++                        for addr in unique.difference(&current) {
++                            if let Ok(endpoint) = funrun_endpoint(&format!("http://{addr}"))
++                                && tx.send(Change::Insert(*addr, endpoint)).await.is_ok()
++                            {
++                                next.insert(*addr);
++                            }
++                        }
++                        for addr in current.difference(&unique) {
++                            let _ = tx.send(Change::Remove(*addr)).await;
++                        }
++                        if next != current {
++                            tracing::info!("[funrun-lb] p2c across {} endpoint(s)", next.len());
++                            current = next;
++                        }
++                    }
++                },
++                Err(e) => {
++                    tracing::warn!("[funrun-lb] DNS resolution for {host}:{port} failed: {e}")
++                },
++            }
++            if !current.is_empty() {
++                empty_since.send_if_modified(|since| since.take().is_some());
++            }
++            refresh_rt.wait(*FUNRUN_LB_REFRESH_INTERVAL).await;
++        }
++    });
++}
++
++pub struct RemoteFunctionRunner<RT: Runtime> {
++    channel: Channel,
++    local: Arc<dyn FunctionRunner<RT>>,
++    instance_name: String,
++    key_broker: KeyBroker,
++    convex_origin: ConvexOrigin,
++    callback_transport_url: Option<String>,
++    rt: RT,
++    instance_secret: DeploymentSecret,
++    endpoints_empty_since: watch::Receiver<Option<Instant>>,
++    snapshot_pins: Arc<SnapshotPins>,
++}
++
++enum AttemptFailure {
++    NotSent(anyhow::Error),
++    Rpc(tonic::Status),
++    TimedOut,
++    Internal(anyhow::Error),
++}
++
++impl AttemptFailure {
++    fn from_status(status: tonic::Status) -> Self {
++        let message = if is_connect_error(&status) {
++            "funrun connection failed before the request was sent"
++        } else if status.code() == tonic::Code::Unauthenticated
++            && status_error_metadata(&status).is_none()
++        {
++            "funrun rejected the request before decoding it"
++        } else {
++            return Self::Rpc(status);
++        };
++        Self::NotSent(
++            status_into_anyhow(status).context(ErrorMetadata::rejected_before_execution(
++                "FunrunConnectError",
++                message,
++            )),
++        )
++    }
++
++    fn retry_reason(&self, udf_type: UdfType) -> Option<&'static str> {
++        let has_deadline = has_deadline(udf_type);
++        match self {
++            Self::NotSent(_) => Some("not_sent"),
++            Self::TimedOut => has_deadline.then_some("timeout"),
++            Self::Rpc(status)
++                if status_error_metadata(status)
++                    .is_some_and(|metadata| metadata.is_rejected_before_execution()) =>
++            {
++                Some("rejected_before_execution")
++            },
++            Self::Rpc(status)
++                if has_deadline
++                    && matches!(
++                        status.code(),
++                        tonic::Code::Unavailable | tonic::Code::Cancelled | tonic::Code::Unknown
++                    ) =>
++            {
++                Some("transport")
++            },
++            Self::Rpc(_) | Self::Internal(_) => None,
++        }
++    }
++
++    fn into_error(self, rpc: &'static str) -> anyhow::Error {
++        match self {
++            Self::NotSent(e) | Self::Internal(e) => e,
++            Self::Rpc(status) => status_into_anyhow(status).context(rpc),
++            Self::TimedOut => anyhow::anyhow!("funrun response timed out").context(rpc),
++        }
++    }
++}
++
++fn has_deadline(udf_type: UdfType) -> bool {
++    matches!(udf_type, UdfType::Query | UdfType::Mutation | UdfType::Init)
++}
++
++fn retry_backoff(attempt: u32) -> Duration {
++    Duration::from_millis(50 * u64::from(attempt))
++}
++
++impl<RT: Runtime> RemoteFunctionRunner<RT> {
++    pub fn new(
++        funrun_addr: String,
++        instance_name: String,
++        key_broker: KeyBroker,
++        instance_secret: DeploymentSecret,
++        convex_origin: ConvexOrigin,
++        rt: RT,
++        local: Arc<dyn FunctionRunner<RT>>,
++        database: database::Database<RT>,
++    ) -> anyhow::Result<Self> {
++        let (host, port) = parse_funrun_target(&funrun_addr)?;
++        let (endpoints_tx, endpoints_empty_since) = watch::channel(Some(Instant::now()));
++        let (channel, tx) = Channel::balance_channel::<SocketAddr>(64);
++        spawn_endpoint_refresher(&rt, host, port, tx, endpoints_tx);
++        let callback_transport_url = std::env::var("CONVEX_FUNRUN_CALLBACK_URL")
++            .ok()
++            .filter(|v| !v.is_empty());
++        if let Some(url) = &callback_transport_url {
++            tracing::info!("[funrun] action callbacks will use transport URL {url}");
++        } else {
++            tracing::info!("[funrun] action callbacks use the public origin");
++        }
++        Ok(Self {
++            channel,
++            local,
++            instance_name,
++            key_broker,
++            convex_origin,
++            callback_transport_url,
++            rt,
++            instance_secret,
++            endpoints_empty_since,
++            snapshot_pins: SnapshotPins::install(&database),
++        })
++    }
++
++    fn auth_header(&self) -> String {
++        let unix_seconds = self.rt.unix_timestamp().as_secs();
++        funrun_auth_header(&self.instance_secret, &self.instance_name, unix_seconds)
++    }
++
++    fn authenticated_request<T>(&self, message: T) -> Result<tonic::Request<T>, AttemptFailure> {
++        let mut request = tonic::Request::new(message);
++        let header = self
++            .auth_header()
++            .parse()
++            .context("invalid funrun auth header")
++            .map_err(AttemptFailure::Internal)?;
++        request
++            .metadata_mut()
++            .insert(FUNRUN_AUTH_METADATA_KEY, header);
++        Ok(request)
++    }
++
++    fn client(&self) -> pb::funrun::funrun_client::FunrunClient<Channel> {
++        pb::funrun::funrun_client::FunrunClient::new(self.channel.clone())
++            .max_decoding_message_size(usize::MAX)
++    }
++
++    async fn wait_for_endpoints(&self) -> Result<(), AttemptFailure> {
++        let mut endpoints = self.endpoints_empty_since.clone();
++        let Some(empty_since) = *endpoints.borrow_and_update() else {
++            return Ok(());
++        };
++        let remaining = FUNRUN_EMPTY_ENDPOINTS_FAIL_FAST.saturating_sub(empty_since.elapsed());
++        match timeout(remaining, endpoints.wait_for(Option::is_none)).await {
++            Ok(Ok(_)) => Ok(()),
++            _ => Err(AttemptFailure::NotSent(anyhow::anyhow!(
++                ErrorMetadata::rejected_before_execution(
++                    "FunrunUnavailable",
++                    format!(
++                        "funrun DNS has no endpoints after {FUNRUN_EMPTY_ENDPOINTS_FAIL_FAST:?}; \
++                         check the funrun Service"
++                    ),
++                )
++            ))),
++        }
++    }
++
++    async fn run_function_attempt(
++        &self,
++        udf_type: UdfType,
++        request: &pb::funrun::RunFunctionRequest,
++        log_line_sender: &Option<mpsc::UnboundedSender<LogLine>>,
++        parts_received: &mut bool,
++    ) -> Result<pb::funrun::RunFunctionResult, AttemptFailure> {
++        self.wait_for_endpoints().await?;
++        let req = self.authenticated_request(request.clone())?;
++        let call = self.stream_run_function(req, log_line_sender, parts_received);
++        if has_deadline(udf_type) {
++            timeout(FUNRUN_RESPONSE_TIMEOUT, call)
++                .await
++                .map_err(|_| AttemptFailure::TimedOut)?
++        } else {
++            call.await
++        }
++    }
++
++    async fn stream_run_function(
++        &self,
++        req: tonic::Request<pb::funrun::RunFunctionRequest>,
++        log_line_sender: &Option<mpsc::UnboundedSender<LogLine>>,
++        parts_received: &mut bool,
++    ) -> Result<pb::funrun::RunFunctionResult, AttemptFailure> {
++        let mut stream = timeout(FUNRUN_RESPONSE_TIMEOUT, self.client().run_function(req))
++            .await
++            .map_err(|_| AttemptFailure::TimedOut)?
++            .map_err(AttemptFailure::from_status)?
++            .into_inner();
++        let mut result = None;
++        while let Some(part) = stream
++            .message()
++            .await
++            .map_err(AttemptFailure::from_status)?
++        {
++            *parts_received = true;
++            match part.part {
++                Some(pb::funrun::run_function_response_part::Part::LogLine(log_line)) => {
++                    let log_line = LogLine::try_from(log_line).map_err(AttemptFailure::Internal)?;
++                    if let Some(sender) = log_line_sender {
++                        let _ = sender.send(log_line);
++                    }
++                },
++                Some(pb::funrun::run_function_response_part::Part::Result(r)) => {
++                    if result.is_some() {
++                        return Err(AttemptFailure::Internal(anyhow::anyhow!(
++                            "funrun sent more than one terminal result"
++                        )));
++                    }
++                    result = Some(r);
++                },
++                None => {
++                    return Err(AttemptFailure::Internal(anyhow::anyhow!(
++                        "funrun sent an empty RunFunctionResponsePart"
++                    )));
++                },
++            }
++        }
++        result.ok_or_else(|| {
++            AttemptFailure::Internal(anyhow::anyhow!(
++                "funrun stream ended without a terminal result"
++            ))
++        })
++    }
++
++    fn run_function_request(
++        &self,
++        udf_type: UdfType,
++        identity: Identity,
++        ts: RepeatableTimestamp,
++        existing_writes: FunctionWrites,
++        function_metadata: Option<FunctionMetadata>,
++        default_system_env_vars: BTreeMap<EnvVarName, EnvVarValue>,
++        in_memory_index_last_modified: BTreeMap<IndexId, Timestamp>,
++        context: ExecutionContext,
++    ) -> anyhow::Result<pb::funrun::RunFunctionRequest> {
++        let component = function_metadata
++            .as_ref()
++            .map(|m| m.path_and_args.path().component)
++            .unwrap_or(common::components::ComponentId::Root);
++        let auth_header = token_to_authorization_header(identity.clone().into())?;
++        let callback_token = self
++            .key_broker
++            .issue_action_token_at(component, callback_token_issued_at(&identity));
++        let existing_writes = existing_writes
++            .updates
++            .into_iter()
++            .map(pb::common::PendingDocumentUpdate::try_from)
++            .collect::<anyhow::Result<Vec<_>>>()?;
++        let (path_and_args, journal) = match function_metadata {
++            Some(FunctionMetadata {
++                path_and_args,
++                journal,
++            }) => (
++                Some(pb::common::ValidatedPathAndArgs::try_from(path_and_args)?),
++                Some(journal.into()),
++            ),
++            None => (None, None),
++        };
++        Ok(pb::funrun::RunFunctionRequest {
++            instance_name: self.instance_name.clone(),
++            udf_type: pb::common::UdfType::from(udf_type) as i32,
++            identity: Some(identity.try_into()?),
++            ts: Some(ts.into()),
++            existing_writes,
++            path_and_args,
++            journal,
++            default_system_env_vars: default_system_env_vars
++                .into_iter()
++                .map(|(name, value)| pb::funrun::EnvVar {
++                    name: name.to_string(),
++                    value: String::from(value),
++                })
++                .collect(),
++            in_memory_index_last_modified: in_memory_index_last_modified
++                .into_iter()
++                .map(|(index_id, ts)| pb::funrun::IndexLastModified {
++                    index_id: String::from(index_id),
++                    last_modified_ts: ts.into(),
++                })
++                .collect(),
++            context: Some(context.into()),
++            backend_callback_url: Some(self.convex_origin.to_string()),
++            callback_transport_url: self.callback_transport_url.clone(),
++            callback_token: Some(callback_token),
++            auth_header,
++        })
++    }
++
++    async fn run_function_remote(
++        &self,
++        udf_type: UdfType,
++        identity: Identity,
++        ts: RepeatableTimestamp,
++        existing_writes: FunctionWrites,
++        log_line_sender: Option<mpsc::UnboundedSender<LogLine>>,
++        function_metadata: Option<FunctionMetadata>,
++        default_system_env_vars: BTreeMap<EnvVarName, EnvVarValue>,
++        in_memory_index_last_modified: BTreeMap<IndexId, Timestamp>,
++        context: ExecutionContext,
++    ) -> anyhow::Result<(
++        Option<FunctionFinalTransaction>,
++        FunctionOutcome,
++        FunctionUsageStats,
++    )> {
++        let inert_identity: InertIdentity = identity.clone().into();
++        let path_and_args = function_metadata.as_ref().map(|m| m.path_and_args.clone());
++        let request = self.run_function_request(
++            udf_type,
++            identity,
++            ts,
++            existing_writes,
++            function_metadata,
++            default_system_env_vars,
++            in_memory_index_last_modified,
++            context,
++        )?;
++        let _pin = has_deadline(udf_type)
++            .then(|| self.snapshot_pins.pin(ts))
++            .flatten();
++        let mut attempt: u32 = 1;
++        let mut not_sent: u32 = 0;
++        let result = loop {
++            let mut parts_received = false;
++            let failure = match self
++                .run_function_attempt(udf_type, &request, &log_line_sender, &mut parts_received)
++                .await
++            {
++                Ok(result) => break result,
++                Err(failure) => failure,
++            };
++            match failure.retry_reason(udf_type) {
++                Some(reason @ "not_sent") if not_sent < FUNRUN_MAX_NOT_SENT_RETRIES => {
++                    log_funrun_client_retry(reason);
++                    self.rt.wait(retry_backoff(1)).await;
++                    not_sent += 1;
++                },
++                Some(reason) if attempt < FUNRUN_MAX_ATTEMPTS && !parts_received => {
++                    log_funrun_client_retry(reason);
++                    self.rt.wait(retry_backoff(attempt)).await;
++                    attempt += 1;
++                },
++                _ => return Err(failure.into_error("funrun RunFunction failed")),
++            }
++        };
++        let pb::funrun::RunFunctionResult {
++            outcome,
++            final_transaction,
++            usage_stats,
++        } = result;
++        let outcome = FunctionOutcome::from_proto(
++            outcome.context("funrun response missing outcome")?,
++            path_and_args,
++            None,
++            inert_identity,
++        )?;
++        let final_transaction = final_transaction
++            .map(FunctionFinalTransaction::try_from)
++            .transpose()?;
++        let usage_stats = usage_stats
++            .map(FunctionUsageStats::try_from)
++            .transpose()?
++            .unwrap_or_default();
++        Ok((final_transaction, outcome, usage_stats))
++    }
++
++    async fn http_action_attempt(
++        &self,
++        request: pb::funrun::RunHttpActionRequest,
++    ) -> Result<
++        (
++            tonic::Streaming<pb::funrun::HttpActionResponsePart>,
++            Option<pb::funrun::HttpActionResponsePart>,
++        ),
++        AttemptFailure,
++    > {
++        self.wait_for_endpoints().await?;
++        let req = self.authenticated_request(request)?;
++        let mut stream = timeout(FUNRUN_RESPONSE_TIMEOUT, self.client().run_http_action(req))
++            .await
++            .map_err(|_| AttemptFailure::TimedOut)?
++            .map_err(AttemptFailure::from_status)?
++            .into_inner();
++        let first = stream
++            .message()
++            .await
++            .map_err(AttemptFailure::from_status)?;
++        Ok((stream, first))
++    }
++
++    async fn open_http_action(
++        &self,
++        mut request: pb::funrun::RunHttpActionRequest,
++    ) -> anyhow::Result<(
++        tonic::Streaming<pb::funrun::HttpActionResponsePart>,
++        Option<pb::funrun::HttpActionResponsePart>,
++    )> {
++        let mut attempt: u32 = 1;
++        let mut not_sent: u32 = 0;
++        loop {
++            let last_attempt =
++                attempt >= FUNRUN_MAX_ATTEMPTS && not_sent >= FUNRUN_MAX_NOT_SENT_RETRIES;
++            let message = if last_attempt {
++                std::mem::take(&mut request)
++            } else {
++                request.clone()
++            };
++            let failure = match self.http_action_attempt(message).await {
++                Ok(opened) => return Ok(opened),
++                Err(failure) => failure,
++            };
++            match failure.retry_reason(UdfType::HttpAction) {
++                Some(reason @ "not_sent") if not_sent < FUNRUN_MAX_NOT_SENT_RETRIES => {
++                    log_funrun_client_retry(reason);
++                    self.rt.wait(retry_backoff(1)).await;
++                    not_sent += 1;
++                },
++                Some(reason) if attempt < FUNRUN_MAX_ATTEMPTS => {
++                    log_funrun_client_retry(reason);
++                    self.rt.wait(retry_backoff(attempt)).await;
++                    attempt += 1;
++                },
++                _ => return Err(failure.into_error("funrun RunHttpAction failed")),
++            }
++        }
++    }
++
++    async fn run_http_action_remote(
++        &self,
++        identity: Identity,
++        ts: RepeatableTimestamp,
++        existing_writes: FunctionWrites,
++        log_line_sender: Option<mpsc::UnboundedSender<LogLine>>,
++        http_action_metadata: HttpActionMetadata,
++        default_system_env_vars: BTreeMap<EnvVarName, EnvVarValue>,
++        in_memory_index_last_modified: BTreeMap<IndexId, Timestamp>,
++        context: ExecutionContext,
++    ) -> anyhow::Result<(
++        Option<FunctionFinalTransaction>,
++        FunctionOutcome,
++        FunctionUsageStats,
++    )> {
++        let HttpActionMetadata {
++            mut http_response_streamer,
++            http_module_path,
++            routed_path,
++            http_request,
++        } = http_action_metadata;
++        let request_head = http_request.head;
++        let http_path_for_outcome = http_module_path.clone();
++        let component = http_module_path.path().component;
++        let inert_identity: InertIdentity =
++            propagate_component_auth(&identity, component, component.is_root()).into();
++        let auth_header = token_to_authorization_header(identity.clone().into())?;
++        let callback_token = self
++            .key_broker
++            .issue_action_token_at(component, callback_token_issued_at(&identity));
++        let http_request_head = request_head.clone().into();
++        let http_body = http_request.body;
++        let dispatch = async move {
++            self.wait_for_endpoints()
++                .await
++                .map_err(|failure| failure.into_error("funrun RunHttpAction failed"))?;
++            let http_request_body = match http_body {
++                Some(mut body) => {
++                    let mut buf = Vec::new();
++                    while let Some(chunk) = body.next().await {
++                        buf.extend_from_slice(&chunk?);
++                    }
++                    Some(buf)
++                },
++                None => None,
++            };
++            let existing_writes = existing_writes
++                .updates
++                .into_iter()
++                .map(pb::common::PendingDocumentUpdate::try_from)
++                .collect::<anyhow::Result<Vec<_>>>()?;
++            let request = pb::funrun::RunHttpActionRequest {
++                instance_name: self.instance_name.clone(),
++                identity: Some(identity.try_into()?),
++                ts: Some(ts.into()),
++                existing_writes,
++                default_system_env_vars: default_system_env_vars
++                    .into_iter()
++                    .map(|(name, value)| pb::funrun::EnvVar {
++                        name: name.to_string(),
++                        value: String::from(value),
++                    })
++                    .collect(),
++                in_memory_index_last_modified: in_memory_index_last_modified
++                    .into_iter()
++                    .map(|(index_id, ts)| pb::funrun::IndexLastModified {
++                        index_id: String::from(index_id),
++                        last_modified_ts: ts.into(),
++                    })
++                    .collect(),
++                context: Some(context.into()),
++                backend_callback_url: Some(self.convex_origin.to_string()),
++                callback_transport_url: self.callback_transport_url.clone(),
++                callback_token: Some(callback_token),
++                auth_header,
++                http_module_path: Some(http_module_path.try_into()?),
++                routed_path: routed_path.0,
++                http_request_head: Some(http_request_head),
++                http_request_body,
++            };
++            self.open_http_action(request).await
++        }
++        .fuse();
++        futures::pin_mut!(dispatch);
++        let (mut stream, first) = select_biased! {
++            _ = http_response_streamer.sender.closed().fuse() => {
++                anyhow::bail!(ErrorMetadata::client_disconnect());
++            },
++            opened = dispatch => opened?,
++        };
++        let mut result: Option<pb::funrun::RunFunctionResult> = None;
++        if let Some(part) = first {
++            forward_http_action_part(
++                part,
++                &mut result,
++                &log_line_sender,
++                &mut http_response_streamer,
++            )?;
++            loop {
++                let message = stream.message().fuse();
++                futures::pin_mut!(message);
++                let part = select_biased! {
++                    _ = http_response_streamer.sender.closed().fuse() => {
++                        anyhow::bail!(ErrorMetadata::client_disconnect());
++                    },
++                    part = message => part
++                        .map_err(status_into_anyhow)
++                        .context("funrun RunHttpAction stream error")?,
++                };
++                let Some(part) = part else {
++                    break;
++                };
++                forward_http_action_part(
++                    part,
++                    &mut result,
++                    &log_line_sender,
++                    &mut http_response_streamer,
++                )?;
++            }
++        }
++        let pb::funrun::RunFunctionResult {
++            outcome,
++            final_transaction: _,
++            usage_stats,
++        } = result.context("funrun HttpAction stream ended without a terminal result")?;
++        let outcome = FunctionOutcome::from_proto(
++            outcome.context("funrun response missing outcome")?,
++            None,
++            Some((http_path_for_outcome, request_head)),
++            inert_identity,
++        )?;
++        let usage_stats = usage_stats
++            .map(FunctionUsageStats::try_from)
++            .transpose()?
++            .unwrap_or_default();
++        Ok((None, outcome, usage_stats))
++    }
++}
++
++fn forward_http_action_part(
++    part: pb::funrun::HttpActionResponsePart,
++    result: &mut Option<pb::funrun::RunFunctionResult>,
++    log_line_sender: &Option<mpsc::UnboundedSender<LogLine>>,
++    http_response_streamer: &mut HttpActionResponseStreamer,
++) -> anyhow::Result<()> {
++    match part.part {
++        Some(pb::funrun::http_action_response_part::Part::LogLine(log_line)) => {
++            let log_line = LogLine::try_from(log_line)?;
++            if let Some(sender) = log_line_sender {
++                let _ = sender.send(log_line);
++            }
++        },
++        Some(pb::funrun::http_action_response_part::Part::Response(response)) => {
++            let part = http_action_response_part_from_proto(response)?;
++            if http_response_streamer.send_part(part)?.is_err() {
++                anyhow::bail!(ErrorMetadata::client_disconnect());
++            }
++        },
++        Some(pb::funrun::http_action_response_part::Part::Result(r)) => {
++            anyhow::ensure!(
++                result.is_none(),
++                "funrun sent more than one terminal result"
++            );
++            *result = Some(r);
++        },
++        None => anyhow::bail!("funrun sent an empty HttpActionResponsePart"),
++    }
++    Ok(())
++}
++
++fn http_action_response_part_from_proto(
++    response: pb::common::HttpActionResponse,
++) -> anyhow::Result<udf::HttpActionResponsePart> {
++    use pb::common::http_action_response::MessageType;
++    let message_type = response
++        .message_type
++        .context("HttpActionResponse missing message_type")?;
++    Ok(match message_type {
++        MessageType::Head(head) => {
++            udf::HttpActionResponsePart::Head(udf::HttpActionResponseHead::try_from(head)?)
++        },
++        MessageType::Body(bytes) => udf::HttpActionResponsePart::BodyChunk(bytes.into()),
++    })
++}
++
++#[async_trait]
++impl<RT: Runtime> FunctionRunner<RT> for RemoteFunctionRunner<RT> {
++    #[fastrace::trace]
++    async fn run_function(
++        &self,
++        udf_type: UdfType,
++        _udf_runtime: Option<UdfRuntime>,
++        identity: Identity,
++        ts: RepeatableTimestamp,
++        existing_writes: FunctionWrites,
++        log_line_sender: Option<mpsc::UnboundedSender<LogLine>>,
++        function_metadata: Option<FunctionMetadata>,
++        http_action_metadata: Option<HttpActionMetadata>,
++        default_system_env_vars: BTreeMap<EnvVarName, EnvVarValue>,
++        in_memory_index_last_modified: BTreeMap<IndexId, Timestamp>,
++        context: ExecutionContext,
++    ) -> anyhow::Result<(
++        Option<FunctionFinalTransaction>,
++        FunctionOutcome,
++        FunctionUsageStats,
++    )> {
++        match http_action_metadata {
++            Some(http_action_metadata) => {
++                anyhow::ensure!(
++                    udf_type == UdfType::HttpAction,
++                    "http_action_metadata provided for non-HTTP udf_type {udf_type:?}"
++                );
++                self.run_http_action_remote(
++                    identity,
++                    ts,
++                    existing_writes,
++                    log_line_sender,
++                    http_action_metadata,
++                    default_system_env_vars,
++                    in_memory_index_last_modified,
++                    context,
++                )
++                .await
++            },
++            None => {
++                anyhow::ensure!(
++                    udf_type != UdfType::HttpAction,
++                    "HTTP action requested without http_action_metadata"
++                );
++                self.run_function_remote(
++                    udf_type,
++                    identity,
++                    ts,
++                    existing_writes,
++                    log_line_sender,
++                    function_metadata,
++                    default_system_env_vars,
++                    in_memory_index_last_modified,
++                    context,
++                )
++                .await
++            },
++        }
++    }
++
++    #[fastrace::trace]
++    async fn analyze(
++        &self,
++        udf_config: UdfConfig,
++        modules: BTreeMap<CanonicalizedModulePath, ModuleConfig>,
++        environment_variables: BTreeMap<EnvVarName, EnvVarValue>,
++    ) -> anyhow::Result<Result<BTreeMap<CanonicalizedModulePath, AnalyzedModule>, JsError>> {
++        self.local
++            .analyze(udf_config, modules, environment_variables)
++            .await
++    }
++
++    #[fastrace::trace]
++    async fn evaluate_app_definitions(
++        &self,
++        app_definition: ModuleConfig,
++        component_definitions: BTreeMap<ComponentDefinitionPath, ModuleConfig>,
++        dependency_graph: BTreeSet<(ComponentDefinitionPath, ComponentDefinitionPath)>,
++        user_environment_variables: BTreeMap<EnvVarName, EnvVarValue>,
++        system_env_vars: BTreeMap<EnvVarName, EnvVarValue>,
++    ) -> anyhow::Result<EvaluateAppDefinitionsResult> {
++        self.local
++            .evaluate_app_definitions(
++                app_definition,
++                component_definitions,
++                dependency_graph,
++                user_environment_variables,
++                system_env_vars,
++            )
++            .await
++    }
++
++    #[fastrace::trace]
++    async fn evaluate_component_initializer(
++        &self,
++        evaluated_definitions: BTreeMap<ComponentDefinitionPath, ComponentDefinitionMetadata>,
++        path: ComponentDefinitionPath,
++        definition: ModuleConfig,
++        args: BTreeMap<Identifier, Resource>,
++        name: ComponentName,
++    ) -> anyhow::Result<BTreeMap<Identifier, Resource>> {
++        self.local
++            .evaluate_component_initializer(evaluated_definitions, path, definition, args, name)
++            .await
++    }
++
++    #[fastrace::trace]
++    async fn evaluate_schema(
++        &self,
++        schema_bundle: ModuleSource,
++        source_map: Option<SourceMap>,
++        rng_seed: [u8; 32],
++        unix_timestamp: UnixTimestamp,
++    ) -> anyhow::Result<DatabaseSchema> {
++        self.local
++            .evaluate_schema(schema_bundle, source_map, rng_seed, unix_timestamp)
++            .await
++    }
++
++    #[fastrace::trace]
++    async fn evaluate_auth_config(
++        &self,
++        auth_config_bundle: ModuleSource,
++        source_map: Option<SourceMap>,
++        environment_variables: BTreeMap<EnvVarName, EnvVarValue>,
++        explanation: &str,
++    ) -> anyhow::Result<AuthConfig> {
++        self.local
++            .evaluate_auth_config(
++                auth_config_bundle,
++                source_map,
++                environment_variables,
++                explanation,
++            )
++            .await
++    }
++
++    fn set_action_callbacks(&self, _action_callbacks: Arc<dyn ActionCallbacks>) {}
++}
++
++#[cfg(test)]
++mod tests {
++    use errors::ErrorMetadata;
++    use pb::error_metadata::ErrorMetadataStatusExt;
++    use tonic::transport::Endpoint;
++
++    use super::{
++        AttemptFailure,
++        UdfType,
++    };
++
++    const ALL: [UdfType; 5] = [
++        UdfType::Query,
++        UdfType::Mutation,
++        UdfType::Init,
++        UdfType::Action,
++        UdfType::HttpAction,
++    ];
++
++    fn reasons(failure: &AttemptFailure) -> Vec<Option<&'static str>> {
++        ALL.iter().map(|t| failure.retry_reason(*t)).collect()
++    }
++
++    #[tokio::test]
++    async fn refused_connection_is_not_sent_for_every_udf_type() {
++        let channel = Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
++        let status = pb::funrun::funrun_client::FunrunClient::new(channel)
++            .run_function(pb::funrun::RunFunctionRequest::default())
++            .await
++            .unwrap_err();
++        let failure = AttemptFailure::from_status(status);
++        assert!(matches!(failure, AttemptFailure::NotSent(_)));
++        assert_eq!(reasons(&failure), vec![Some("not_sent"); 5]);
++        let error = failure.into_error("funrun RunFunction failed");
++        assert!(error
++            .downcast_ref::<ErrorMetadata>()
++            .is_some_and(|metadata| metadata.is_rejected_before_execution()));
++    }
++
++    #[test]
++    fn mid_flight_failures_keep_at_most_once_for_actions() {
++        let transport = AttemptFailure::from_status(tonic::Status::unavailable("reset"));
++        let deadline = Some("transport");
++        assert_eq!(
++            reasons(&transport),
++            vec![deadline, deadline, deadline, None, None]
++        );
++        let rejected = AttemptFailure::from_status(tonic::Status::from_anyhow(
++            ErrorMetadata::rejected_before_execution("ExpiredInQueue", "queue full").into(),
++        ));
++        assert_eq!(
++            reasons(&rejected),
++            vec![Some("rejected_before_execution"); 5]
++        );
++        let internal = AttemptFailure::from_status(tonic::Status::internal("boom"));
++        assert_eq!(reasons(&internal), vec![None; 5]);
++        let timeout = Some("timeout");
++        assert_eq!(
++            reasons(&AttemptFailure::TimedOut),
++            vec![timeout, timeout, timeout, None, None]
++        );
++    }
++}
+diff --git a/crates/function_runner/src/remote/proto.rs b/crates/function_runner/src/remote/proto.rs
 new file mode 100644
 index 000000000..34a5cbdde
 --- /dev/null
-+++ b/crates/function_runner/src/proto.rs
++++ b/crates/function_runner/src/remote/proto.rs
 @@ -0,0 +1,369 @@
 +use std::{
 +    collections::BTreeMap,
@@ -489,962 +1545,509 @@ index 000000000..34a5cbdde
 +        assert_eq!(reads, decoded);
 +    }
 +}
-diff --git a/crates/function_runner/src/remote.rs b/crates/function_runner/src/remote.rs
+diff --git a/crates/function_runner/src/remote/snapshot_rpc.rs b/crates/function_runner/src/remote/snapshot_rpc.rs
 new file mode 100644
-index 000000000..6c11f0925
+index 000000000..f39f28a6f
 --- /dev/null
-+++ b/crates/function_runner/src/remote.rs
-@@ -0,0 +1,926 @@
++++ b/crates/function_runner/src/remote/snapshot_rpc.rs
+@@ -0,0 +1,479 @@
 +use std::{
-+    collections::{
-+        BTreeMap,
-+        BTreeSet,
-+    },
-+    net::SocketAddr,
++    collections::BTreeMap,
++    str::FromStr,
 +    sync::{
 +        Arc,
-+        LazyLock,
-+    },
-+    time::{
-+        Duration,
-+        Instant,
-+        SystemTime,
++        OnceLock,
 +    },
 +};
 +
-+use anyhow::Context as _;
-+use async_trait::async_trait;
-+use authentication::token_to_authorization_header;
-+use cmd_util::env::env_config;
++use anyhow::Context;
 +use common::{
-+    auth::AuthConfig,
-+    bootstrap_model::components::definition::ComponentDefinitionMetadata,
-+    components::{
-+        ComponentDefinitionPath,
-+        ComponentName,
-+        Resource,
-+    },
-+    errors::JsError,
-+    execution_context::ExecutionContext,
-+    identity::InertIdentity,
-+    log_lines::LogLine,
-+    runtime::{
-+        Runtime,
-+        UnixTimestamp,
-+    },
-+    schemas::DatabaseSchema,
++    document::DocumentUpdate,
++    index::IndexKeyBytes,
++    runtime::Runtime,
 +    types::{
-+        ConvexOrigin,
-+        DeploymentMetadata,
 +        IndexId,
++        IndexName,
 +        RepeatableTimestamp,
-+        UdfRuntime,
-+        UdfType,
 +    },
++};
++use database::{
++    Database,
++    Snapshot,
++    TextIndexManagerSnapshot,
 +};
 +use errors::ErrorMetadata;
-+use futures::{
-+    select_biased,
-+    FutureExt,
-+    StreamExt,
-+};
-+use keybroker::{
-+    funrun_auth_header,
-+    DeploymentSecret,
-+    Identity,
-+    KeyBroker,
-+    FUNRUN_AUTH_METADATA_KEY,
-+};
 +use metrics::{
-+    log_counter_with_labels,
++    log_counter,
 +    register_convex_counter,
-+    register_convex_histogram,
-+    StaticMetricLabel,
-+    StatusTimer,
-+    STATUS_LABEL,
 +};
-+use model::{
-+    components::auth::propagate_component_auth,
-+    config::types::ModuleConfig,
-+    environment_variables::types::{
-+        EnvVarName,
-+        EnvVarValue,
-+    },
-+    modules::module_versions::{
-+        AnalyzedModule,
-+        ModuleSource,
-+        SourceMap,
-+    },
-+    udf_config::types::UdfConfig,
++use parking_lot::Mutex;
++use pb::funrun::{
++    SnapshotError,
++    SnapshotTableCountsRequest,
++    SnapshotTableCountsResponse,
++    SnapshotTextSearchRequest,
++    SnapshotTextSearchResponse,
++    TabletCount,
++    TextSearchCandidate,
 +};
-+use pb::error_metadata::ErrorMetadataStatusExt;
-+use sync_types::{
-+    CanonicalizedModulePath,
-+    Timestamp,
++use search::{
++    query::RevisionWithKeys,
++    CandidateRevision,
++    Searcher,
++    TextSearchResults,
 +};
-+use tokio::{
-+    net::lookup_host,
-+    sync::{
-+        mpsc,
-+        watch,
-+    },
-+    time::timeout,
-+};
-+use tonic::transport::{
-+    channel::Change,
-+    Channel,
-+    Endpoint,
-+};
-+use udf::{
-+    ActionCallbacks,
-+    EvaluateAppDefinitionsResult,
-+    FunctionOutcome,
-+};
-+use usage_tracking::FunctionUsageStats;
-+use value::identifier::Identifier;
++use storage::Storage;
++use sync_types::Timestamp;
++use value::TabletId;
 +
-+use crate::{
-+    server::{
-+        funrun_isolate_worker,
-+        DeploymentStorage,
-+        FunctionMetadata,
-+        FunctionRunnerCore,
-+        HttpActionMetadata,
-+    },
-+    FunctionFinalTransaction,
-+    FunctionRunner,
-+    FunctionWrites,
-+};
-+
-+static FUNRUN_LB_REFRESH_INTERVAL: LazyLock<Duration> =
-+    LazyLock::new(|| Duration::from_secs(env_config("FUNRUN_LB_REFRESH_INTERVAL_SECONDS", 10)));
-+static FUNRUN_RESPONSE_TIMEOUT: LazyLock<Duration> =
-+    LazyLock::new(|| Duration::from_secs(env_config("FUNRUN_RESPONSE_TIMEOUT_SECS", 600)));
-+static FUNRUN_CLIENT_MAX_RETRIES: LazyLock<u32> =
-+    LazyLock::new(|| env_config("FUNRUN_CLIENT_MAX_RETRIES", 2));
-+static FUNRUN_EMPTY_ENDPOINTS_FAIL_FAST: LazyLock<Duration> =
-+    LazyLock::new(|| Duration::from_secs(env_config("FUNRUN_EMPTY_ENDPOINTS_FAIL_FAST_SECS", 30)));
-+register_convex_histogram!(
-+    FUNRUN_CLIENT_RPC_SECONDS,
-+    "Client-observed duration of a funrun RunFunction RPC attempt",
-+    &[STATUS_LABEL[0], "udf_type"]
-+);
-+fn funrun_client_rpc_timer(udf_type: UdfType) -> StatusTimer {
-+    let mut timer = StatusTimer::new(&FUNRUN_CLIENT_RPC_SECONDS);
-+    timer.add_label(udf_type.metric_label());
-+    timer
-+}
++pub const TABLE_COUNTS_ROUTE: &str = "/funrun_table_counts";
++pub const TEXT_SEARCH_ROUTE: &str = "/funrun_text_search";
 +
 +register_convex_counter!(
-+    FUNRUN_CLIENT_RETRY_TOTAL,
-+    "Funrun client RPC attempt retries, by reason",
-+    &["reason"]
++    FUNRUN_SNAPSHOT_PIN_MISS_TOTAL,
++    "Funrun snapshot RPCs served without a dispatch-time snapshot pin"
 +);
-+fn log_funrun_client_retry(reason: &'static str) {
-+    log_counter_with_labels(
-+        &FUNRUN_CLIENT_RETRY_TOTAL,
-+        1,
-+        vec![StaticMetricLabel::new_const("reason", reason)],
-+    );
++
++type SnapshotAt = Box<dyn Fn(RepeatableTimestamp) -> anyhow::Result<Snapshot> + Send + Sync>;
++
++pub(super) struct SnapshotPins {
++    snapshot_at: SnapshotAt,
++    searcher: Arc<dyn Searcher>,
++    search_storage: Arc<OnceLock<Arc<dyn Storage>>>,
++    pinned: Mutex<BTreeMap<Timestamp, (Snapshot, usize)>>,
 +}
 +
-+fn callback_token_issued_at(identity: &Identity) -> SystemTime {
-+    let now = SystemTime::now();
-+    match identity {
-+        Identity::User(user) => user
-+            .expiration
-+            .checked_sub(Duration::from_secs(1))
-+            .map_or(now, |last_valid| now.min(last_valid)),
-+        _ => now,
-+    }
++pub(super) struct SnapshotPin {
++    pins: Arc<SnapshotPins>,
++    ts: Timestamp,
 +}
 +
-+fn parse_funrun_target(addr: &str) -> anyhow::Result<(String, u16)> {
-+    anyhow::ensure!(
-+        !addr.starts_with("https://"),
-+        "CONVEX_FUNRUN_ADDR is plaintext (http:// or host:port); the funrun hop has no TLS: {addr}"
-+    );
-+    let rest = addr
-+        .strip_prefix("http://")
-+        .unwrap_or(addr)
-+        .trim_end_matches('/');
-+    let (host, port) = if let Some(bracketed) = rest.strip_prefix('[') {
-+        let (host, after) = bracketed
-+            .split_once(']')
-+            .with_context(|| format!("unclosed IPv6 bracket in {addr}"))?;
-+        let port = after
-+            .strip_prefix(':')
-+            .with_context(|| format!("CONVEX_FUNRUN_ADDR must include a port: {addr}"))?;
-+        (host, port)
-+    } else {
-+        rest.rsplit_once(':')
-+            .with_context(|| format!("CONVEX_FUNRUN_ADDR must include a port: {addr}"))?
-+    };
-+    let port: u16 = port
-+        .parse()
-+        .with_context(|| format!("invalid funrun port in {addr}"))?;
-+    anyhow::ensure!(!host.is_empty(), "empty funrun host in {addr}");
-+    Ok((host.to_string(), port))
-+}
++static SNAPSHOT_PINS: OnceLock<Arc<SnapshotPins>> = OnceLock::new();
 +
-+const FUNRUN_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
-+const LOCAL_ISOLATE_PERCENT_PER_CLIENT: usize = 100;
-+const FUNRUN_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
-+const FUNRUN_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(5);
-+
-+fn funrun_endpoint(uri: &str) -> anyhow::Result<Endpoint> {
-+    Ok(Endpoint::from_shared(uri.to_string())
-+        .with_context(|| format!("invalid funrun endpoint {uri}"))?
-+        .tcp_nodelay(true)
-+        .connect_timeout(FUNRUN_CONNECT_TIMEOUT)
-+        .http2_keep_alive_interval(FUNRUN_KEEPALIVE_INTERVAL)
-+        .keep_alive_timeout(FUNRUN_KEEPALIVE_TIMEOUT)
-+        .keep_alive_while_idle(true)
-+        .http2_max_local_error_reset_streams(None))
-+}
-+
-+fn spawn_endpoint_refresher<RT: Runtime>(
-+    rt: &RT,
-+    host: String,
-+    port: u16,
-+    tx: tokio::sync::mpsc::Sender<Change<SocketAddr, Endpoint>>,
-+    empty_since: watch::Sender<Option<Instant>>,
-+) {
-+    let refresh_rt = rt.clone();
-+    rt.spawn_background("funrun_lb_refresh", async move {
-+        let mut current = BTreeSet::new();
-+        loop {
-+            match lookup_host((host.as_str(), port)).await {
-+                Ok(addrs) => {
-+                    let unique: BTreeSet<SocketAddr> = addrs.collect();
-+                    if !unique.is_empty() {
-+                        let mut next: BTreeSet<SocketAddr> =
-+                            unique.intersection(&current).copied().collect();
-+                        for addr in unique.difference(&current) {
-+                            if let Ok(endpoint) = funrun_endpoint(&format!("http://{addr}"))
-+                                && tx.send(Change::Insert(*addr, endpoint)).await.is_ok()
-+                            {
-+                                next.insert(*addr);
-+                                empty_since.send_if_modified(|since| since.take().is_some());
-+                            }
-+                        }
-+                        for addr in current.difference(&unique) {
-+                            let _ = tx.send(Change::Remove(*addr)).await;
-+                        }
-+                        if next != current {
-+                            tracing::info!("[funrun-lb] p2c across {} endpoint(s)", next.len());
-+                            current = next;
-+                        }
-+                    }
-+                },
-+                Err(e) => {
-+                    tracing::warn!("[funrun-lb] DNS resolution for {host}:{port} failed: {e}")
-+                },
-+            }
-+            if !current.is_empty() {
-+                empty_since.send_if_modified(|since| since.take().is_some());
-+            }
-+            refresh_rt.wait(*FUNRUN_LB_REFRESH_INTERVAL).await;
-+        }
-+    });
-+}
-+
-+pub struct RemoteFunctionRunner<RT: Runtime> {
-+    channel: Channel,
-+    local: FunctionRunnerCore<RT, DeploymentStorage>,
-+    deployment: DeploymentMetadata,
-+    key_broker: KeyBroker,
-+    convex_origin: ConvexOrigin,
-+    callback_transport_url: Option<String>,
-+    rt: RT,
-+    instance_secret: DeploymentSecret,
-+    endpoints_empty_since: watch::Receiver<Option<Instant>>,
-+}
-+
-+enum RunFunctionAttemptError {
-+    NoEndpoints(anyhow::Error),
-+    Rpc(tonic::Status),
-+    TimedOut,
-+    Internal(anyhow::Error),
-+}
-+
-+impl<RT: Runtime> RemoteFunctionRunner<RT> {
-+    pub fn new(
-+        funrun_addr: String,
-+        deployment: DeploymentMetadata,
-+        key_broker: KeyBroker,
-+        instance_secret: DeploymentSecret,
-+        convex_origin: ConvexOrigin,
-+        rt: RT,
-+        storage: DeploymentStorage,
-+    ) -> anyhow::Result<Self> {
-+        let (host, port) = parse_funrun_target(&funrun_addr)?;
-+        let (endpoints_tx, endpoints_empty_since) = watch::channel(Some(Instant::now()));
-+        let (channel, tx) = Channel::balance_channel::<SocketAddr>(64);
-+        spawn_endpoint_refresher(&rt, host, port, tx, endpoints_tx);
-+        let local = FunctionRunnerCore::new(
-+            rt.clone(),
-+            storage,
-+            LOCAL_ISOLATE_PERCENT_PER_CLIENT,
-+            funrun_isolate_worker(&rt),
-+        )?;
-+        let callback_transport_url = std::env::var("CONVEX_FUNRUN_CALLBACK_URL")
-+            .ok()
-+            .filter(|v| !v.is_empty());
-+        if let Some(url) = &callback_transport_url {
-+            tracing::info!("[funrun] action callbacks will use transport URL {url}");
-+        } else {
-+            tracing::info!("[funrun] action callbacks use the public origin");
-+        }
-+        Ok(Self {
-+            channel,
-+            local,
-+            deployment,
-+            key_broker,
-+            convex_origin,
-+            callback_transport_url,
-+            rt,
-+            instance_secret,
-+            endpoints_empty_since,
-+        })
-+    }
-+
-+    fn auth_header(&self) -> String {
-+        let unix_seconds = self.rt.unix_timestamp().as_secs();
-+        funrun_auth_header(&self.instance_secret, &self.deployment.name, unix_seconds)
-+    }
-+
-+    fn authenticated_request<T>(&self, message: T) -> anyhow::Result<tonic::Request<T>> {
-+        let mut request = tonic::Request::new(message);
-+        request.metadata_mut().insert(
-+            FUNRUN_AUTH_METADATA_KEY,
-+            self.auth_header()
-+                .parse()
-+                .context("invalid funrun auth header")?,
-+        );
-+        Ok(request)
-+    }
-+
-+    fn is_retryable_rpc(udf_type: UdfType, status: &tonic::Status) -> bool {
-+        let rejected_before_execution = status
-+            .error_metadata()
-+            .is_some_and(|metadata| metadata.is_rejected_before_execution());
-+        match udf_type {
-+            UdfType::Query | UdfType::Mutation | UdfType::Init => {
-+                matches!(
-+                    status.code(),
-+                    tonic::Code::Unavailable | tonic::Code::Cancelled | tonic::Code::Unknown
-+                ) || rejected_before_execution
-+            },
-+            UdfType::Action => rejected_before_execution,
-+            UdfType::HttpAction => false,
-+        }
-+    }
-+
-+    async fn wait_for_endpoints(&self) -> anyhow::Result<()> {
-+        let mut endpoints = self.endpoints_empty_since.clone();
-+        let Some(empty_since) = *endpoints.borrow_and_update() else {
-+            return Ok(());
-+        };
-+        let budget = *FUNRUN_EMPTY_ENDPOINTS_FAIL_FAST;
-+        let remaining = budget.saturating_sub(empty_since.elapsed());
-+        match timeout(remaining, endpoints.wait_for(Option::is_none)).await {
-+            Ok(Ok(_)) => Ok(()),
-+            _ => anyhow::bail!(ErrorMetadata::rejected_before_execution(
-+                "FunrunUnavailable",
-+                format!("funrun DNS has no endpoints after {budget:?}; check the funrun Service"),
-+            )),
-+        }
-+    }
-+
-+    async fn run_function_attempt(
-+        &self,
-+        req: tonic::Request<pb::funrun::RunFunctionRequest>,
-+        log_line_sender: &Option<mpsc::UnboundedSender<LogLine>>,
-+        parts_received: &mut bool,
-+    ) -> Result<pb::funrun::RunFunctionResult, RunFunctionAttemptError> {
-+        let mut client = pb::funrun::funrun_client::FunrunClient::new(self.channel.clone())
-+            .max_decoding_message_size(usize::MAX);
-+        let mut stream = timeout(*FUNRUN_RESPONSE_TIMEOUT, client.run_function(req))
-+            .await
-+            .map_err(|_| RunFunctionAttemptError::TimedOut)?
-+            .map_err(RunFunctionAttemptError::Rpc)?
-+            .into_inner();
-+        let mut result = None;
-+        loop {
-+            let part = stream
-+                .message()
-+                .await
-+                .map_err(RunFunctionAttemptError::Rpc)?;
-+            let Some(part) = part else {
-+                break;
-+            };
-+            *parts_received = true;
-+            match part.part {
-+                Some(pb::funrun::run_function_response_part::Part::LogLine(log_line)) => {
-+                    let log_line =
-+                        LogLine::try_from(log_line).map_err(RunFunctionAttemptError::Internal)?;
-+                    if let Some(sender) = log_line_sender {
-+                        let _ = sender.send(log_line);
-+                    }
-+                },
-+                Some(pb::funrun::run_function_response_part::Part::Result(r)) => {
-+                    if result.is_some() {
-+                        return Err(RunFunctionAttemptError::Internal(anyhow::anyhow!(
-+                            "funrun sent more than one terminal result"
-+                        )));
-+                    }
-+                    result = Some(r);
-+                },
-+                None => {
-+                    return Err(RunFunctionAttemptError::Internal(anyhow::anyhow!(
-+                        "funrun sent an empty RunFunctionResponsePart"
-+                    )));
-+                },
-+            }
-+        }
-+        result.ok_or_else(|| {
-+            RunFunctionAttemptError::Internal(anyhow::anyhow!(
-+                "funrun stream ended without a terminal result"
-+            ))
-+        })
-+    }
-+
-+    fn run_function_request(
-+        &self,
-+        udf_type: UdfType,
-+        identity: Identity,
-+        ts: RepeatableTimestamp,
-+        existing_writes: FunctionWrites,
-+        function_metadata: Option<FunctionMetadata>,
-+        default_system_env_vars: BTreeMap<EnvVarName, EnvVarValue>,
-+        in_memory_index_last_modified: BTreeMap<IndexId, Timestamp>,
-+        context: ExecutionContext,
-+    ) -> anyhow::Result<pb::funrun::RunFunctionRequest> {
-+        let component = function_metadata
-+            .as_ref()
-+            .map(|m| m.path_and_args.path().component)
-+            .unwrap_or(common::components::ComponentId::Root);
-+        let auth_header = token_to_authorization_header(identity.clone().into())?;
-+        let callback_token = self
-+            .key_broker
-+            .issue_action_token_at(component, callback_token_issued_at(&identity));
-+        let existing_writes = existing_writes
-+            .updates
-+            .into_iter()
-+            .map(pb::common::PendingDocumentUpdate::try_from)
-+            .collect::<anyhow::Result<Vec<_>>>()?;
-+        let (path_and_args, journal) = match function_metadata {
-+            Some(FunctionMetadata {
-+                path_and_args,
-+                journal,
-+            }) => (
-+                Some(pb::common::ValidatedPathAndArgs::try_from(path_and_args)?),
-+                Some(journal.into()),
-+            ),
-+            None => (None, None),
-+        };
-+        Ok(pb::funrun::RunFunctionRequest {
-+            instance_name: self.deployment.name.clone(),
-+            udf_type: pb::common::UdfType::from(udf_type) as i32,
-+            identity: Some(identity.try_into()?),
-+            ts: Some(ts.into()),
-+            existing_writes,
-+            path_and_args,
-+            journal,
-+            default_system_env_vars: default_system_env_vars
-+                .into_iter()
-+                .map(|(name, value)| pb::funrun::EnvVar {
-+                    name: name.to_string(),
-+                    value: String::from(value),
++impl SnapshotPins {
++    pub(super) fn install<RT: Runtime>(database: &Database<RT>) -> Arc<Self> {
++        let searcher = database.searcher.clone();
++        let search_storage = database.search_storage.clone();
++        let database = database.clone();
++        SNAPSHOT_PINS
++            .get_or_init(|| {
++                Arc::new(Self {
++                    snapshot_at: Box::new(move |ts| database.snapshot(ts)),
++                    searcher,
++                    search_storage,
++                    pinned: Mutex::new(BTreeMap::new()),
 +                })
-+                .collect(),
-+            in_memory_index_last_modified: in_memory_index_last_modified
-+                .into_iter()
-+                .map(|(index_id, ts)| pb::funrun::IndexLastModified {
-+                    index_id: String::from(index_id),
-+                    last_modified_ts: ts.into(),
-+                })
-+                .collect(),
-+            context: Some(context.into()),
-+            backend_callback_url: Some(self.convex_origin.to_string()),
-+            callback_transport_url: self.callback_transport_url.clone(),
-+            callback_token: Some(callback_token),
-+            auth_header,
++            })
++            .clone()
++    }
++
++    pub(super) fn pin(self: &Arc<Self>, ts: RepeatableTimestamp) -> Option<SnapshotPin> {
++        let retained = self
++            .pinned
++            .lock()
++            .get_mut(&*ts)
++            .map(|(_, count)| *count += 1)
++            .is_some();
++        if !retained {
++            let snapshot = (self.snapshot_at)(ts).ok()?;
++            self.pinned.lock().entry(*ts).or_insert((snapshot, 0)).1 += 1;
++        }
++        Some(SnapshotPin {
++            pins: self.clone(),
++            ts: *ts,
 +        })
 +    }
 +
-+    async fn run_function_remote(
-+        &self,
-+        udf_type: UdfType,
-+        identity: Identity,
-+        ts: RepeatableTimestamp,
-+        existing_writes: FunctionWrites,
-+        log_line_sender: Option<mpsc::UnboundedSender<LogLine>>,
-+        function_metadata: Option<FunctionMetadata>,
-+        default_system_env_vars: BTreeMap<EnvVarName, EnvVarValue>,
-+        in_memory_index_last_modified: BTreeMap<IndexId, Timestamp>,
-+        context: ExecutionContext,
-+    ) -> anyhow::Result<(
-+        Option<FunctionFinalTransaction>,
-+        FunctionOutcome,
-+        FunctionUsageStats,
-+    )> {
-+        let inert_identity: InertIdentity = identity.clone().into();
-+        let path_and_args = function_metadata.as_ref().map(|m| m.path_and_args.clone());
-+        let request = self.run_function_request(
-+            udf_type,
-+            identity,
-+            ts,
-+            existing_writes,
-+            function_metadata,
-+            default_system_env_vars,
-+            in_memory_index_last_modified,
-+            context,
-+        )?;
-+        let max_attempts = FUNRUN_CLIENT_MAX_RETRIES.saturating_add(1);
-+        let has_deadline = matches!(udf_type, UdfType::Query | UdfType::Mutation | UdfType::Init);
-+        let mut attempt: u32 = 0;
-+        let result = 'attempts: loop {
-+            let last_attempt = attempt + 1 >= max_attempts;
-+            let mut parts_received = false;
-+            let failure = 'attempt: {
-+                if let Err(e) = self.wait_for_endpoints().await {
-+                    break 'attempt RunFunctionAttemptError::NoEndpoints(e);
-+                }
-+                let req = self.authenticated_request(request.clone())?;
-+                let timer = funrun_client_rpc_timer(udf_type);
-+                let attempt_fut =
-+                    self.run_function_attempt(req, &log_line_sender, &mut parts_received);
-+                let outcome = if has_deadline {
-+                    timeout(*FUNRUN_RESPONSE_TIMEOUT, attempt_fut).await
-+                } else {
-+                    Ok(attempt_fut.await)
-+                };
-+                match outcome {
-+                    Ok(Ok(result)) => {
-+                        timer.finish();
-+                        break 'attempts result;
-+                    },
-+                    Ok(Err(failure)) => failure,
-+                    Err(_) => RunFunctionAttemptError::TimedOut,
-+                }
-+            };
-+            let retry_reason = match &failure {
-+                RunFunctionAttemptError::NoEndpoints(_) => Some("no_endpoints"),
-+                RunFunctionAttemptError::TimedOut if has_deadline => Some("timeout"),
-+                RunFunctionAttemptError::Rpc(status)
-+                    if Self::is_retryable_rpc(udf_type, status) =>
-+                {
-+                    Some(match status.code() {
-+                        tonic::Code::Unavailable
-+                        | tonic::Code::Cancelled
-+                        | tonic::Code::Unknown => "transport",
-+                        _ => "rejected_before_execution",
-+                    })
-+                },
-+                RunFunctionAttemptError::Rpc(_)
-+                | RunFunctionAttemptError::Internal(_)
-+                | RunFunctionAttemptError::TimedOut => None,
-+            };
-+            if let Some(reason) = retry_reason
-+                && !last_attempt
-+                && !parts_received
-+            {
-+                log_funrun_client_retry(reason);
-+                attempt += 1;
-+                self.rt
-+                    .wait(Duration::from_millis(50 * u64::from(attempt)))
-+                    .await;
-+                continue;
-+            }
-+            return match failure {
-+                RunFunctionAttemptError::NoEndpoints(e) | RunFunctionAttemptError::Internal(e) => {
-+                    Err(e)
-+                },
-+                RunFunctionAttemptError::Rpc(status) => {
-+                    Err(status.into_anyhow()).context("funrun RunFunction failed")
-+                },
-+                RunFunctionAttemptError::TimedOut => {
-+                    Err(anyhow::anyhow!("funrun response timed out"))
-+                        .context("funrun RunFunction failed")
-+                },
-+            };
-+        };
-+        let pb::funrun::RunFunctionResult {
-+            outcome,
-+            final_transaction,
-+            usage_stats,
-+        } = result;
-+        let outcome = FunctionOutcome::from_proto(
-+            outcome.context("funrun response missing outcome")?,
-+            path_and_args,
-+            None,
-+            inert_identity,
-+        )?;
-+        let final_transaction = final_transaction
-+            .map(FunctionFinalTransaction::try_from)
-+            .transpose()?;
-+        let usage_stats = usage_stats
-+            .map(FunctionUsageStats::try_from)
-+            .transpose()?
-+            .unwrap_or_default();
-+        Ok((final_transaction, outcome, usage_stats))
-+    }
-+
-+    async fn run_http_action_remote(
-+        &self,
-+        identity: Identity,
-+        ts: RepeatableTimestamp,
-+        existing_writes: FunctionWrites,
-+        log_line_sender: Option<mpsc::UnboundedSender<LogLine>>,
-+        http_action_metadata: HttpActionMetadata,
-+        default_system_env_vars: BTreeMap<EnvVarName, EnvVarValue>,
-+        in_memory_index_last_modified: BTreeMap<IndexId, Timestamp>,
-+        context: ExecutionContext,
-+    ) -> anyhow::Result<(
-+        Option<FunctionFinalTransaction>,
-+        FunctionOutcome,
-+        FunctionUsageStats,
-+    )> {
-+        let HttpActionMetadata {
-+            mut http_response_streamer,
-+            http_module_path,
-+            routed_path,
-+            http_request,
-+        } = http_action_metadata;
-+        let request_head = http_request.head;
-+        let http_path_for_outcome = http_module_path.clone();
-+        let component = http_module_path.path().component;
-+        let inert_identity: InertIdentity =
-+            propagate_component_auth(&identity, component, component.is_root()).into();
-+        let auth_header = token_to_authorization_header(identity.clone().into())?;
-+        let callback_token = self
-+            .key_broker
-+            .issue_action_token_at(component, callback_token_issued_at(&identity));
-+        let http_request_head = request_head.clone().into();
-+        let http_body = http_request.body;
-+        let dispatch = async move {
-+            self.wait_for_endpoints().await?;
-+            let http_request_body = match http_body {
-+                Some(mut body) => {
-+                    let mut buf = Vec::new();
-+                    while let Some(chunk) = body.next().await {
-+                        buf.extend_from_slice(&chunk?);
-+                    }
-+                    Some(buf)
-+                },
-+                None => None,
-+            };
-+            let existing_writes = existing_writes
-+                .updates
-+                .into_iter()
-+                .map(pb::common::PendingDocumentUpdate::try_from)
-+                .collect::<anyhow::Result<Vec<_>>>()?;
-+            let request = pb::funrun::RunHttpActionRequest {
-+                instance_name: self.deployment.name.clone(),
-+                identity: Some(identity.try_into()?),
-+                ts: Some(ts.into()),
-+                existing_writes,
-+                default_system_env_vars: default_system_env_vars
-+                    .into_iter()
-+                    .map(|(name, value)| pb::funrun::EnvVar {
-+                        name: name.to_string(),
-+                        value: String::from(value),
-+                    })
-+                    .collect(),
-+                in_memory_index_last_modified: in_memory_index_last_modified
-+                    .into_iter()
-+                    .map(|(index_id, ts)| pb::funrun::IndexLastModified {
-+                        index_id: String::from(index_id),
-+                        last_modified_ts: ts.into(),
-+                    })
-+                    .collect(),
-+                context: Some(context.into()),
-+                backend_callback_url: Some(self.convex_origin.to_string()),
-+                callback_transport_url: self.callback_transport_url.clone(),
-+                callback_token: Some(callback_token),
-+                auth_header,
-+                http_module_path: Some(http_module_path.try_into()?),
-+                routed_path: routed_path.0,
-+                http_request_head: Some(http_request_head),
-+                http_request_body,
-+            };
-+            let mut client = pb::funrun::funrun_client::FunrunClient::new(self.channel.clone())
-+                .max_decoding_message_size(usize::MAX);
-+            timeout(
-+                *FUNRUN_RESPONSE_TIMEOUT,
-+                client.run_http_action(self.authenticated_request(request)?),
-+            )
-+            .await
-+            .context("funrun RunHttpAction response headers timed out")?
-+            .map_err(|status| status.into_anyhow())
-+            .context("funrun RunHttpAction failed")
-+            .map(|response| response.into_inner())
++    fn snapshot(&self, ts: RepeatableTimestamp) -> anyhow::Result<Snapshot> {
++        let pinned = self
++            .pinned
++            .lock()
++            .get(&*ts)
++            .map(|(snapshot, _)| snapshot.clone());
++        if let Some(snapshot) = pinned {
++            return Ok(snapshot);
 +        }
-+        .fuse();
-+        futures::pin_mut!(dispatch);
-+        let mut stream = select_biased! {
-+            _ = http_response_streamer.sender.closed().fuse() => {
-+                anyhow::bail!(ErrorMetadata::client_disconnect());
-+            },
-+            stream = dispatch => stream?,
-+        };
-+        let mut result: Option<pb::funrun::RunFunctionResult> = None;
-+        loop {
-+            let message = stream.message().fuse();
-+            futures::pin_mut!(message);
-+            let part = select_biased! {
-+                _ = http_response_streamer.sender.closed().fuse() => {
-+                    anyhow::bail!(ErrorMetadata::client_disconnect());
-+                },
-+                part = message => part
-+                    .map_err(|status| status.into_anyhow())
-+                    .context("funrun RunHttpAction stream error")?,
-+            };
-+            let Some(part) = part else {
-+                break;
-+            };
-+            match part.part {
-+                Some(pb::funrun::http_action_response_part::Part::LogLine(log_line)) => {
-+                    let log_line = LogLine::try_from(log_line)?;
-+                    if let Some(sender) = &log_line_sender {
-+                        let _ = sender.send(log_line);
-+                    }
-+                },
-+                Some(pb::funrun::http_action_response_part::Part::Response(response)) => {
-+                    let part = http_action_response_part_from_proto(response)?;
-+                    if http_response_streamer.send_part(part)?.is_err() {
-+                        anyhow::bail!(ErrorMetadata::client_disconnect());
-+                    }
-+                },
-+                Some(pb::funrun::http_action_response_part::Part::Result(r)) => {
-+                    anyhow::ensure!(
-+                        result.is_none(),
-+                        "funrun sent more than one terminal result"
-+                    );
-+                    result = Some(r);
-+                },
-+                None => anyhow::bail!("funrun sent an empty HttpActionResponsePart"),
-+            }
-+        }
-+        let pb::funrun::RunFunctionResult {
-+            outcome,
-+            final_transaction: _,
-+            usage_stats,
-+        } = result.context("funrun HttpAction stream ended without a terminal result")?;
-+        let outcome = FunctionOutcome::from_proto(
-+            outcome.context("funrun response missing outcome")?,
-+            None,
-+            Some((http_path_for_outcome, request_head)),
-+            inert_identity,
-+        )?;
-+        let usage_stats = usage_stats
-+            .map(FunctionUsageStats::try_from)
-+            .transpose()?
-+            .unwrap_or_default();
-+        Ok((None, outcome, usage_stats))
++        log_counter(&FUNRUN_SNAPSHOT_PIN_MISS_TOTAL, 1);
++        (self.snapshot_at)(ts)
 +    }
 +}
 +
-+fn http_action_response_part_from_proto(
-+    response: pb::common::HttpActionResponse,
-+) -> anyhow::Result<udf::HttpActionResponsePart> {
-+    use pb::common::http_action_response::MessageType;
-+    let message_type = response
-+        .message_type
-+        .context("HttpActionResponse missing message_type")?;
-+    Ok(match message_type {
-+        MessageType::Head(head) => {
-+            udf::HttpActionResponsePart::Head(udf::HttpActionResponseHead::try_from(head)?)
++impl Drop for SnapshotPin {
++    fn drop(&mut self) {
++        let released = {
++            let mut pinned = self.pins.pinned.lock();
++            let Some((_, count)) = pinned.get_mut(&self.ts) else {
++                return;
++            };
++            *count -= 1;
++            if *count == 0 {
++                pinned.remove(&self.ts)
++            } else {
++                None
++            }
++        };
++        drop(released);
++    }
++}
++
++fn installed_pins() -> anyhow::Result<&'static Arc<SnapshotPins>> {
++    SNAPSHOT_PINS
++        .get()
++        .context("funrun snapshot routes need CONVEX_FUNRUN_ADDR on this backend")
++}
++
++fn snapshot_error(error: anyhow::Error) -> SnapshotError {
++    SnapshotError {
++        message: format!("{error:#}"),
++        metadata: error
++            .downcast_ref::<ErrorMetadata>()
++            .cloned()
++            .map(Into::into),
++    }
++}
++
++fn leader_error(SnapshotError { message, metadata }: SnapshotError) -> anyhow::Error {
++    let error = anyhow::anyhow!("leader snapshot RPC failed: {message}");
++    match metadata.and_then(|metadata| ErrorMetadata::try_from(metadata).ok()) {
++        Some(metadata) if !metadata.is_rejected_before_execution() => error.context(metadata),
++        _ => error,
++    }
++}
++
++pub fn serve_table_counts(request: SnapshotTableCountsRequest) -> SnapshotTableCountsResponse {
++    let counts = request
++        .ts
++        .context("missing ts")
++        .and_then(RepeatableTimestamp::try_from)
++        .and_then(|ts| installed_pins()?.snapshot(ts));
++    match counts {
++        Ok(snapshot) => table_counts_response(snapshot.table_counts.map(|counts| {
++            counts
++                .tables
++                .iter()
++                .map(|(tablet_id, count)| (*tablet_id, count.num_values()))
++                .collect()
++        })),
++        Err(error) => SnapshotTableCountsResponse {
++            available: false,
++            tablets: vec![],
++            error: Some(snapshot_error(error)),
 +        },
-+        MessageType::Body(bytes) => udf::HttpActionResponsePart::BodyChunk(bytes.into()),
++    }
++}
++
++fn table_counts_response(counts: Option<BTreeMap<TabletId, u64>>) -> SnapshotTableCountsResponse {
++    SnapshotTableCountsResponse {
++        available: counts.is_some(),
++        tablets: counts
++            .into_iter()
++            .flatten()
++            .map(|(tablet_id, count)| TabletCount {
++                tablet_id: tablet_id.to_string(),
++                count,
++            })
++            .collect(),
++        error: None,
++    }
++}
++
++pub fn table_counts(
++    response: SnapshotTableCountsResponse,
++) -> anyhow::Result<Option<BTreeMap<TabletId, u64>>> {
++    let SnapshotTableCountsResponse {
++        available,
++        tablets,
++        error,
++    } = response;
++    if let Some(error) = error {
++        return Err(leader_error(error));
++    }
++    if !available {
++        return Ok(None);
++    }
++    tablets
++        .into_iter()
++        .map(|TabletCount { tablet_id, count }| {
++            anyhow::Ok((TabletId::from_str(&tablet_id)?, count))
++        })
++        .collect::<anyhow::Result<_>>()
++        .map(Some)
++}
++
++struct TextSearchRequest {
++    ts: RepeatableTimestamp,
++    index_id: IndexId,
++    printable_index_name: IndexName,
++    query: pb::searchlight::TextQuery,
++    pending_updates: Vec<DocumentUpdate>,
++}
++
++pub fn text_search_request(
++    ts: RepeatableTimestamp,
++    index_id: IndexId,
++    printable_index_name: &IndexName,
++    query: pb::searchlight::TextQuery,
++    pending_updates: &[DocumentUpdate],
++) -> anyhow::Result<SnapshotTextSearchRequest> {
++    Ok(SnapshotTextSearchRequest {
++        ts: Some(ts.into()),
++        index_id: String::from(index_id),
++        printable_index_name: printable_index_name.to_string(),
++        query: Some(query),
++        pending_updates: pending_updates
++            .iter()
++            .cloned()
++            .map(pb::common::DocumentUpdate::try_from)
++            .collect::<anyhow::Result<_>>()?,
 +    })
 +}
 +
-+#[async_trait]
-+impl<RT: Runtime> FunctionRunner<RT> for RemoteFunctionRunner<RT> {
-+    #[fastrace::trace]
-+    async fn run_function(
-+        &self,
-+        udf_type: UdfType,
-+        _udf_runtime: Option<UdfRuntime>,
-+        identity: Identity,
-+        ts: RepeatableTimestamp,
-+        existing_writes: FunctionWrites,
-+        log_line_sender: Option<mpsc::UnboundedSender<LogLine>>,
-+        function_metadata: Option<FunctionMetadata>,
-+        http_action_metadata: Option<HttpActionMetadata>,
-+        default_system_env_vars: BTreeMap<EnvVarName, EnvVarValue>,
-+        in_memory_index_last_modified: BTreeMap<IndexId, Timestamp>,
-+        context: ExecutionContext,
-+    ) -> anyhow::Result<(
-+        Option<FunctionFinalTransaction>,
-+        FunctionOutcome,
-+        FunctionUsageStats,
-+    )> {
-+        match http_action_metadata {
-+            Some(http_action_metadata) => {
-+                anyhow::ensure!(
-+                    udf_type == UdfType::HttpAction,
-+                    "http_action_metadata provided for non-HTTP udf_type {udf_type:?}"
-+                );
-+                self.run_http_action_remote(
-+                    identity,
-+                    ts,
-+                    existing_writes,
-+                    log_line_sender,
-+                    http_action_metadata,
-+                    default_system_env_vars,
-+                    in_memory_index_last_modified,
-+                    context,
-+                )
-+                .await
++fn decode_text_search_request(
++    request: SnapshotTextSearchRequest,
++) -> anyhow::Result<TextSearchRequest> {
++    let SnapshotTextSearchRequest {
++        ts,
++        index_id,
++        printable_index_name,
++        query,
++        pending_updates,
++    } = request;
++    Ok(TextSearchRequest {
++        ts: ts.context("missing ts")?.try_into()?,
++        index_id: IndexId::from_str(&index_id)?,
++        printable_index_name: printable_index_name.parse()?,
++        query: query.context("missing query")?,
++        pending_updates: pending_updates
++            .into_iter()
++            .map(DocumentUpdate::try_from)
++            .collect::<anyhow::Result<_>>()?,
++    })
++}
++
++pub async fn serve_text_search(request: SnapshotTextSearchRequest) -> SnapshotTextSearchResponse {
++    match text_search_at(request).await {
++        Ok(results) => text_search_response(results),
++        Err(error) => SnapshotTextSearchResponse {
++            candidates: vec![],
++            filtered_bytes_searched: 0,
++            error: Some(snapshot_error(error)),
++        },
++    }
++}
++
++async fn text_search_at(request: SnapshotTextSearchRequest) -> anyhow::Result<TextSearchResults> {
++    let TextSearchRequest {
++        ts,
++        index_id,
++        printable_index_name,
++        query,
++        pending_updates,
++    } = decode_text_search_request(request)?;
++    let pins = installed_pins()?;
++    let snapshot = pins.snapshot(ts)?;
++    let index = snapshot
++        .index_registry
++        .enabled_index_by_index_id(&index_id)
++        .with_context(|| format!("Missing index_id {index_id:?}"))?
++        .clone();
++    TextIndexManagerSnapshot::new(
++        snapshot.index_registry,
++        snapshot.text_indexes,
++        pins.searcher.clone(),
++        pins.search_storage.clone(),
++    )
++    .text_search(&index, &printable_index_name, query, &pending_updates)
++    .await
++}
++
++fn text_search_response(results: TextSearchResults) -> SnapshotTextSearchResponse {
++    SnapshotTextSearchResponse {
++        candidates: results
++            .revisions_with_keys
++            .into_iter()
++            .map(|(revision, index_key)| TextSearchCandidate {
++                revision: Some(revision.into()),
++                index_key: index_key.0,
++            })
++            .collect(),
++        filtered_bytes_searched: results.filtered_bytes_searched,
++        error: None,
++    }
++}
++
++pub fn text_search_results(
++    response: SnapshotTextSearchResponse,
++) -> anyhow::Result<(RevisionWithKeys, u64)> {
++    let SnapshotTextSearchResponse {
++        candidates,
++        filtered_bytes_searched,
++        error,
++    } = response;
++    if let Some(error) = error {
++        return Err(leader_error(error));
++    }
++    let revisions_with_keys = candidates
++        .into_iter()
++        .map(
++            |TextSearchCandidate {
++                 revision,
++                 index_key,
++             }| {
++                anyhow::Ok((
++                    CandidateRevision::try_from(revision.context("candidate missing revision")?)?,
++                    IndexKeyBytes(index_key),
++                ))
 +            },
-+            None => {
-+                anyhow::ensure!(
-+                    udf_type != UdfType::HttpAction,
-+                    "HTTP action requested without http_action_metadata"
-+                );
-+                self.run_function_remote(
-+                    udf_type,
-+                    identity,
-+                    ts,
-+                    existing_writes,
-+                    log_line_sender,
-+                    function_metadata,
-+                    default_system_env_vars,
-+                    in_memory_index_last_modified,
-+                    context,
-+                )
-+                .await
-+            },
++        )
++        .collect::<anyhow::Result<_>>()?;
++    Ok((revisions_with_keys, filtered_bytes_searched))
++}
++
++#[cfg(test)]
++mod tests {
++    use std::collections::BTreeMap;
++
++    use common::{
++        document::{
++            CreationTime,
++            DocumentUpdate,
++            ResolvedDocument,
++        },
++        index::IndexKeyBytes,
++        types::{
++            IndexId,
++            IndexName,
++            RepeatableTimestamp,
++            WriteTimestamp,
++        },
++    };
++    use errors::{
++        ErrorMetadata,
++        ErrorMetadataAnyhowExt,
++    };
++    use search::{
++        CandidateRevision,
++        TextSearchResults,
++    };
++    use sync_types::Timestamp;
++    use value::{
++        InternalId,
++        ResolvedDocumentId,
++        TabletId,
++    };
++
++    use super::*;
++
++    fn with_error(error: anyhow::Error) -> SnapshotTableCountsResponse {
++        SnapshotTableCountsResponse {
++            available: false,
++            tablets: vec![],
++            error: Some(snapshot_error(error)),
 +        }
 +    }
 +
-+    #[fastrace::trace]
-+    async fn analyze(
-+        &self,
-+        udf_config: UdfConfig,
-+        modules: BTreeMap<CanonicalizedModulePath, ModuleConfig>,
-+        environment_variables: BTreeMap<EnvVarName, EnvVarValue>,
-+    ) -> anyhow::Result<Result<BTreeMap<CanonicalizedModulePath, AnalyzedModule>, JsError>> {
-+        self.local
-+            .analyze(
-+                udf_config,
-+                modules,
-+                environment_variables,
-+                self.deployment.name.clone(),
-+            )
-+            .await
++    #[test]
++    fn table_counts_cross_the_wire() {
++        let counts = BTreeMap::from([(TabletId::MIN, 7)]);
++        assert_eq!(
++            table_counts(table_counts_response(Some(counts.clone()))).unwrap(),
++            Some(counts)
++        );
++        assert_eq!(table_counts(table_counts_response(None)).unwrap(), None);
++        let rejected = table_counts(with_error(
++            ErrorMetadata::rejected_before_execution("LeaderBusy", "busy").into(),
++        ))
++        .unwrap_err();
++        assert!(rejected.downcast_ref::<ErrorMetadata>().is_none());
++        let expired =
++            table_counts(with_error(ErrorMetadata::out_of_retention().into())).unwrap_err();
++        assert!(expired.is_out_of_retention());
 +    }
 +
-+    #[fastrace::trace]
-+    async fn evaluate_app_definitions(
-+        &self,
-+        app_definition: ModuleConfig,
-+        component_definitions: BTreeMap<ComponentDefinitionPath, ModuleConfig>,
-+        dependency_graph: BTreeSet<(ComponentDefinitionPath, ComponentDefinitionPath)>,
-+        user_environment_variables: BTreeMap<EnvVarName, EnvVarValue>,
-+        system_env_vars: BTreeMap<EnvVarName, EnvVarValue>,
-+    ) -> anyhow::Result<EvaluateAppDefinitionsResult> {
-+        self.local
-+            .evaluate_app_definitions(
-+                app_definition,
-+                component_definitions,
-+                dependency_graph,
-+                user_environment_variables,
-+                system_env_vars,
-+                self.deployment.name.clone(),
-+            )
-+            .await
++    #[test]
++    fn text_search_crosses_the_wire() -> anyhow::Result<()> {
++        let document = ResolvedDocument::new(
++            ResolvedDocumentId::MIN,
++            CreationTime::try_from(1.0)?,
++            value::obj!("body" => "hello world")?,
++        )?;
++        let pending_updates = vec![DocumentUpdate {
++            id: ResolvedDocumentId::MIN,
++            old_document: None,
++            new_document: Some(document),
++        }];
++        let printable_index_name: IndexName = "messages.search_body".parse()?;
++        let query = pb::searchlight::TextQuery {
++            search_terms: vec![pb::searchlight::TextQueryTerm {
++                term_type: Some(pb::searchlight::text_query_term::TermType::Prefix(
++                    pb::searchlight::PrefixTextTerm {
++                        token: "hel".to_string(),
++                    },
++                )),
++            }],
++            filter_conditions: vec![vec![1, 2, 3]],
++        };
++        let index_id = IndexId(InternalId::MIN);
++        let request = text_search_request(
++            RepeatableTimestamp::MIN,
++            index_id,
++            &printable_index_name,
++            query.clone(),
++            &pending_updates,
++        )?;
++        let decoded = decode_text_search_request(request)?;
++        assert_eq!(decoded.ts, RepeatableTimestamp::MIN);
++        assert_eq!(decoded.index_id, index_id);
++        assert_eq!(decoded.printable_index_name, printable_index_name);
++        assert_eq!(decoded.query, query);
++        assert_eq!(decoded.pending_updates, pending_updates);
++        let revisions_with_keys = vec![
++            (
++                CandidateRevision {
++                    score: 1.5,
++                    id: InternalId::MIN,
++                    ts: WriteTimestamp::Committed(Timestamp::try_from(9u64)?),
++                    creation_time: CreationTime::try_from(1.0)?,
++                },
++                IndexKeyBytes(vec![1]),
++            ),
++            (
++                CandidateRevision {
++                    score: 0.5,
++                    id: InternalId::MIN,
++                    ts: WriteTimestamp::Pending,
++                    creation_time: CreationTime::try_from(2.0)?,
++                },
++                IndexKeyBytes(vec![2]),
++            ),
++        ];
++        let response = text_search_response(TextSearchResults {
++            revisions_with_keys: revisions_with_keys.clone(),
++            filtered_bytes_searched: 42,
++        });
++        assert_eq!(text_search_results(response)?, (revisions_with_keys, 42));
++        Ok(())
 +    }
-+
-+    #[fastrace::trace]
-+    async fn evaluate_component_initializer(
-+        &self,
-+        evaluated_definitions: BTreeMap<ComponentDefinitionPath, ComponentDefinitionMetadata>,
-+        path: ComponentDefinitionPath,
-+        definition: ModuleConfig,
-+        args: BTreeMap<Identifier, Resource>,
-+        name: ComponentName,
-+    ) -> anyhow::Result<BTreeMap<Identifier, Resource>> {
-+        self.local
-+            .evaluate_component_initializer(
-+                evaluated_definitions,
-+                path,
-+                definition,
-+                args,
-+                name,
-+                self.deployment.name.clone(),
-+            )
-+            .await
-+    }
-+
-+    #[fastrace::trace]
-+    async fn evaluate_schema(
-+        &self,
-+        schema_bundle: ModuleSource,
-+        source_map: Option<SourceMap>,
-+        rng_seed: [u8; 32],
-+        unix_timestamp: UnixTimestamp,
-+    ) -> anyhow::Result<DatabaseSchema> {
-+        self.local
-+            .evaluate_schema(
-+                schema_bundle,
-+                source_map,
-+                rng_seed,
-+                unix_timestamp,
-+                self.deployment.name.clone(),
-+            )
-+            .await
-+    }
-+
-+    #[fastrace::trace]
-+    async fn evaluate_auth_config(
-+        &self,
-+        auth_config_bundle: ModuleSource,
-+        source_map: Option<SourceMap>,
-+        environment_variables: BTreeMap<EnvVarName, EnvVarValue>,
-+        explanation: &str,
-+    ) -> anyhow::Result<AuthConfig> {
-+        self.local
-+            .evaluate_auth_config(
-+                auth_config_bundle,
-+                source_map,
-+                environment_variables,
-+                explanation,
-+                self.deployment.name.clone(),
-+            )
-+            .await
-+    }
-+
-+    fn set_action_callbacks(&self, _action_callbacks: Arc<dyn ActionCallbacks>) {}
 +}
 diff --git a/crates/function_runner/src/server.rs b/crates/function_runner/src/server.rs
-index df117586c..d6ae15458 100644
+index df117586c..f0a6b4a2a 100644
 --- a/crates/function_runner/src/server.rs
 +++ b/crates/function_runner/src/server.rs
-@@ -196,6 +196,13 @@ impl<RT: Runtime> StorageForDeployment<RT> for DeploymentStorage {
+@@ -196,6 +196,7 @@ impl<RT: Runtime> StorageForDeployment<RT> for DeploymentStorage {
      }
  }
  
-+mod shared_isolate;
-+
-+pub use shared_isolate::{
-+    funrun_isolate_worker,
-+    SharedIsolateResources,
-+};
-+
++pub mod shared_isolate;
  pub struct FunctionRunnerCore<RT: Runtime, S: StorageForDeployment<RT>> {
      rt: RT,
      storage: S,
 diff --git a/crates/function_runner/src/server/shared_isolate.rs b/crates/function_runner/src/server/shared_isolate.rs
 new file mode 100644
-index 000000000..b83f965d3
+index 000000000..edbc5cf2f
 --- /dev/null
 +++ b/crates/function_runner/src/server/shared_isolate.rs
-@@ -0,0 +1,89 @@
+@@ -0,0 +1,44 @@
 +use std::time::Duration;
 +
 +use common::knobs::FUNRUN_ISOLATE_ACTIVE_THREADS;
@@ -1474,21 +2077,11 @@ index 000000000..b83f965d3
 +    )
 +}
 +
-+#[derive(Clone)]
-+pub struct SharedIsolateResources<RT: Runtime> {
-+    isolate_client: IsolateClient<RT>,
-+    module_cache: ModuleCache<RT>,
-+    code_cache: CodeCache,
-+}
-+
 +impl<RT: Runtime, S: StorageForDeployment<RT>> FunctionRunnerCore<RT, S> {
-+    pub fn new_with_isolate_client(rt: RT, storage: S, shared: SharedIsolateResources<RT>) -> Self {
-+        let SharedIsolateResources {
-+            isolate_client,
-+            module_cache,
-+            code_cache,
-+        } = shared;
++    pub fn new_with_isolate_client(rt: RT, storage: S, isolate_client: IsolateClient<RT>) -> Self {
 +        let index_cache = InMemoryIndexCache::new(rt.clone());
++        let module_cache = ModuleCache::new(rt.clone());
++        let code_cache = CodeCache::new();
 +        Self {
 +            rt,
 +            storage,
@@ -1499,136 +2092,20 @@ index 000000000..b83f965d3
 +        }
 +    }
 +}
-+
-+impl<RT: Runtime> SharedIsolateResources<RT> {
-+    pub fn new_with_max_workers<W: IsolateWorker<RT>>(
-+        rt: RT,
-+        max_percent_per_client: usize,
-+        max_isolate_workers: usize,
-+        isolate_worker: W,
-+    ) -> anyhow::Result<Self> {
-+        let isolate_client = IsolateClient::new(
-+            rt.clone(),
-+            max_percent_per_client,
-+            max_isolate_workers,
-+            isolate_worker,
-+        )?;
-+        let module_cache = ModuleCache::new(rt.clone());
-+        let code_cache = CodeCache::new();
-+        Ok(Self {
-+            isolate_client,
-+            module_cache,
-+            code_cache,
-+        })
-+    }
-+
-+    pub fn max_isolate_workers(&self) -> usize {
-+        self.isolate_client.max_workers()
-+    }
-+
-+    pub fn active_isolate_workers(&self) -> usize {
-+        self.isolate_client.active_workers()
-+    }
-+
-+    pub fn pool_healthy(&self) -> bool {
-+        self.isolate_client.scheduler_alive()
-+    }
-+}
 diff --git a/crates/isolate/src/client.rs b/crates/isolate/src/client.rs
-index 0207fcf03..4ba10c5ad 100644
+index 0207fcf03..673b34124 100644
 --- a/crates/isolate/src/client.rs
 +++ b/crates/isolate/src/client.rs
-@@ -9,6 +9,7 @@ use std::{
-     pin::pin,
-     sync::{
-         atomic::{
-+            AtomicBool,
-             AtomicUsize,
-             Ordering,
-         },
-@@ -219,7 +220,6 @@ impl IsolateConfig {
-     pub fn max_user_timeout(&self) -> Option<Duration> {
-         self.max_user_timeout
-     }
--
- }
- 
- pub struct UdfRequest<RT: Runtime> {
-@@ -469,6 +469,7 @@ impl<RT: Runtime> Clone for IsolateClient<RT> {
-             sender: self.sender.clone(),
-             internal_sender: self.internal_sender.clone(),
-             active_workers: self.active_workers.clone(),
-+            scheduler_exited: self.scheduler_exited.clone(),
-             max_workers: self.max_workers,
-         }
-     }
-@@ -544,6 +545,9 @@ pub fn initialize_v8() {
+@@ -544,6 +544,8 @@ pub fn initialize_v8() {
      });
  }
  
-+static ISOLATE_PRELOAD_WORKERS: std::sync::LazyLock<usize> =
-+    std::sync::LazyLock::new(|| cmd_util::env::env_config("ISOLATE_PRELOAD_WORKERS", 0));
++mod preload;
 +
  /// The V8 code all expects to run on a single thread, which makes it ineligible
  /// for Tokio's scheduler, which wants the ability to move work across scheduler
  /// threads. Instead, we'll manage our V8 threads ourselves.
-@@ -558,6 +562,7 @@ pub struct IsolateClient<RT: Runtime> {
-     /// Shared with the scheduler. Tracks the total number of in-progress
-     /// workers across all clients.
-     active_workers: Arc<AtomicUsize>,
-+    scheduler_exited: Arc<AtomicBool>,
-     max_workers: usize,
- }
- 
-@@ -585,6 +590,9 @@ impl<RT: Runtime> IsolateClient<RT> {
-         let active_workers = Arc::new(AtomicUsize::new(0));
-         let _active_workers = active_workers.clone();
-         let rt_clone = rt.clone();
-+        let scheduler_exited = Arc::new(AtomicBool::new(false));
-+        let scheduler_exited_ = scheduler_exited.clone();
-+        let gauge_workers = active_workers.clone();
-         let scheduler = rt.spawn("shared_isolate_scheduler", async move {
-             // The scheduler thread pops a worker from available_workers and
-             // pops a request from the CoDelQueueReceiver. Then it sends the request
-@@ -597,7 +605,9 @@ impl<RT: Runtime> IsolateClient<RT> {
-                 max_percent_per_client,
-                 _active_workers,
-             );
--            scheduler.run(receiver, internal_receiver).await
-+            scheduler.run(receiver, internal_receiver).await;
-+            gauge_workers.store(0, Ordering::SeqCst);
-+            scheduler_exited_.store(true, Ordering::SeqCst);
-         });
-         Ok(Self {
-             rt,
-@@ -606,6 +616,7 @@ impl<RT: Runtime> IsolateClient<RT> {
-             scheduler: Arc::new(Mutex::new(Some(scheduler))),
-             handles,
-             active_workers,
-+            scheduler_exited,
-             max_workers: max_isolate_workers,
-         })
-     }
-@@ -622,6 +633,10 @@ impl<RT: Runtime> IsolateClient<RT> {
-         self.max_workers
-     }
- 
-+    pub fn scheduler_alive(&self) -> bool {
-+        !self.scheduler_exited.load(Ordering::SeqCst)
-+    }
-+
-     pub fn aggregate_heap_stats(&self) -> IsolateHeapStats {
-         let mut total = IsolateHeapStats::default();
-         for handle in self.handles.lock().iter() {
-@@ -1071,6 +1086,7 @@ impl<RT: Runtime> IsolateClient<RT> {
-                 shutdown_and_join(handle.handle).await?;
-             }
-         }
-+        self.scheduler_exited.store(true, Ordering::SeqCst);
-         if let Some(mut scheduler) = self.scheduler.lock().take() {
-             scheduler.shutdown();
-         }
-@@ -1166,6 +1182,7 @@ pub struct SharedIsolateScheduler<RT: Runtime, W: IsolateWorker<RT>> {
+@@ -1166,6 +1168,7 @@ pub struct SharedIsolateScheduler<RT: Runtime, W: IsolateWorker<RT>> {
      /// recreated and there will be no penalty for reassigning this worker to a
      /// new client.
      available_workers: HashMap<String, VecDeque<IdleWorkerState>>,
@@ -1636,7 +2113,7 @@ index 0207fcf03..4ba10c5ad 100644
      /// Set of futures awaiting a response from an active worker.
      in_progress_workers:
          FuturesUnordered<Join<oneshot::Receiver<IdleWorkerInfo>, Ready<ActiveWorkerState>>>,
-@@ -1212,6 +1229,7 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
+@@ -1212,6 +1215,7 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
              in_progress_count: HashMap::new(),
              active_workers,
              available_workers: HashMap::new(),
@@ -1644,18 +2121,15 @@ index 0207fcf03..4ba10c5ad 100644
              max_workers,
              handles,
              max_active_workers_per_client: (max_workers * max_percent_per_client)
-@@ -1266,6 +1284,10 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
+@@ -1266,6 +1270,7 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
          internal_receiver: mpsc::UnboundedReceiver<Request<RT>>,
      ) {
          log_pool_max(self.worker.config().name, self.max_workers);
-+        for _ in 0..(*ISOLATE_PRELOAD_WORKERS).min(self.max_workers) {
-+            let worker_id = self.spawn_worker();
-+            self.preloaded_workers.push_back(worker_id);
-+        }
++        self.preload_workers();
          let mut report_stats = self.rt.wait(*HEAP_WORKER_REPORT_INTERVAL_SECONDS);
          let mut expired_receiver = receiver.expired_receiver();
          let limiter = self.worker.config().limiter.clone();
-@@ -1444,26 +1466,13 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
+@@ -1444,6 +1449,9 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
              // It's possible that one of our own workers will end up being the
              // least-recently-used one.
          }
@@ -1665,54 +2139,49 @@ index 0207fcf03..4ba10c5ad 100644
          // If we've recently started up and haven't yet created `max_workers` threads,
          // create a new worker instead of "stealing" some other client's worker.
          if self.worker_senders.len() < self.max_workers {
--            let new_worker = self.worker.clone();
--            let heap_stats = SharedIsolateHeapStats::new();
--            let heap_stats_ = heap_stats.clone();
--            let (work_sender, work_receiver) = mpsc::channel(1);
--            let handle = self.rt.spawn_thread("isolate", move || {
--                new_worker.service_requests(work_receiver, heap_stats_)
--            });
--            self.worker_senders.push(work_sender);
--            self.handles
--                .lock()
--                .push(IsolateWorkerHandle { handle, heap_stats });
--            tracing::info!(
--                "Created {} isolate worker {}",
--                self.worker.config().name,
--                self.worker_senders.len() - 1
--            );
--            return Ok(self.worker_senders.len() - 1);
-+            return Ok(self.spawn_worker());
-         }
-         // No existing worker for this client and we've already started the max number
-         // of workers -- just grab the least recently used worker. This worker is least
-@@ -1496,6 +1505,26 @@ impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
-         Ok(worker.worker_id)
-     }
- 
-+    fn spawn_worker(&mut self) -> usize {
-+        let new_worker = self.worker.clone();
-+        let heap_stats = SharedIsolateHeapStats::new();
-+        let heap_stats_ = heap_stats.clone();
-+        let (work_sender, work_receiver) = mpsc::channel(1);
-+        let handle = self.rt.spawn_thread("isolate", move || {
-+            new_worker.service_requests(work_receiver, heap_stats_)
-+        });
-+        self.worker_senders.push(work_sender);
-+        self.handles
-+            .lock()
-+            .push(IsolateWorkerHandle { handle, heap_stats });
-+        tracing::info!(
-+            "Created {} isolate worker {}",
-+            self.worker.config().name,
-+            self.worker_senders.len() - 1
-+        );
-+        self.worker_senders.len() - 1
-+    }
+diff --git a/crates/isolate/src/client/preload.rs b/crates/isolate/src/client/preload.rs
+new file mode 100644
+index 000000000..0df2c129a
+--- /dev/null
++++ b/crates/isolate/src/client/preload.rs
+@@ -0,0 +1,37 @@
++use std::sync::LazyLock;
 +
-     fn aggregate_heap_stats(&self) -> IsolateHeapStats {
-         let mut total = IsolateHeapStats::default();
-         for handle in self.handles.lock().iter() {
++use super::*;
++
++static ISOLATE_PRELOAD_WORKERS: LazyLock<usize> =
++    LazyLock::new(|| cmd_util::env::env_config("ISOLATE_PRELOAD_WORKERS", 0));
++
++impl<RT: Runtime> IsolateClient<RT> {
++    pub fn scheduler_alive(&self) -> bool {
++        !self.internal_sender.is_closed()
++    }
++}
++
++impl<RT: Runtime, W: IsolateWorker<RT>> SharedIsolateScheduler<RT, W> {
++    pub(super) fn preload_workers(&mut self) {
++        for _ in 0..(*ISOLATE_PRELOAD_WORKERS).min(self.max_workers) {
++            let new_worker = self.worker.clone();
++            let heap_stats = SharedIsolateHeapStats::new();
++            let heap_stats_ = heap_stats.clone();
++            let (work_sender, work_receiver) = mpsc::channel(1);
++            let handle = self.rt.spawn_thread("isolate", move || {
++                new_worker.service_requests(work_receiver, heap_stats_)
++            });
++            self.worker_senders.push(work_sender);
++            self.handles
++                .lock()
++                .push(IsolateWorkerHandle { handle, heap_stats });
++            tracing::info!(
++                "Created {} isolate worker {}",
++                self.worker.config().name,
++                self.worker_senders.len() - 1
++            );
++            self.preloaded_workers
++                .push_back(self.worker_senders.len() - 1);
++        }
++    }
++}
 diff --git a/crates/keybroker/src/broker.rs b/crates/keybroker/src/broker.rs
 index 3dedf205c..c95bb1148 100644
 --- a/crates/keybroker/src/broker.rs
@@ -1898,27 +2367,22 @@ index 000000000..96936ce89
 +    }
 +}
 diff --git a/crates/keybroker/src/lib.rs b/crates/keybroker/src/lib.rs
-index 132770c3d..86e1b0d74 100644
+index 132770c3d..033f6e3b1 100644
 --- a/crates/keybroker/src/lib.rs
 +++ b/crates/keybroker/src/lib.rs
 @@ -3,6 +3,7 @@
  mod broker;
  mod deployment_jwt;
  mod encryptor;
-+mod funrun_auth;
++pub mod funrun_auth;
  mod legacy_encryptor;
  mod metrics;
  mod operations;
-@@ -36,6 +37,12 @@ pub use self::{
+@@ -36,6 +37,7 @@ pub use self::{
          Encryptor,
          RandomEncryptor,
      },
-+    funrun_auth::{
-+        constant_time_eq_sha256,
-+        funrun_auth_header,
-+        verify_funrun_auth_header,
-+        FUNRUN_AUTH_METADATA_KEY,
-+    },
++    funrun_auth::constant_time_eq_sha256,
      legacy_encryptor::LegacyEncryptor,
      operations::{
          bad_admin_key_error,

@@ -1,25 +1,14 @@
+diff --git a/.nvmrc b/.nvmrc
+index ce62013c3..229b3ce85 100644
+--- a/.nvmrc
++++ b/.nvmrc
+@@ -1 +1 @@
+-24.22.1
++24.22.3
 diff --git a/Cargo.lock b/Cargo.lock
-index df9f084f5..53393fbe0 100644
+index df9f084f5..0efd5cc81 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
-@@ -4423,7 +4423,7 @@ dependencies = [
-  "fxhash",
-  "maplit",
-  "proptest",
-- "prost 0.14.3",
-+ "prost 0.14.4",
-  "prost-types",
-  "tonic",
-  "tonic-prost",
-@@ -4453,7 +4453,7 @@ dependencies = [
-  "pretty_assertions",
-  "proptest",
-  "proptest-derive",
-- "prost 0.14.3",
-+ "prost 0.14.4",
-  "prost-types",
-  "rand 0.9.4",
-  "reqwest 0.13.4",
 @@ -4633,6 +4633,8 @@ dependencies = [
   "anyhow",
   "async-trait",
@@ -29,7 +18,7 @@ index df9f084f5..53393fbe0 100644
   "common",
   "convex_sync_types",
   "database",
-@@ -4647,17 +4649,64 @@ dependencies = [
+@@ -4647,17 +4649,65 @@ dependencies = [
   "model",
   "moka",
   "parking_lot",
@@ -71,12 +60,13 @@ index df9f084f5..53393fbe0 100644
 + "futures",
 + "http 1.5.0",
 + "indexing",
++ "isolate",
 + "keybroker",
 + "metrics",
 + "model",
 + "parking_lot",
 + "pb",
-+ "prost 0.14.4",
++ "prost 0.14.3",
 + "reqwest 0.13.4",
 + "runtime",
 + "search",
@@ -94,27 +84,26 @@ index df9f084f5..53393fbe0 100644
  ]
  
  [[package]]
-@@ -6400,7 +6449,7 @@ dependencies = [
-  "pretty_assertions",
-  "proptest",
-  "proptest-derive",
-- "prost 0.14.3",
-+ "prost 0.14.4",
-  "rand 0.9.4",
-  "rsa",
-  "runtime",
-@@ -6775,7 +6824,10 @@ dependencies = [
+@@ -6767,6 +6817,7 @@ dependencies = [
+  "http_client",
+  "hyper-util",
+  "indexing",
++ "isolate",
+  "jsonschema",
+  "keybroker",
+  "maplit",
+@@ -6775,7 +6826,10 @@ dependencies = [
   "moka",
   "node_executor",
   "parking_lot",
 + "pb",
 + "postgres",
   "proptest",
-+ "prost 0.14.4",
++ "prost 0.14.3",
   "reqwest 0.13.4",
   "roles",
   "runtime",
-@@ -6785,6 +6837,7 @@ dependencies = [
+@@ -6785,6 +6839,7 @@ dependencies = [
   "serde_json",
   "serde_with",
   "shape_inference",
@@ -122,147 +111,19 @@ index df9f084f5..53393fbe0 100644
   "storage",
   "streaming_export",
   "sync",
-@@ -6973,7 +7026,7 @@ dependencies = [
-  "keybroker",
-  "parquet",
-  "pb",
-- "prost 0.14.3",
-+ "prost 0.14.4",
-  "serde_json",
-  "tokio",
-  "uuid",
-@@ -8273,7 +8326,7 @@ dependencies = [
-  "pb_build",
-  "pb_extras",
-  "proptest",
-- "prost 0.14.3",
-+ "prost 0.14.4",
-  "prost-reflect",
-  "prost-types",
-  "tonic",
-@@ -8285,7 +8338,7 @@ dependencies = [
- name = "pb_build"
- version = "0.1.0"
- dependencies = [
-- "prost 0.14.3",
-+ "prost 0.14.4",
-  "tonic-prost-build",
- ]
- 
-@@ -8295,7 +8348,7 @@ version = "0.1.0"
- dependencies = [
-  "pb",
-  "pb_build",
-- "prost 0.14.3",
-+ "prost 0.14.4",
-  "prost-reflect",
- ]
- 
-@@ -8899,27 +8952,27 @@ dependencies = [
- 
- [[package]]
- name = "prost"
--version = "0.14.3"
-+version = "0.14.4"
- source = "registry+https://github.com/rust-lang/crates.io-index"
--checksum = "d2ea70524a2f82d518bce41317d0fae74151505651af45faf1ffbd6fd33f0568"
-+checksum = "528ac67416ff8646872a3c02cad9cc4ee5dc9f9540c9b10771855c95cb2e5ae1"
- dependencies = [
-  "bytes",
-- "prost-derive 0.14.3",
-+ "prost-derive 0.14.4",
- ]
- 
- [[package]]
- name = "prost-build"
--version = "0.14.3"
-+version = "0.14.4"
- source = "registry+https://github.com/rust-lang/crates.io-index"
--checksum = "343d3bd7056eda839b03204e68deff7d1b13aba7af2b2fd16890697274262ee7"
-+checksum = "03da047801ff44bb6a4d407d4860c05fd70bb81714e6b2f3812603d5b145b042"
- dependencies = [
-  "heck",
-- "itertools 0.10.5",
-+ "itertools 0.12.1",
-  "log",
-  "multimap",
-  "petgraph 0.8.3",
-  "prettyplease 0.2.37",
-- "prost 0.14.3",
-+ "prost 0.14.4",
-  "prost-types",
-  "pulldown-cmark",
-  "pulldown-cmark-to-cmark",
-@@ -8943,12 +8996,12 @@ dependencies = [
- 
- [[package]]
- name = "prost-derive"
--version = "0.14.3"
-+version = "0.14.4"
- source = "registry+https://github.com/rust-lang/crates.io-index"
--checksum = "27c6023962132f4b30eb4c172c91ce92d933da334c59c23cddee82358ddafb0b"
-+checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
- dependencies = [
-  "anyhow",
-- "itertools 0.10.5",
-+ "itertools 0.12.1",
-  "proc-macro2",
-  "quote",
-  "syn 2.0.118",
-@@ -8962,17 +9015,17 @@ checksum = "b89455ef41ed200cafc47c76c552ee7792370ac420497e551f16123a9135f76e"
- dependencies = [
-  "logos",
-  "miette",
-- "prost 0.14.3",
-+ "prost 0.14.4",
-  "prost-types",
- ]
- 
- [[package]]
- name = "prost-types"
--version = "0.14.3"
-+version = "0.14.4"
- source = "registry+https://github.com/rust-lang/crates.io-index"
--checksum = "8991c4cbdb8bc5b11f0b074ffe286c30e523de90fee5ba8132f1399f23cb3dd7"
-+checksum = "f94967dc7688f3054c7fac87473ffae4cc4c3904800e2d9f5b857246d8963b0a"
- dependencies = [
-- "prost 0.14.3",
-+ "prost 0.14.4",
- ]
- 
- [[package]]
-@@ -11175,7 +11228,7 @@ dependencies = [
-  "fastrace",
-  "keybroker",
-  "pb_data_sync",
-- "prost 0.14.3",
-+ "prost 0.14.4",
-  "table_iteration",
-  "tracing",
-  "usage_tracking",
-@@ -12155,7 +12208,7 @@ version = "0.14.5"
- source = "registry+https://github.com/rust-lang/crates.io-index"
- checksum = "f4ff0636fef47afb3ec02818f5bceb4377b8abb9d6a386aeade18bd6212f8eb7"
- dependencies = [
-- "prost 0.14.3",
-+ "prost 0.14.4",
-  "tokio",
-  "tokio-stream",
-  "tonic",
-@@ -12181,7 +12234,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
- checksum = "a55376a0bbaa4975a3f10d009ad763d8f4108f067c7c2e74f3001fb49778d309"
- dependencies = [
-  "bytes",
-- "prost 0.14.3",
-+ "prost 0.14.4",
-  "tonic",
- ]
- 
 diff --git a/crates/local_backend/Cargo.toml b/crates/local_backend/Cargo.toml
-index dcd71ff34..20df0a6cc 100644
+index dcd71ff34..397c093a1 100644
 --- a/crates/local_backend/Cargo.toml
 +++ b/crates/local_backend/Cargo.toml
-@@ -80,6 +80,9 @@ model = { workspace = true }
+@@ -73,6 +73,7 @@ http-body-util = { workspace = true }
+ http_client = { workspace = true }
+ hyper-util = { workspace = true }
+ indexing = { workspace = true }
++isolate = { workspace = true }
+ keybroker = { workspace = true }
+ maplit = { workspace = true }
+ metrics = { workspace = true }
+@@ -80,6 +81,9 @@ model = { workspace = true }
  moka = { workspace = true }
  node_executor = { workspace = true }
  parking_lot = { workspace = true }
@@ -272,7 +133,7 @@ index dcd71ff34..20df0a6cc 100644
  reqwest = { workspace = true }
  roles = { workspace = true }
  runtime = { workspace = true }
-@@ -115,6 +118,7 @@ vergen = { workspace = true, features = ["git", "gitcl"] }
+@@ -115,6 +119,7 @@ vergen = { workspace = true, features = ["git", "gitcl"] }
  
  [dev-dependencies]
  application = { workspace = true, features = ["testing"] }

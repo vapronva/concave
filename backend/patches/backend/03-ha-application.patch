@@ -1,193 +1,67 @@
 diff --git a/crates/application/src/cron_jobs/mod.rs b/crates/application/src/cron_jobs/mod.rs
-index 982a61b8e..828744cc4 100644
+index 982a61b8e..14a073fc8 100644
 --- a/crates/application/src/cron_jobs/mod.rs
 +++ b/crates/application/src/cron_jobs/mod.rs
-@@ -683,7 +683,26 @@ impl<RT: Runtime> CronJobContext<RT> {
+@@ -96,6 +96,7 @@ use crate::{
+ };
+ 
+ mod metrics;
++mod rejected;
+ 
+ const INITIAL_BACKOFF: Duration = Duration::from_millis(500);
+ const MAX_BACKOFF: Duration = Duration::from_secs(15);
+@@ -683,7 +684,8 @@ impl<RT: Runtime> CronJobContext<RT> {
                          context.clone(),
                          PermitTimeout::WaitIndefinitely,
                      )
 -                    .await?;
 +                    .await;
-+                let completion = match completion {
-+                    Ok(completion) => completion,
-+                    Err(error) => {
-+                        if error.is_rejected_before_execution()
-+                            && let Some(mut tx) = self
-+                                .new_transaction_for_job_state(
-+                                    &updated_job,
-+                                    FunctionUsageTracker::new(),
-+                                )
-+                                .await?
-+                        {
-+                            CronModel::new(&mut tx, component)
-+                                .update_job_state(job.cron_next_run())
-+                                .await?;
-+                            self.database.commit(tx, "cron_action_rejected").await?;
-+                        }
-+                        return Err(error);
-+                    },
-+                };
++                let completion = self.requeue(completion, &job, &updated_job).await?;
                  let execution_time_f64 = completion.execution_time.as_secs_f64();
                  let truncated_log_lines = self.truncate_log_lines(completion.log_lines.clone());
  
-diff --git a/crates/application/src/function_log.rs b/crates/application/src/function_log.rs
-index f8211a9d8..29b00b1c4 100644
---- a/crates/application/src/function_log.rs
-+++ b/crates/application/src/function_log.rs
-@@ -917,6 +917,7 @@ impl<RT: Runtime> FunctionExecutionLog<RT> {
-                             user_execution_time: outcome.user_execution_time,
-                             memory_in_mb: outcome.memory_in_mb,
-                             occ_info: occ_info.clone(),
-+                            occ_failed_permanently: occ_info.is_some() && !will_retry,
-                         },
-                         outcome.result.is_ok(),
-                         usage_stats,
-diff --git a/crates/application/src/ha.rs b/crates/application/src/ha.rs
+diff --git a/crates/application/src/cron_jobs/rejected.rs b/crates/application/src/cron_jobs/rejected.rs
 new file mode 100644
-index 000000000..c4873bee0
+index 000000000..9ccf87cd6
 --- /dev/null
-+++ b/crates/application/src/ha.rs
-@@ -0,0 +1,123 @@
-+use ::integrations::LogManager;
-+use database::SCHEMAS_TABLE;
-+use model::initialize_application_system_tables;
-+
++++ b/crates/application/src/cron_jobs/rejected.rs
+@@ -0,0 +1,31 @@
 +use super::*;
++use crate::function_log::ActionCompletion;
 +
-+#[derive(Debug, thiserror::Error)]
-+#[error(
-+    "database storage tag is not initialized: the leader has not finished initializing this \
-+     database"
-+)]
-+pub struct StorageTagUninitialized;
-+
-+impl<RT: Runtime> Application<RT> {
-+    pub(super) async fn open_application_storage(
-+        runtime: RT,
-+        database: &Database<RT>,
-+        storage_type: &model::database_globals::types::StorageType,
-+    ) -> anyhow::Result<ApplicationStorage> {
-+        let files_storage =
-+            create_storage(runtime.clone(), storage_type, StorageUseCase::Files).await?;
-+        let modules_storage =
-+            create_storage(runtime.clone(), storage_type, StorageUseCase::Modules).await?;
-+        let search_storage =
-+            create_storage(runtime.clone(), storage_type, StorageUseCase::SearchIndexes).await?;
-+        let exports_storage =
-+            create_storage(runtime.clone(), storage_type, StorageUseCase::Exports).await?;
-+        let snapshot_imports_storage = create_storage(
-+            runtime.clone(),
-+            storage_type,
-+            StorageUseCase::SnapshotImports,
-+        )
-+        .await?;
-+        // Search storage needs to be set for Database to be fully initialized
-+        database.set_search_storage(search_storage.clone());
-+        Ok(ApplicationStorage {
-+            files_storage,
-+            modules_storage,
-+            search_storage,
-+            exports_storage,
-+            snapshot_imports_storage,
-+        })
-+    }
-+
-+    pub async fn initialize_storage_readonly(
-+        runtime: RT,
-+        database: &Database<RT>,
-+    ) -> anyhow::Result<ApplicationStorage> {
-+        let storage_type = {
-+            let mut tx = database.begin_system().await?;
-+            if !tx
-+                .table_mapping()
-+                .namespace(value::TableNamespace::Global)
-+                .name_exists(&model::database_globals::DATABASE_GLOBALS_TABLE)
-+            {
-+                anyhow::bail!(StorageTagUninitialized);
-+            }
-+            DatabaseGlobalsModel::new(&mut tx)
-+                .database_globals()
-+                .await?
-+                .into_value()
-+                .storage_type
-+                .context(StorageTagUninitialized)?
-+        };
-+        let storage = Self::open_application_storage(runtime, database, &storage_type).await?;
-+        tracing::info!(
-+            "{:?} storage is configured (follower, read-only).",
-+            storage_type
-+        );
-+        Ok(storage)
-+    }
-+
-+    pub async fn become_leader(
++impl<RT: Runtime> CronJobContext<RT> {
++    pub(super) async fn requeue(
 +        &self,
-+        rw_persistence: Arc<dyn Persistence>,
-+        preempt_signal: ShutdownSignal,
-+    ) -> anyhow::Result<()> {
-+        tracing::info!("[promote] Application::become_leader: promoting Database");
-+        let deleted_tablet_receiver = self
-+            .database
-+            .become_leader(
-+                rw_persistence.clone(),
-+                preempt_signal.clone(),
-+                self.deployment.name.clone(),
-+            )
-+            .await?;
-+        initialize_application_system_tables(&self.database).await?;
-+        self.database
-+            .load_indexes_into_memory(btreeset! { SCHEMAS_TABLE.clone() })
-+            .await?;
-+        self.start_log_manager().await?;
-+        tracing::info!("[promote] Application::become_leader: starting leader workers");
-+        self.start_leader_workers(rw_persistence, preempt_signal, deleted_tablet_receiver)
-+            .await?;
-+        tracing::info!("[promote] Application::become_leader complete");
-+        Ok(())
-+    }
-+
-+    pub(crate) async fn start_log_manager(&self) -> anyhow::Result<()> {
-+        let log_streaming_allowed = {
-+            let mut tx = self.database.begin(Identity::system()).await?;
-+            let mut bi = BackendInfoModel::new(&mut tx);
-+            bi.is_log_streaming_allowed().await?
++        completion: anyhow::Result<ActionCompletion>,
++        job: &CronJob,
++        updated_job: &CronJob,
++    ) -> anyhow::Result<ActionCompletion> {
++        let error = match completion {
++            Ok(completion) => return Ok(completion),
++            Err(error) => error,
 +        };
-+        let client = LogManager::start(
-+            self.runtime.clone(),
-+            self.database.clone(),
-+            self.fetch_client.clone(),
-+            self.sentry_transport.clone(),
-+            self.deployment.name.clone(),
-+            self.deployment.region.as_ref().map(|r| r.to_string()),
-+            log_streaming_allowed,
-+            self.usage_counter.clone(),
-+        )
-+        .await;
-+        self.log_manager_client.replace_with(&client);
-+        Ok(())
-+    }
-+
-+    pub fn database(&self) -> &Database<RT> {
-+        &self.database
++        if error.is_rejected_before_execution()
++            && let Some(mut tx) = self
++                .new_transaction_for_job_state(updated_job, FunctionUsageTracker::new())
++                .await?
++        {
++            let component = tx
++                .table_mapping()
++                .tablet_namespace(job.id.tablet_id)?
++                .into();
++            CronModel::new(&mut tx, component)
++                .update_job_state(job.cron_next_run())
++                .await?;
++            self.database.commit(tx, "cron_action_rejected").await?;
++        }
++        Err(error)
 +    }
 +}
 diff --git a/crates/application/src/lib.rs b/crates/application/src/lib.rs
-index b0f2b9294..930f6f878 100644
+index b0f2b9294..e6494d6ed 100644
 --- a/crates/application/src/lib.rs
 +++ b/crates/application/src/lib.rs
-@@ -22,10 +22,7 @@ use std::{
- };
- 
- use ::exports::interface::ExportProvider;
--use ::integrations::{
--    LogManager,
--    LogManagerClient,
--};
-+use ::integrations::LogManagerClient;
- use airbyte_import::{
-     AirbyteRecord,
-     PrimaryKey,
-@@ -323,7 +320,6 @@ use model::{
+@@ -323,7 +323,6 @@ use model::{
          types::UdfConfig,
          UdfConfigModel,
      },
@@ -195,7 +69,7 @@ index b0f2b9294..930f6f878 100644
  };
  use node_executor::NodeActions;
  use parking_lot::{
-@@ -388,7 +384,6 @@ use usage_gauges_tracking_worker::UsageGaugesTrackingWorker;
+@@ -388,7 +387,6 @@ use usage_gauges_tracking_worker::UsageGaugesTrackingWorker;
  use usage_limits::{
      UsageLimitNotifier,
      UsageLimitRecorder,
@@ -203,258 +77,10 @@ index b0f2b9294..930f6f878 100644
      UsageMeter,
  };
  use usage_tracking::{
-@@ -445,6 +440,7 @@ pub mod deployment_state;
- mod execute_query_timestamp;
- mod exports;
- pub mod function_log;
-+mod ha;
- pub mod integrations;
- pub mod log_visibility;
- mod metrics;
-@@ -460,6 +456,8 @@ mod table_summary_worker;
- pub mod valid_identifier;
- mod worker_handles;
+@@ -842,26 +840,7 @@ impl<RT: Runtime> Application<RT> {
+         )
+         .await?;
  
-+pub use ha::StorageTagUninitialized;
-+
- pub use crate::{
-     cache::QueryCache,
-     source_map_cache::SourceMapCache,
-@@ -624,9 +622,10 @@ pub struct Application<RT: Runtime> {
-     usage_counter: UsageCounter,
-     usage_event_logger: Arc<dyn UsageEventLogger>,
-     usage_meter: Arc<UsageMeter>,
-+    usage_limit_notifier: Arc<dyn UsageLimitNotifier>,
-     key_broker: KeyBroker,
-     deployment: DeploymentMetadata,
--    workers: WorkerHandles,
-+    workers: Arc<Mutex<Option<WorkerHandles>>>,
-     log_visibility: Arc<dyn LogVisibility<RT>>,
-     system_env_var_names: HashSet<EnvVarName>,
-     app_auth: Arc<ApplicationAuth<RT>>,
-@@ -637,6 +636,11 @@ pub struct Application<RT: Runtime> {
-     // and Sentry tag updates that follow them.
-     backend_info_write_lock: Arc<tokio::sync::Mutex<()>>,
-     oidc_http_client: CachedHttpClient,
-+    searcher: Arc<dyn Searcher>,
-+    segment_term_metadata_fetcher: Arc<dyn SegmentTermMetadataFetcher>,
-+    export_provider: Arc<dyn ExportProvider<RT>>,
-+    fetch_client: Arc<dyn FetchClient>,
-+    sentry_transport: Arc<dyn sentry::TransportFactory>,
- }
- 
- /// Create storage based on the storage type configuration
-@@ -693,36 +697,9 @@ impl<RT: Runtime> Application<RT> {
-             storage_type
-         };
- 
--        let files_storage =
--            create_storage(runtime.clone(), &storage_type, StorageUseCase::Files).await?;
--        let modules_storage =
--            create_storage(runtime.clone(), &storage_type, StorageUseCase::Modules).await?;
--        let search_storage = create_storage(
--            runtime.clone(),
--            &storage_type,
--            StorageUseCase::SearchIndexes,
--        )
--        .await?;
--        let exports_storage =
--            create_storage(runtime.clone(), &storage_type, StorageUseCase::Exports).await?;
--        let snapshot_imports_storage = create_storage(
--            runtime.clone(),
--            &storage_type,
--            StorageUseCase::SnapshotImports,
--        )
--        .await?;
--
--        // Search storage needs to be set for Database to be fully initialized
--        database.set_search_storage(search_storage.clone());
-+        let storage = Self::open_application_storage(runtime, database, &storage_type).await?;
-         tracing::info!("{:?} storage is configured.", storage_type);
--
--        Ok(ApplicationStorage {
--            files_storage,
--            modules_storage,
--            search_storage,
--            exports_storage,
--            snapshot_imports_storage,
--        })
-+        Ok(storage)
-     }
- 
-     pub async fn new(
-@@ -739,7 +716,7 @@ impl<RT: Runtime> Application<RT> {
-         convex_site: ConvexSite,
-         searcher: Arc<dyn Searcher>,
-         segment_term_metadata_fetcher: Arc<dyn SegmentTermMetadataFetcher>,
--        persistence: Arc<dyn Persistence>,
-+        persistence: Option<Arc<dyn Persistence>>,
-         node_actions: NodeActions<RT>,
-         log_visibility: Arc<dyn LogVisibility<RT>>,
-         app_auth: Arc<ApplicationAuth<RT>>,
-@@ -759,13 +736,122 @@ impl<RT: Runtime> Application<RT> {
-         let usage_event_logger: Arc<dyn UsageEventLogger> =
-             UsageLimitRecorder::new(runtime.clone(), usage_meter.clone(), usage_event_logger);
- 
--        let deployment_name = deployment.name.clone();
--        let deployment_region = deployment.region.clone();
-         let default_system_env_vars = btreemap! {
-             CONVEX_ORIGIN.clone() => convex_origin.parse()?,
-             CONVEX_SITE.clone() => convex_site.parse()?
-         };
- 
-+        let usage_counter = UsageCounter::new(usage_event_logger.clone());
-+        let log_manager_client = LogManagerClient::noop();
-+        let firehose_stream_name = {
-+            let mut tx = database.begin(Identity::system()).await?;
-+            AuditLogConfigModel::new(&mut tx)
-+                .get_or_create()
-+                .await?
-+                .firehose_stream_name
-+                .clone()
-+        };
-+        let audit_log_client = AuditLogClient::new(
-+            log_manager_client.clone(),
-+            firehose_stream_name,
-+            &deployment.name,
-+        )
-+        .await?;
-+        let function_log = FunctionExecutionLog::new(
-+            runtime.clone(),
-+            usage_counter.clone(),
-+            Arc::new(log_manager_client.clone()),
-+        );
-+        {
-+            let function_log = function_log.clone();
-+            database.set_invalidation_callback(Arc::new(move |events| {
-+                function_log.record_subscription_invalidations(events);
-+            }))?;
-+        }
-+        let runner = Arc::new(ApplicationFunctionRunner::new(
-+            runtime.clone(),
-+            database.clone(),
-+            key_broker.clone(),
-+            function_runner.clone(),
-+            node_actions,
-+            file_storage.transactional_file_storage.clone(),
-+            application_storage.modules_storage.clone(),
-+            source_map_cache,
-+            function_log.clone(),
-+            audit_log_client.clone(),
-+            default_system_env_vars.clone(),
-+            cache,
-+            ai_gateway_jwt_minter,
-+            deployment.clone(),
-+        ));
-+        function_runner.set_action_callbacks(runner.clone());
-+        let application = Self {
-+            runtime: runtime.clone(),
-+            database: database.clone(),
-+            runner,
-+            function_log,
-+            file_storage,
-+            application_storage,
-+            usage_event_logger,
-+            usage_counter,
-+            usage_meter,
-+            usage_limit_notifier,
-+            key_broker,
-+            deployment,
-+            workers: Arc::new(Mutex::new(None)),
-+            log_visibility,
-+            system_env_var_names: default_system_env_vars.into_keys().collect(),
-+            app_auth,
-+            log_manager_client: log_manager_client.clone(),
-+            audit_log_client,
-+            sentry_tags: Default::default(),
-+            backend_info_write_lock: Default::default(),
-+            oidc_http_client,
-+            searcher,
-+            segment_term_metadata_fetcher,
-+            export_provider,
-+            fetch_client: fetch_client.clone(),
-+            sentry_transport,
-+        };
-+        if let Some(persistence) = persistence {
-+            application.start_log_manager().await?;
-+            application
-+                .start_leader_workers(persistence, lease_lost_shutdown, deleted_tablet_receiver)
-+                .await?;
-+        } else {
-+            tracing::info!(
-+                "[backend-role] follower mode: skipping all write-path workers (warm standby); \
-+                 awaiting in-process promotion"
-+            );
-+        }
-+        Ok(application)
-+    }
-+
-+    pub(crate) async fn start_leader_workers(
-+        &self,
-+        persistence: Arc<dyn Persistence>,
-+        lease_lost_shutdown: ShutdownSignal,
-+        deleted_tablet_receiver: tokio::sync::mpsc::Receiver<TabletId>,
-+    ) -> anyhow::Result<()> {
-+        anyhow::ensure!(
-+            self.workers.lock().is_none(),
-+            "leader workers are already running"
-+        );
-+        let runtime = &self.runtime;
-+        let database = &self.database;
-+        let application_storage = &self.application_storage;
-+        let usage_event_logger = &self.usage_event_logger;
-+        let usage_counter = &self.usage_counter;
-+        let function_log = &self.function_log;
-+        let runner = &self.runner;
-+        let file_storage = &self.file_storage;
-+        let deployment_name = self.deployment.name.clone();
-+        let searcher = self.searcher.clone();
-+        let segment_term_metadata_fetcher = self.segment_term_metadata_fetcher.clone();
-+        let export_provider = self.export_provider.clone();
-+        let key_broker = &self.key_broker;
-+        let log_manager_client = &self.log_manager_client;
-+        let usage_limit_notifier = self.usage_limit_notifier.clone();
-         let mut index_worker = Arc::new(Mutex::new(None));
-         if *ENABLE_INDEX_BACKFILL {
-             let index_worker_fut = IndexWorker::new(
-@@ -795,7 +881,7 @@ impl<RT: Runtime> Application<RT> {
-         );
-         let search_worker = Arc::new(Mutex::new(search_worker));
-         let search_and_vector_bootstrap_worker =
--            Arc::new(Mutex::new(database.start_search_and_vector_bootstrap()));
-+            Arc::new(Mutex::new(database.start_search_and_vector_bootstrap()?));
-         let table_summary_worker = TableSummaryWorker::start(
-             runtime.clone(),
-             database.clone(),
-@@ -817,82 +903,7 @@ impl<RT: Runtime> Application<RT> {
-             runtime.spawn("system_table_cleanup_worker", system_table_cleanup_worker),
-         ));
- 
--        let mut tx = database.begin(Identity::system()).await?;
--        let mut bi = BackendInfoModel::new(&mut tx);
--        let log_streaming_allowed = bi.is_log_streaming_allowed().await?;
--
--        let usage_counter = UsageCounter::new(usage_event_logger.clone());
--        let log_manager_client = LogManager::start(
--            runtime.clone(),
--            database.clone(),
--            fetch_client.clone(),
--            sentry_transport,
--            deployment_name.clone(),
--            deployment_region.as_ref().map(|r| r.to_string()),
--            log_streaming_allowed,
--            usage_counter.clone(),
--        )
--        .await;
--
--        let audit_log_config = AuditLogConfigModel::new(&mut tx).get_or_create().await?;
--        let audit_log_client = AuditLogClient::new(
--            log_manager_client.clone(),
--            audit_log_config.firehose_stream_name.clone(),
--            &deployment.name,
--        )
--        .await?;
--
 -        let usage_limit_configs = UsageLimitsModel::new(&mut tx)
 -            .list()
 -            .await?
@@ -475,259 +101,64 @@ index b0f2b9294..930f6f878 100644
 -                usage_meter.clone(),
 -            ),
 -        ))));
--
--        let function_log = FunctionExecutionLog::new(
--            runtime.clone(),
--            usage_counter.clone(),
--            Arc::new(log_manager_client.clone()),
--        );
--
--        {
--            let function_log = function_log.clone();
--            database.set_invalidation_callback(Arc::new(move |events| {
--                function_log.record_subscription_invalidations(events);
--            }))?;
--        }
--
--        let runner = Arc::new(ApplicationFunctionRunner::new(
--            runtime.clone(),
--            database.clone(),
--            key_broker.clone(),
--            function_runner.clone(),
--            node_actions,
--            file_storage.transactional_file_storage.clone(),
--            application_storage.modules_storage.clone(),
--            source_map_cache,
--            function_log.clone(),
--            audit_log_client.clone(),
--            default_system_env_vars.clone(),
--            cache,
--            ai_gateway_jwt_minter,
--            deployment.clone(),
--        ));
--        function_runner.set_action_callbacks(runner.clone());
 +        let usage_limit_worker = Arc::new(Mutex::new(None));
  
-         let scheduled_job_runner = ScheduledJobRunner::start(
+         let function_log = FunctionExecutionLog::new(
              runtime.clone(),
-@@ -967,7 +978,7 @@ impl<RT: Runtime> Application<RT> {
-             deployment_name.clone(),
-         )?;
- 
--        let workers = WorkerHandles {
-+        let handles = WorkerHandles {
-             usage_gauges_tracking_worker,
-             scheduled_job_runner,
-             cron_job_executor,
-@@ -985,29 +996,8 @@ impl<RT: Runtime> Application<RT> {
-             usage_limit_worker,
-             usage_limit_notifier,
-         };
--
--        Ok(Self {
--            runtime,
--            database,
--            runner,
--            function_log,
--            file_storage,
--            application_storage,
--            usage_event_logger,
--            usage_counter,
--            usage_meter,
--            key_broker,
--            deployment,
--            workers,
--            log_visibility,
--            system_env_var_names: default_system_env_vars.into_keys().collect(),
--            app_auth,
--            log_manager_client,
--            audit_log_client,
--            sentry_tags: Default::default(),
--            backend_info_write_lock: Default::default(),
--            oidc_http_client,
--        })
-+        *self.workers.lock() = Some(handles);
-+        Ok(())
-     }
- 
-     pub fn usage_meter(&self) -> &Arc<UsageMeter> {
-@@ -1679,9 +1669,11 @@ impl<RT: Runtime> Application<RT> {
-         identity.require_operation(DeploymentOp::CreateBackups)?;
-         ensure_export_file_storage_within_limit(
-             format,
--            self.workers
--                .usage_gauges_tracking_worker
--                .latest_file_storage_size(),
-+            self.workers.lock().as_ref().and_then(|workers| {
-+                workers
-+                    .usage_gauges_tracking_worker
-+                    .latest_file_storage_size()
-+            }),
-         )?;
-         if let Some(expiration_ts_ns) = expiration_ts_ns {
-             let now = SystemTime::now()
-@@ -4020,7 +4012,10 @@ impl<RT: Runtime> Application<RT> {
-     }
- 
-     pub async fn shutdown(&self) -> anyhow::Result<()> {
--        self.workers.shutdown().await?;
-+        let workers = self.workers.lock().clone();
-+        if let Some(workers) = &workers {
-+            workers.shutdown().await?;
-+        }
-         self.log_manager_client.shutdown().await?;
-         self.runner.shutdown().await?;
-         self.database.shutdown().await?;
 diff --git a/crates/application/src/scheduled_jobs/mod.rs b/crates/application/src/scheduled_jobs/mod.rs
-index 33922824f..3a00adcb4 100644
+index 33922824f..08fba08dd 100644
 --- a/crates/application/src/scheduled_jobs/mod.rs
 +++ b/crates/application/src/scheduled_jobs/mod.rs
-@@ -200,8 +200,7 @@ pub struct ScheduledJobContext<RT: Runtime> {
-     function_log: FunctionExecutionLog<RT>,
- }
+@@ -126,6 +126,7 @@ use crate::{
+ };
  
--impl<RT: Runtime> ScheduledJobContext<RT> {
--}
-+impl<RT: Runtime> ScheduledJobContext<RT> {}
+ mod metrics;
++mod rejected;
  
- impl<RT: Runtime> ScheduledJobExecutor<RT> {
-     pub async fn run(
-@@ -992,7 +991,28 @@ impl<RT: Runtime> ScheduledJobContext<RT> {
+ pub(crate) const SCHEDULED_JOB_EXECUTED: &str = "scheduled_job_executed";
+ pub(crate) const SCHEDULED_JOB_EXECUTING: &str = "scheduled_job_executing";
+@@ -992,7 +993,8 @@ impl<RT: Runtime> ScheduledJobContext<RT> {
                          context.clone(),
                          PermitTimeout::WaitIndefinitely,
                      )
 -                    .await?;
 +                    .await;
-+                let completion = match completion {
-+                    Ok(completion) => completion,
-+                    Err(error) => {
-+                        if error.is_rejected_before_execution()
-+                            && let Some((mut tx, mut job)) = self
-+                                .new_transaction_for_job_state(
-+                                    job_id,
-+                                    &updated_job,
-+                                    FunctionUsageTracker::new(),
-+                                )
-+                                .await?
-+                        {
-+                            job.state = ScheduledJobState::Pending;
-+                            SchedulerModel::new(&mut tx, namespace)
-+                                .replace(job_id, job)
-+                                .await?;
-+                            self.database.commit(tx, "scheduled_job_rejected").await?;
-+                        }
-+                        return Err(error);
-+                    },
-+                };
++                let completion = self.requeue(completion, job_id, &updated_job).await?;
                  let state = match &completion.outcome.result {
                      Ok(_) => ScheduledJobState::Success,
                      Err(e) => ScheduledJobState::Failed(e.to_string()),
-diff --git a/crates/integrations/src/lib.rs b/crates/integrations/src/lib.rs
-index 35fe06ff0..e6f335c8f 100644
---- a/crates/integrations/src/lib.rs
-+++ b/crates/integrations/src/lib.rs
-@@ -101,6 +101,11 @@ use crate::integrations::{
- /// See `integrations/README.md` for more info.
- #[derive(Clone)]
- pub struct LogManagerClient {
-+    inner: Arc<RwLock<LogManagerClientInner>>,
-+}
+diff --git a/crates/application/src/scheduled_jobs/rejected.rs b/crates/application/src/scheduled_jobs/rejected.rs
+new file mode 100644
+index 000000000..be97897e8
+--- /dev/null
++++ b/crates/application/src/scheduled_jobs/rejected.rs
+@@ -0,0 +1,29 @@
++use super::*;
++use crate::function_log::ActionCompletion;
 +
-+#[derive(Clone)]
-+struct LogManagerClientInner {
-     handle: Arc<Mutex<Option<Box<dyn SpawnHandle>>>>,
-     event_sender: mpsc::Sender<Arc<LogEvent>>,
-     active_integrations_count: Arc<AtomicUsize>,
-@@ -108,12 +113,28 @@ pub struct LogManagerClient {
- }
- 
- impl LogManagerClient {
-+    pub fn noop() -> Self {
-+        let (event_sender, _rx) = mpsc::channel(1);
-+        LogManagerClient::from(LogManagerClientInner {
-+            handle: Arc::new(Mutex::new(None)),
-+            event_sender,
-+            active_integrations_count: Arc::new(AtomicUsize::new(0)),
-+            entitlement_enabled: Arc::new(AtomicBool::new(false)),
-+        })
-+    }
-+
-+    pub fn replace_with(&self, other: &Self) {
-+        let inner = other.inner.read().clone();
-+        *self.inner.write() = inner;
-+    }
-+
-     fn send_logs_inner(&self, logs: Vec<LogEvent>) -> Result<(), SendLogBatchError> {
-         let mut dropped = 0;
-         let mut num_left = logs.len();
-         let total = logs.len();
-+        let event_sender = self.inner.read().event_sender.clone();
-         for log in logs.into_iter() {
--            match self.event_sender.try_send(Arc::new(log)) {
-+            match event_sender.try_send(Arc::new(log)) {
-                 Err(mpsc::error::TrySendError::Full(_)) => {
-                     dropped += 1;
-                 },
-@@ -140,15 +161,24 @@ impl LogManagerClient {
-     }
- 
-     pub fn set_entitlement_enabled(&self, enabled: bool) {
--        self.entitlement_enabled.store(enabled, Ordering::Relaxed)
-+        self.inner
-+            .read()
-+            .entitlement_enabled
-+            .store(enabled, Ordering::Relaxed)
-     }
- 
-     fn get_active_integrations_count(&self) -> usize {
--        self.active_integrations_count.load(Ordering::Relaxed)
-+        self.inner
-+            .read()
-+            .active_integrations_count
-+            .load(Ordering::Relaxed)
-     }
- 
-     pub fn is_entitlement_enabled(&self) -> bool {
--        self.entitlement_enabled.load(Ordering::Relaxed)
-+        self.inner
-+            .read()
-+            .entitlement_enabled
-+            .load(Ordering::Relaxed)
-     }
- 
-     fn is_active(&self) -> bool {
-@@ -156,10 +186,18 @@ impl LogManagerClient {
-     }
- }
- 
-+impl From<LogManagerClientInner> for LogManagerClient {
-+    fn from(inner: LogManagerClientInner) -> Self {
-+        Self {
-+            inner: Arc::new(RwLock::new(inner)),
++impl<RT: Runtime> ScheduledJobContext<RT> {
++    pub(super) async fn requeue(
++        &self,
++        completion: anyhow::Result<ActionCompletion>,
++        job_id: ResolvedDocumentId,
++        updated_job: &ScheduledJobMetadata,
++    ) -> anyhow::Result<ActionCompletion> {
++        let error = match completion {
++            Ok(completion) => return Ok(completion),
++            Err(error) => error,
++        };
++        if error.is_rejected_before_execution()
++            && let Some((mut tx, mut job)) = self
++                .new_transaction_for_job_state(job_id, updated_job, FunctionUsageTracker::new())
++                .await?
++        {
++            let namespace = tx.table_mapping().tablet_namespace(job_id.tablet_id)?;
++            job.state = ScheduledJobState::Pending;
++            SchedulerModel::new(&mut tx, namespace)
++                .replace(job_id, job)
++                .await?;
++            self.database.commit(tx, "scheduled_job_rejected").await?;
 +        }
++        Err(error)
 +    }
 +}
-+
- #[async_trait]
- impl LogSender for LogManagerClient {
-     async fn shutdown(&self) -> anyhow::Result<()> {
--        let handle = self.handle.lock().take();
-+        let handle = self.inner.read().handle.lock().take();
-         if let Some(handle) = handle {
-             shutdown_and_join(handle).await?;
-         }
-@@ -286,12 +324,12 @@ impl<RT: Runtime> LogManager<RT> {
- 
-         let handle = Arc::new(Mutex::new(Some(runtime.spawn("log_manager", worker.go()))));
-         let entitlement_enabled = Arc::new(AtomicBool::new(entitlement_enabled));
--        LogManagerClient {
-+        LogManagerClient::from(LogManagerClientInner {
-             handle,
-             event_sender: req_tx,
-             active_integrations_count,
-             entitlement_enabled,
--        }
-+        })
-     }
- 
-     /// Event loop

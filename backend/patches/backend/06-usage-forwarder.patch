@@ -1,28 +1,9 @@
-diff --git a/crates/events/src/usage.rs b/crates/events/src/usage.rs
-index 405e31e9c..eb0e1c078 100644
---- a/crates/events/src/usage.rs
-+++ b/crates/events/src/usage.rs
-@@ -41,6 +41,7 @@ pub struct FunctionCallUsageFields {
-     pub occ_table_name: Option<String>,
-     /// The retry number of the OCC. Only set if is_occ is true.
-     pub occ_retry_count: Option<u64>,
-+    pub occ_failed_permanently: bool,
- 
-     /// Executions this event covers.
-     pub calls: u64,
-@@ -337,4 +338,4 @@ impl UsageEventLogger for NoOpUsageEventLogger {
-     async fn shutdown(&self) -> anyhow::Result<()> {
-         Ok(())
-     }
--}
-\ No newline at end of file
-+}
 diff --git a/crates/local_backend/src/usage_forwarder.rs b/crates/local_backend/src/usage_forwarder.rs
 new file mode 100644
-index 000000000..d955552f9
+index 000000000..fb1b5e8c0
 --- /dev/null
 +++ b/crates/local_backend/src/usage_forwarder.rs
-@@ -0,0 +1,543 @@
+@@ -0,0 +1,540 @@
 +use std::{
 +    sync::{
 +        atomic::{
@@ -93,31 +74,12 @@ index 000000000..d955552f9
 +
 +register_convex_counter!(
 +    USAGE_FORWARDER_DROPPED_BATCHES_TOTAL,
-+    "Usage-event batches dropped because the forwarder channel was full or closed"
++    "Usage-event batches dropped (channel full/closed, sink 4xx, retries exhausted, shutdown)"
 +);
 +
 +fn is_insight(event: &UsageEvent) -> bool {
-+    match event {
-+        UsageEvent::FunctionCall { fields } => fields.is_occ,
-+        UsageEvent::InsightReadLimit { .. } => true,
-+        UsageEvent::FunctionStorageCalls { .. }
-+        | UsageEvent::FunctionStorageBandwidth { .. }
-+        | UsageEvent::StorageCall { .. }
-+        | UsageEvent::StorageBandwidth { .. }
-+        | UsageEvent::DatabaseBandwidth { .. }
-+        | UsageEvent::NetworkBandwidth { .. }
-+        | UsageEvent::VectorBandwidth { .. }
-+        | UsageEvent::TextWrites { .. }
-+        | UsageEvent::TextQuery { .. }
-+        | UsageEvent::VectorQuery { .. }
-+        | UsageEvent::AuditLogBandwidth { .. }
-+        | UsageEvent::CurrentVectorStorage { .. }
-+        | UsageEvent::CurrentTextStorage { .. }
-+        | UsageEvent::CurrentDatabaseStorage { .. }
-+        | UsageEvent::CurrentFileStorage { .. }
-+        | UsageEvent::CurrentDocumentCounts { .. }
-+        | UsageEvent::CurrentBackendState { .. } => false,
-+    }
++    matches!(event, UsageEvent::FunctionCall { fields } if fields.is_occ)
++        || matches!(event, UsageEvent::InsightReadLimit { .. })
 +}
 +
 +fn now_millis() -> i64 {
@@ -129,6 +91,12 @@ index 000000000..d955552f9
 +}
 +
 +fn stamp(event: UsageEvent, timestamp: i64) -> Option<serde_json::Value> {
++    let occ_failed_permanently = match &event {
++        UsageEvent::FunctionCall { fields } => {
++            Some(fields.is_occ && fields.sample.status == "failure")
++        },
++        _ => None,
++    };
 +    let mut value = serde_json::to_value(event).ok()?;
 +    let inner = value
 +        .as_object_mut()?
@@ -136,6 +104,12 @@ index 000000000..d955552f9
 +        .next()?
 +        .as_object_mut()?;
 +    inner.insert("timestamp".to_string(), timestamp.into());
++    if let Some(occ_failed_permanently) = occ_failed_permanently {
++        inner.insert(
++            "occ_failed_permanently".to_string(),
++            occ_failed_permanently.into(),
++        );
++    }
 +    Some(value)
 +}
 +
@@ -506,9 +480,8 @@ index 000000000..d955552f9
 +        stamp,
 +    };
 +
-+    #[test]
-+    fn stamped_occ_event_keeps_the_insight_fields_flat() {
-+        let event = UsageEvent::FunctionCall {
++    fn occ_event(status: &str) -> UsageEvent {
++        UsageEvent::FunctionCall {
 +            fields: FunctionCallUsageFields {
 +                component_path: None,
 +                udf_id: "messages:send".to_string(),
@@ -519,7 +492,6 @@ index 000000000..d955552f9
 +                is_occ: true,
 +                occ_table_name: Some("messages".to_string()),
 +                occ_retry_count: Some(3),
-+                occ_failed_permanently: true,
 +                calls: 1,
 +                duration_millis: 7,
 +                user_execution_millis: None,
@@ -531,12 +503,16 @@ index 000000000..d955552f9
 +                    memory_megabytes: 0,
 +                    occ_document_id: Some("doc".to_string()),
 +                    occ_write_source: Some("messages:send".to_string()),
-+                    status: "failure".to_string(),
++                    status: status.to_string(),
 +                    response_sha256: None,
 +                },
 +            },
-+        };
-+        let value = stamp(event, 1_700_000_000_000).unwrap();
++        }
++    }
++
++    #[test]
++    fn stamped_occ_event_keeps_the_insight_fields_flat() {
++        let value = stamp(occ_event("failure"), 1_700_000_000_000).unwrap();
 +        let inner = &value["FunctionCall"];
 +        assert_eq!(inner["timestamp"], 1_700_000_000_000_i64);
 +        assert_eq!(inner["is_occ"], true);
@@ -544,6 +520,8 @@ index 000000000..d955552f9
 +        assert_eq!(inner["occ_retry_count"], 3);
 +        assert_eq!(inner["occ_document_id"], "doc");
 +        assert_eq!(inner["udf_id"], "messages:send");
++        let retried = stamp(occ_event("success"), 1_700_000_000_000).unwrap();
++        assert_eq!(retried["FunctionCall"]["occ_failed_permanently"], false);
 +    }
 +
 +    #[test]
@@ -566,40 +544,3 @@ index 000000000..d955552f9
 +            .any(|(key, value)| key == "deploymentName" && value == "real deployment"));
 +    }
 +}
-diff --git a/crates/usage_tracking/src/lib.rs b/crates/usage_tracking/src/lib.rs
-index 9e5bbd10e..750da4006 100644
---- a/crates/usage_tracking/src/lib.rs
-+++ b/crates/usage_tracking/src/lib.rs
-@@ -86,6 +86,7 @@ pub enum CallType {
-         user_execution_time: Option<Duration>,
-         memory_in_mb: u64,
-         occ_info: Option<OccInfo>,
-+        occ_failed_permanently: bool,
-     },
-     Import,
-     CloudBackup,
-@@ -152,6 +153,16 @@ impl CallType {
-         }
-     }
- 
-+    fn occ_failed_permanently(&self) -> bool {
-+        match self {
-+            Self::Mutation {
-+                occ_failed_permanently,
-+                ..
-+            } => *occ_failed_permanently,
-+            _ => false,
-+        }
-+    }
-+
-     fn memory_megabytes(&self) -> u64 {
-         match self {
-             CallType::UncachedQuery { memory_in_mb, .. }
-@@ -263,6 +274,7 @@ impl UsageCounter {
-                 is_occ: call_type.is_occ(),
-                 occ_table_name: call_type.occ_table_name(),
-                 occ_retry_count: call_type.occ_retry_count(),
-+                occ_failed_permanently: call_type.occ_failed_permanently(),
-                 calls: 1,
-                 duration_millis: call_type.duration_millis(),
-                 user_execution_millis,

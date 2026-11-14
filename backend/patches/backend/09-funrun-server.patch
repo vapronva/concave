@@ -1,9 +1,9 @@
 diff --git a/crates/funrun_server/Cargo.toml b/crates/funrun_server/Cargo.toml
 new file mode 100644
-index 000000000..86827b915
+index 000000000..b8ca2d733
 --- /dev/null
 +++ b/crates/funrun_server/Cargo.toml
-@@ -0,0 +1,52 @@
+@@ -0,0 +1,53 @@
 +[package]
 +name = "funrun_server"
 +version = "0.1.0"
@@ -32,6 +32,7 @@ index 000000000..86827b915
 +futures = { workspace = true }
 +http = { workspace = true }
 +indexing = { workspace = true }
++isolate = { workspace = true }
 +keybroker = { workspace = true }
 +model = { workspace = true }
 +metrics = { workspace = true }
@@ -58,10 +59,10 @@ index 000000000..86827b915
 +workspace = true
 diff --git a/crates/funrun_server/src/callbacks.rs b/crates/funrun_server/src/callbacks.rs
 new file mode 100644
-index 000000000..b8ba61698
+index 000000000..14eb9fdd7
 --- /dev/null
 +++ b/crates/funrun_server/src/callbacks.rs
-@@ -0,0 +1,616 @@
+@@ -0,0 +1,653 @@
 +use anyhow::Context;
 +use async_trait::async_trait;
 +use common::{
@@ -70,7 +71,6 @@ index 000000000..b8ba61698
 +        CanonicalizedComponentFunctionPath,
 +        ComponentId,
 +        ComponentPath,
-+        SerializedComponentFunctionPath,
 +    },
 +    execution_context::{
 +        ExecutionContext,
@@ -176,6 +176,31 @@ index 000000000..b8ba61698
 +            req = req.header(http::header::AUTHORIZATION, auth);
 +        }
 +        req
++    }
++
++    pub(crate) async fn post_proto<Req: Message, Resp: Message + Default>(
++        &self,
++        route: &str,
++        request: &Req,
++    ) -> anyhow::Result<Resp> {
++        let path = format!("/api/actions{route}");
++        let response = self
++            .client
++            .post(self.url(&path))
++            .header(CONVEX_ACTIONS_CALLBACK_TOKEN_HEADER, &self.callback_token)
++            .header(http::header::CONTENT_TYPE, "application/x-protobuf")
++            .body(request.encode_to_vec())
++            .send()
++            .await
++            .with_context(|| format!("funrun leader call to {path} failed"))?;
++        let status = response.status();
++        let body = response.bytes().await?;
++        anyhow::ensure!(
++            status.is_success(),
++            "funrun leader call to {path} returned {status}: {}",
++            String::from_utf8_lossy(&body)
++        );
++        Ok(Resp::decode(body)?)
 +    }
 +
 +    async fn run_function(
@@ -366,6 +391,13 @@ index 000000000..b8ba61698
 +#[serde(rename_all = "camelCase")]
 +struct LookupFunctionHandleBody {
 +    handle: String,
++}
++
++#[derive(Deserialize)]
++#[serde(rename_all = "camelCase")]
++struct LookupFunctionHandleResponse {
++    component: String,
++    udf_path: String,
 +}
 +
 +#[async_trait]
@@ -618,8 +650,14 @@ index 000000000..b8ba61698
 +            .send()
 +            .await?;
 +        let response = checked(response).await?;
-+        let parsed: SerializedComponentFunctionPath = response.json().await?;
-+        CanonicalizedComponentFunctionPath::try_from(parsed)
++        let LookupFunctionHandleResponse {
++            component,
++            udf_path,
++        } = response.json().await?;
++        Ok(CanonicalizedComponentFunctionPath {
++            component: component.parse()?,
++            udf_path: udf_path.parse()?,
++        })
 +    }
 +}
 +
@@ -680,12 +718,13 @@ index 000000000..b8ba61698
 +}
 diff --git a/crates/funrun_server/src/config.rs b/crates/funrun_server/src/config.rs
 new file mode 100644
-index 000000000..dad12bc23
+index 000000000..9bbeda884
 --- /dev/null
 +++ b/crates/funrun_server/src/config.rs
-@@ -0,0 +1,66 @@
+@@ -0,0 +1,98 @@
 +use std::{
 +    net::SocketAddr,
++    str::FromStr,
 +    time::Duration,
 +};
 +
@@ -699,11 +738,40 @@ index 000000000..dad12bc23
 +    pub db_spec: String,
 +}
 +
++#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
++#[serde(rename_all = "lowercase")]
++pub enum FunrunMode {
++    Follower,
++    Stateless,
++}
++
++impl FunrunMode {
++    pub fn as_str(self) -> &'static str {
++        match self {
++            Self::Follower => "follower",
++            Self::Stateless => "stateless",
++        }
++    }
++}
++
++impl FromStr for FunrunMode {
++    type Err = anyhow::Error;
++
++    fn from_str(s: &str) -> anyhow::Result<Self> {
++        match s {
++            "" | "follower" => Ok(Self::Follower),
++            "stateless" => Ok(Self::Stateless),
++            other => anyhow::bail!("FUNRUN_MODE must be follower or stateless, got {other:?}"),
++        }
++    }
++}
++
 +pub struct FunrunConfig {
 +    pub listen: SocketAddr,
 +    pub health_listen: SocketAddr,
 +    pub drain_delay: Duration,
 +    pub instance: FunrunInstanceConfig,
++    pub mode: FunrunMode,
 +    pub require_ssl: bool,
 +}
 +
@@ -719,6 +787,7 @@ index 000000000..dad12bc23
 +            .context("Invalid FUNRUN_HEALTH_LISTEN")?;
 +        let drain_delay = duration_secs_from_env("CONVEX_FUNRUN_DRAIN_DELAY_SECS", 8)?;
 +        let require_ssl = std::env::var_os("DO_NOT_REQUIRE_SSL").is_none();
++        let mode = std::env::var("FUNRUN_MODE").unwrap_or_default().parse()?;
 +        let instance_name =
 +            std::env::var("FUNRUN_INSTANCE_NAME").context("FUNRUN_INSTANCE_NAME must be set")?;
 +        let instance_secret = std::env::var("FUNRUN_INSTANCE_SECRET")
@@ -734,6 +803,7 @@ index 000000000..dad12bc23
 +                instance_secret,
 +                db_spec,
 +            },
++            mode,
 +            require_ssl,
 +        })
 +    }
@@ -750,12 +820,138 @@ index 000000000..dad12bc23
 +        .transpose()?
 +        .unwrap_or(Duration::from_secs(default_secs)))
 +}
+diff --git a/crates/funrun_server/src/leader_snapshot.rs b/crates/funrun_server/src/leader_snapshot.rs
+new file mode 100644
+index 000000000..7875397d2
+--- /dev/null
++++ b/crates/funrun_server/src/leader_snapshot.rs
+@@ -0,0 +1,120 @@
++use std::{
++    collections::BTreeMap,
++    sync::Arc,
++};
++
++use async_trait::async_trait;
++use common::{
++    document::DocumentUpdate,
++    query::{
++        InternalSearch,
++        SearchVersion,
++    },
++    types::RepeatableTimestamp,
++};
++use database::{
++    TableCountSnapshot,
++    TransactionTextSnapshot,
++};
++use function_runner::remote::snapshot_rpc::{
++    table_counts,
++    text_search_request,
++    text_search_results,
++    TABLE_COUNTS_ROUTE,
++    TEXT_SEARCH_ROUTE,
++};
++use indexing::index_registry::Index;
++use search::{
++    QueryResults,
++    TantivySearchIndexSchema,
++};
++use tokio::sync::OnceCell;
++use value::TabletId;
++
++use crate::{
++    callbacks::HttpActionCallbacks,
++    metrics::leader_snapshot_rpc_timer,
++};
++
++pub struct LeaderSnapshot {
++    callbacks: Arc<HttpActionCallbacks>,
++    ts: RepeatableTimestamp,
++    counts: OnceCell<Option<BTreeMap<TabletId, u64>>>,
++}
++
++impl LeaderSnapshot {
++    pub fn new(callbacks: Arc<HttpActionCallbacks>, ts: RepeatableTimestamp) -> Self {
++        Self {
++            callbacks,
++            ts,
++            counts: OnceCell::new(),
++        }
++    }
++
++    async fn fetch_counts(&self) -> anyhow::Result<Option<BTreeMap<TabletId, u64>>> {
++        let timer = leader_snapshot_rpc_timer("table_counts");
++        let response = self
++            .callbacks
++            .post_proto(
++                TABLE_COUNTS_ROUTE,
++                &pb::funrun::SnapshotTableCountsRequest {
++                    ts: Some(self.ts.into()),
++                },
++            )
++            .await?;
++        let counts = table_counts(response)?;
++        timer.finish();
++        Ok(counts)
++    }
++}
++
++#[async_trait]
++impl TableCountSnapshot for LeaderSnapshot {
++    async fn count(&self, table: TabletId) -> anyhow::Result<Option<u64>> {
++        let counts = self.counts.get_or_try_init(|| self.fetch_counts()).await?;
++        Ok(counts
++            .as_ref()
++            .map(|counts| counts.get(&table).copied().unwrap_or(0)))
++    }
++}
++
++#[async_trait]
++impl TransactionTextSnapshot for LeaderSnapshot {
++    async fn search(
++        &self,
++        index: &Index,
++        search: &InternalSearch,
++        version: SearchVersion,
++        pending_updates: &Vec<DocumentUpdate>,
++    ) -> anyhow::Result<QueryResults> {
++        let printable_index_name = search.printable_index_name()?;
++        let (query, reads) = TantivySearchIndexSchema::new_for_index(index, &printable_index_name)?
++            .compile(search, version)?;
++        if query.is_empty() {
++            return Ok(QueryResults {
++                revisions_with_keys: vec![],
++                reads,
++                filtered_bytes_searched: 0,
++            });
++        }
++        let request = text_search_request(
++            self.ts,
++            index.id(),
++            &printable_index_name,
++            query.into(),
++            pending_updates,
++        )?;
++        let timer = leader_snapshot_rpc_timer("text_search");
++        let response = self
++            .callbacks
++            .post_proto(TEXT_SEARCH_ROUTE, &request)
++            .await?;
++        let (revisions_with_keys, filtered_bytes_searched) = text_search_results(response)?;
++        timer.finish();
++        Ok(QueryResults {
++            revisions_with_keys,
++            reads,
++            filtered_bytes_searched,
++        })
++    }
++}
 diff --git a/crates/funrun_server/src/main.rs b/crates/funrun_server/src/main.rs
 new file mode 100644
-index 000000000..194c95bdd
+index 000000000..ee1dd8f4e
 --- /dev/null
 +++ b/crates/funrun_server/src/main.rs
-@@ -0,0 +1,279 @@
+@@ -0,0 +1,286 @@
 +#![recursion_limit = "256"]
 +
 +use std::sync::{
@@ -779,16 +975,21 @@ index 000000000..194c95bdd
 +use common::runtime::Runtime;
 +use runtime::prod::ProdRuntime;
 +use tokio::sync::watch;
++use tonic::service::interceptor::InterceptedService;
 +
 +mod callbacks;
 +mod config;
++mod leader_snapshot;
 +mod metrics;
 +mod service;
 +mod snapshot;
 +
 +use config::FunrunConfig;
 +use metrics::log_isolate_pool;
-+use service::FunrunService;
++use service::{
++    auth_interceptor,
++    FunrunService,
++};
 +use snapshot::InstanceRegistry;
 +
 +fn main() -> anyhow::Result<()> {
@@ -805,9 +1006,10 @@ index 000000000..194c95bdd
 +
 +async fn serve(runtime: ProdRuntime, config: FunrunConfig) -> anyhow::Result<()> {
 +    tracing::info!(
-+        "[convex-funrun] starting for instance {} on {}",
++        "[convex-funrun] starting for instance {} on {} in {} mode",
 +        config.instance.instance_name,
 +        config.listen,
++        config.mode.as_str(),
 +    );
 +    let registry = Arc::new(InstanceRegistry::new(runtime.clone(), &config)?);
 +    spawn_pod_deletion_cost_updater(&runtime, registry.clone());
@@ -844,11 +1046,12 @@ index 000000000..194c95bdd
 +            "[convex-funrun] instance warm; listening on {}",
 +            config.listen
 +        );
++        let interceptor = auth_interceptor(grpc_runtime.clone(), config.instance.clone());
 +        let service = FunrunService::new(grpc_runtime, grpc_registry, state)?;
 +        let server = pb::funrun::funrun_server::FunrunServer::new(service)
 +            .max_decoding_message_size(usize::MAX);
 +        builder
-+            .add_service(server)
++            .add_service(InterceptedService::new(server, interceptor))
 +            .serve_with_shutdown(config.listen, wait_for_shutdown(grpc_shutdown))
 +            .await
 +            .context("convex-funrun gRPC server exited")
@@ -1037,17 +1240,20 @@ index 000000000..194c95bdd
 +}
 diff --git a/crates/funrun_server/src/metrics.rs b/crates/funrun_server/src/metrics.rs
 new file mode 100644
-index 000000000..7e370458a
+index 000000000..c54c549d4
 --- /dev/null
 +++ b/crates/funrun_server/src/metrics.rs
-@@ -0,0 +1,58 @@
+@@ -0,0 +1,72 @@
 +use metrics::{
 +    log_counter,
 +    log_counter_with_labels,
 +    log_gauge,
 +    register_convex_counter,
 +    register_convex_gauge,
++    register_convex_histogram,
 +    StaticMetricLabel,
++    StatusTimer,
++    STATUS_LABEL,
 +};
 +
 +register_convex_counter!(
@@ -1099,12 +1305,23 @@ index 000000000..7e370458a
 +        vec![StaticMetricLabel::new("reason", reason)],
 +    );
 +}
++
++register_convex_histogram!(
++    LEADER_SNAPSHOT_RPC_SECONDS,
++    "Stateless funrun table-count and text-search calls to the dispatching leader",
++    &[STATUS_LABEL[0], "kind"]
++);
++pub(crate) fn leader_snapshot_rpc_timer(kind: &'static str) -> StatusTimer {
++    let mut timer = StatusTimer::new(&LEADER_SNAPSHOT_RPC_SECONDS);
++    timer.add_label(StaticMetricLabel::new_const("kind", kind));
++    timer
++}
 diff --git a/crates/funrun_server/src/service.rs b/crates/funrun_server/src/service.rs
 new file mode 100644
-index 000000000..3a019d9c5
+index 000000000..308cd8b1f
 --- /dev/null
 +++ b/crates/funrun_server/src/service.rs
-@@ -0,0 +1,640 @@
+@@ -0,0 +1,652 @@
 +use std::{
 +    collections::BTreeMap,
 +    pin::Pin,
@@ -1153,9 +1370,11 @@ index 000000000..3a019d9c5
 +    StreamExt,
 +};
 +use keybroker::{
-+    verify_funrun_auth_header,
++    funrun_auth::{
++        verify_funrun_auth_header,
++        FUNRUN_AUTH_METADATA_KEY,
++    },
 +    Identity,
-+    FUNRUN_AUTH_METADATA_KEY,
 +};
 +use model::environment_variables::types::{
 +    EnvVarName,
@@ -1186,14 +1405,40 @@ index 000000000..3a019d9c5
 +
 +use crate::{
 +    callbacks::HttpActionCallbacks,
++    config::FunrunInstanceConfig,
 +    metrics::log_rejected_before_execution,
 +    snapshot::{
 +        InstanceRegistry,
 +        InstanceState,
++        SnapshotInputs,
 +    },
 +};
 +
 +const RESPONSE_STREAM_BUFFER: usize = 256;
++const UNAUTHENTICATED_MESSAGE: &str = "funrun: missing or invalid deployment authorization";
++
++pub fn auth_interceptor<RT: Runtime>(
++    rt: RT,
++    instance: FunrunInstanceConfig,
++) -> impl FnMut(Request<()>) -> Result<Request<()>, Status> + Clone {
++    move |request: Request<()>| {
++        let presented = request
++            .metadata()
++            .get(FUNRUN_AUTH_METADATA_KEY)
++            .and_then(|v| v.to_str().ok())
++            .unwrap_or_default();
++        if verify_funrun_auth_header(
++            presented,
++            &instance.instance_secret,
++            &instance.instance_name,
++            rt.unix_timestamp().as_secs(),
++        ) {
++            Ok(request)
++        } else {
++            Err(Status::unauthenticated(UNAUTHENTICATED_MESSAGE))
++        }
++    }
++}
 +
 +struct CommonRunInputs {
 +    identity: Identity,
@@ -1205,24 +1450,24 @@ index 000000000..3a019d9c5
 +    backend_url: ConvexOrigin,
 +    action_callbacks: Arc<HttpActionCallbacks>,
 +    deployment: DeploymentMetadata,
-+    snapshot: crate::snapshot::SnapshotInputs,
 +}
 +
 +impl CommonRunInputs {
 +    fn into_run_request_args<RT: Runtime>(
 +        self,
 +        instance: &InstanceState<RT>,
++        snapshot: SnapshotInputs,
 +        fetch_client: Arc<dyn common::http::fetch::FetchClient>,
 +        udf_type: UdfType,
 +        log_line_sender: mpsc::UnboundedSender<LogLine>,
 +    ) -> RunRequestArgs {
 +        RunRequestArgs {
 +            key_broker: instance.key_broker.clone(),
-+            index_reader: self.snapshot.index_reader,
++            index_reader: snapshot.index_reader,
 +            convex_origin: self.backend_url,
-+            bootstrap_metadata: self.snapshot.bootstrap_metadata,
-+            table_count_snapshot: self.snapshot.table_count_snapshot,
-+            text_index_snapshot: self.snapshot.text_index_snapshot,
++            bootstrap_metadata: snapshot.bootstrap_metadata,
++            table_count_snapshot: snapshot.table_count_snapshot,
++            text_index_snapshot: snapshot.text_index_snapshot,
 +            action_callbacks: self.action_callbacks,
 +            fetch_client,
 +            log_line_sender: Some(log_line_sender),
@@ -1261,7 +1506,6 @@ index 000000000..3a019d9c5
 +        let callback_client = reqwest::Client::builder()
 +            .redirect(reqwest::redirect::Policy::none())
 +            .connect_timeout(std::time::Duration::from_secs(5))
-+            .tcp_keepalive(std::time::Duration::from_secs(30))
 +            .build()
 +            .context("failed to build funrun action callback HTTP client")?;
 +        Ok(Self {
@@ -1273,35 +1517,14 @@ index 000000000..3a019d9c5
 +        })
 +    }
 +
-+    fn resolve_and_authenticate(
-+        &self,
-+        instance_name: &str,
-+        metadata: &tonic::metadata::MetadataMap,
-+    ) -> Result<Arc<InstanceState<RT>>, Status> {
-+        let Ok(config) = self.registry.instance_config(instance_name) else {
-+            return Err(Status::unauthenticated(
-+                "funrun: missing or invalid deployment authorization",
-+            ));
-+        };
-+        let presented = metadata
-+            .get(FUNRUN_AUTH_METADATA_KEY)
-+            .and_then(|v| v.to_str().ok())
-+            .unwrap_or_default();
-+        let unix_seconds = self.rt.unix_timestamp().as_secs();
-+        if !verify_funrun_auth_header(
-+            presented,
-+            &config.instance_secret,
-+            &config.instance_name,
-+            unix_seconds,
-+        ) {
-+            return Err(Status::unauthenticated(
-+                "funrun: missing or invalid deployment authorization",
-+            ));
-+        }
++    fn resolve_instance(&self, instance_name: &str) -> Result<Arc<InstanceState<RT>>, Status> {
++        self.registry
++            .instance_config(instance_name)
++            .map_err(|_| Status::unauthenticated(UNAUTHENTICATED_MESSAGE))?;
 +        Ok(self.state.clone())
 +    }
 +
-+    async fn decode_common_run_inputs(
++    fn decode_common_run_inputs(
 +        instance: &Arc<InstanceState<RT>>,
 +        callback_client: reqwest::Client,
 +        identity: Option<pb::convex_identity::UncheckedIdentity>,
@@ -1346,7 +1569,6 @@ index 000000000..3a019d9c5
 +                    },
 +                )
 +                .collect::<anyhow::Result<_>>()?;
-+        let snapshot = instance.snapshot_inputs(ts).await?;
 +        let backend_url =
 +            ConvexOrigin::from(backend_callback_url.context("missing backend_callback_url")?);
 +        let transport_url = callback_transport_url
@@ -1376,7 +1598,6 @@ index 000000000..3a019d9c5
 +            backend_url,
 +            action_callbacks,
 +            deployment,
-+            snapshot,
 +        })
 +    }
 +
@@ -1431,12 +1652,19 @@ index 000000000..3a019d9c5
 +            callback_token,
 +            auth_header,
 +            action_name,
-+        )
-+        .await?;
++        )?;
 +        let ts = common.ts;
++        let snapshot = instance
++            .snapshot_inputs(ts, udf_type, &common.action_callbacks)
++            .await?;
 +        let (log_line_sender, log_line_receiver) = mpsc::unbounded_channel::<LogLine>();
-+        let run_request_args =
-+            common.into_run_request_args(&instance, fetch_client, udf_type, log_line_sender);
++        let run_request_args = common.into_run_request_args(
++            &instance,
++            snapshot,
++            fetch_client,
++            udf_type,
++            log_line_sender,
++        );
 +        let result = Self::drive_and_stream_log_lines(
 +            &instance.core,
 +            run_request_args,
@@ -1506,12 +1734,15 @@ index 000000000..3a019d9c5
 +            callback_token,
 +            auth_header,
 +            action_name,
-+        )
-+        .await?;
++        )?;
 +        let ts = common.ts;
++        let snapshot = instance
++            .snapshot_inputs(ts, UdfType::HttpAction, &common.action_callbacks)
++            .await?;
 +        let (log_line_sender, log_line_receiver) = mpsc::unbounded_channel::<LogLine>();
 +        let run_request_args = common.into_run_request_args(
 +            &instance,
++            snapshot,
 +            fetch_client,
 +            UdfType::HttpAction,
 +            log_line_sender,
@@ -1689,9 +1920,8 @@ index 000000000..3a019d9c5
 +        &self,
 +        request: Request<pb::funrun::RunFunctionRequest>,
 +    ) -> Result<Response<Self::RunFunctionStream>, Status> {
-+        let metadata = request.metadata().clone();
 +        let req = request.into_inner();
-+        let instance = self.resolve_and_authenticate(&req.instance_name, &metadata)?;
++        let instance = self.resolve_instance(&req.instance_name)?;
 +        let (part_tx, part_rx) = mpsc::channel(RESPONSE_STREAM_BUFFER);
 +        let fetch_client = self.fetch_client.clone();
 +        let callback_client = self.callback_client.clone();
@@ -1719,9 +1949,8 @@ index 000000000..3a019d9c5
 +        &self,
 +        request: Request<pb::funrun::RunHttpActionRequest>,
 +    ) -> Result<Response<Self::RunHttpActionStream>, Status> {
-+        let metadata = request.metadata().clone();
 +        let req = request.into_inner();
-+        let instance = self.resolve_and_authenticate(&req.instance_name, &metadata)?;
++        let instance = self.resolve_instance(&req.instance_name)?;
 +        let (part_tx, part_rx) = mpsc::channel(RESPONSE_STREAM_BUFFER);
 +        let fetch_client = self.fetch_client.clone();
 +        let callback_client = self.callback_client.clone();
@@ -1747,40 +1976,54 @@ index 000000000..3a019d9c5
 +}
 diff --git a/crates/funrun_server/src/snapshot.rs b/crates/funrun_server/src/snapshot.rs
 new file mode 100644
-index 000000000..7f1763c81
+index 000000000..ea4f8f116
 --- /dev/null
 +++ b/crates/funrun_server/src/snapshot.rs
-@@ -0,0 +1,421 @@
+@@ -0,0 +1,603 @@
 +use std::{
 +    sync::{
 +        Arc,
-+        LazyLock,
++        OnceLock,
 +    },
 +    time::Duration,
 +};
 +
 +use anyhow::Context;
 +use application::create_storage;
-+use cmd_util::env::env_config;
++use async_trait::async_trait;
 +use common::{
++    document::DocumentUpdate,
 +    knobs::MAX_ISOLATE_WORKERS,
 +    persistence::{
 +        index_scan_attribution::IndexScanCaller,
++        new_static_repeatable_recent,
 +        PersistenceReader,
 +        PersistenceSnapshot,
 +        RepeatablePersistence,
 +        RetentionValidator,
 +    },
++    query::{
++        InternalSearch,
++        SearchVersion,
++    },
 +    runtime::Runtime,
-+    types::RepeatableTimestamp,
++    types::{
++        RepeatableTimestamp,
++        UdfType,
++    },
 +};
 +use database::{
 +    BootstrapMetadata,
 +    Database,
 +    DatabaseSnapshot,
++    FollowerOptions,
++    FollowerRetentionManager,
 +    FollowerTailerClient,
++    SearchNotEnabled,
 +    TableCountSnapshot,
++    TableCounts,
 +    TextIndexManagerSnapshot,
++    Transaction,
 +    TransactionTextSnapshot,
 +};
 +use errors::{
@@ -1788,10 +2031,9 @@ index 000000000..7f1763c81
 +    ErrorMetadataAnyhowExt,
 +};
 +use function_runner::server::{
-+    funrun_isolate_worker,
++    shared_isolate::funrun_isolate_worker,
 +    DeploymentStorage,
 +    FunctionRunnerCore,
-+    SharedIsolateResources,
 +};
 +use futures::FutureExt;
 +use indexing::{
@@ -1799,9 +2041,16 @@ index 000000000..7f1763c81
 +        AttributedIndexReader,
 +        IndexReader,
 +    },
-+    index_registry::IndexRegistry,
++    index_registry::{
++        Index,
++        IndexRegistry,
++    },
 +};
-+use keybroker::FunctionRunnerKeyBroker;
++use isolate::client::IsolateClient;
++use keybroker::{
++    FunctionRunnerKeyBroker,
++    Identity,
++};
 +use model::{
 +    database_globals::{
 +        types::StorageType,
@@ -1812,16 +2061,21 @@ index 000000000..7f1763c81
 +use parking_lot::Mutex;
 +use search::{
 +    searcher::InProcessSearcher,
++    QueryResults,
 +    TextIndexManager,
 +};
 +use sync_types::backoff::Backoff;
-+use tokio::sync::OnceCell;
++use usage_tracking::FunctionUsageTracker;
++use value::TableMapping;
 +
 +use crate::{
++    callbacks::HttpActionCallbacks,
 +    config::{
 +        FunrunConfig,
 +        FunrunInstanceConfig,
++        FunrunMode,
 +    },
++    leader_snapshot::LeaderSnapshot,
 +    metrics::{
 +        log_snapshot_cold,
 +        log_snapshot_cold_load,
@@ -1831,17 +2085,18 @@ index 000000000..7f1763c81
 +
 +const MAX_PERCENT_PER_CLIENT: usize = 100;
 +const WARMUP_BACKOFF_INITIAL: Duration = Duration::from_secs(1);
-+const WARMUP_BACKOFF_MAX: Duration = Duration::from_secs(60);
-+static FUNRUN_SNAPSHOT_WAIT_TIMEOUT: LazyLock<Duration> =
-+    LazyLock::new(|| Duration::from_secs(env_config("FUNRUN_SNAPSHOT_WAIT_TIMEOUT_SECS", 30)));
++const WARMUP_BACKOFF_MAX: Duration = Duration::from_secs(5);
++const SNAPSHOT_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
++
++type Attribution = Option<(IndexRegistry, TableMapping)>;
 +
 +pub struct InstanceRegistry<RT: Runtime> {
 +    rt: RT,
 +    require_ssl: bool,
++    mode: FunrunMode,
 +    instance: FunrunInstanceConfig,
-+    shared_isolate: SharedIsolateResources<RT>,
-+    searcher: Arc<dyn search::Searcher>,
-+    state: OnceCell<Arc<InstanceState<RT>>>,
++    isolate_client: IsolateClient<RT>,
++    state: OnceLock<Arc<InstanceState<RT>>>,
 +    load_error: Mutex<Option<InstanceLoadError>>,
 +}
 +
@@ -1853,7 +2108,7 @@ index 000000000..7f1763c81
 +
 +impl<RT: Runtime> InstanceRegistry<RT> {
 +    pub fn new(rt: RT, config: &FunrunConfig) -> anyhow::Result<Self> {
-+        let shared_isolate = SharedIsolateResources::new_with_max_workers(
++        let isolate_client = IsolateClient::new(
 +            rt.clone(),
 +            MAX_PERCENT_PER_CLIENT,
 +            *MAX_ISOLATE_WORKERS,
@@ -1861,40 +2116,38 @@ index 000000000..7f1763c81
 +        )?;
 +        tracing::info!(
 +            "[convex-funrun] shared isolate pool: {} workers",
-+            shared_isolate.max_isolate_workers(),
++            isolate_client.max_workers(),
 +        );
-+        let searcher: Arc<dyn search::Searcher> = Arc::new(InProcessSearcher::new(rt.clone())?);
-+        let state = OnceCell::new();
 +        Ok(Self {
 +            rt,
 +            require_ssl: config.require_ssl,
++            mode: config.mode,
 +            instance: config.instance.clone(),
-+            shared_isolate,
-+            searcher,
-+            state,
++            isolate_client,
++            state: OnceLock::new(),
 +            load_error: Mutex::new(None),
 +        })
 +    }
 +
 +    pub fn isolate_workers(&self) -> (usize, usize) {
-+        (
-+            self.shared_isolate.active_isolate_workers(),
-+            self.shared_isolate.max_isolate_workers(),
-+        )
++        let busy = if self.isolate_client.scheduler_alive() {
++            self.isolate_client.active_workers()
++        } else {
++            0
++        };
++        (busy, self.isolate_client.max_workers())
 +    }
 +
 +    pub fn healthy(&self) -> bool {
-+        self.shared_isolate.pool_healthy()
++        self.isolate_client.scheduler_alive()
 +            && self
 +                .state
 +                .get()
-+                .is_none_or(|state| state.tailer.is_running())
++                .is_none_or(|state| state.source.tailer_alive())
 +    }
 +
 +    pub fn instance_ready(&self) -> bool {
-+        self.state
-+            .get()
-+            .is_some_and(|state| state.tailer.is_ready())
++        self.state.get().is_some_and(|state| state.source.ready())
 +    }
 +
 +    pub fn instance_config(&self, instance_name: &str) -> anyhow::Result<&FunrunInstanceConfig> {
@@ -1905,33 +2158,23 @@ index 000000000..7f1763c81
 +        Ok(&self.instance)
 +    }
 +
-+    async fn get_or_create(&self) -> anyhow::Result<Arc<InstanceState<RT>>> {
-+        self.state
-+            .get_or_try_init(|| async {
-+                let state = InstanceState::load(
-+                    self.rt.clone(),
-+                    &self.instance,
-+                    self.require_ssl,
-+                    self.shared_isolate.clone(),
-+                    self.searcher.clone(),
-+                )
-+                .await
-+                .map(Arc::new);
-+                *self.load_error.lock() = state.as_ref().err().map(|e| InstanceLoadError {
-+                    message: format!("{e:#}"),
-+                    unix_ts: self.rt.unix_timestamp().as_secs(),
-+                });
-+                state
-+            })
-+            .await
-+            .cloned()
-+    }
-+
 +    pub async fn warm(&self) -> Arc<InstanceState<RT>> {
 +        let mut backoff = Backoff::new(WARMUP_BACKOFF_INITIAL, WARMUP_BACKOFF_MAX);
 +        loop {
-+            match self.get_or_create().await {
-+                Ok(state) => return state,
++            let loaded = InstanceState::load(
++                self.rt.clone(),
++                &self.instance,
++                self.mode,
++                self.require_ssl,
++                self.isolate_client.clone(),
++            )
++            .await;
++            *self.load_error.lock() = loaded.as_ref().err().map(|e| InstanceLoadError {
++                message: format!("{e:#}"),
++                unix_ts: self.rt.unix_timestamp().as_secs(),
++            });
++            match loaded {
++                Ok(state) => return self.state.get_or_init(|| Arc::new(state)).clone(),
 +                Err(e) => {
 +                    let delay = backoff.fail(&mut self.rt.rng());
 +                    tracing::error!(
@@ -1948,6 +2191,7 @@ index 000000000..7f1763c81
 +        let load_error = self.load_error.lock().clone();
 +        HealthReport {
 +            healthy: self.healthy(),
++            mode: self.mode,
 +            instance: InstanceHealth {
 +                name: self.instance.instance_name.clone(),
 +                ready: self.instance_ready(),
@@ -1958,25 +2202,49 @@ index 000000000..7f1763c81
 +    }
 +}
 +
++enum SnapshotSource<RT: Runtime> {
++    Follower {
++        database: Database<RT>,
++        tailer: FollowerTailerClient,
++    },
++    Stateless {
++        bootstrap_metadata: BootstrapMetadata,
++    },
++}
++
++impl<RT: Runtime> SnapshotSource<RT> {
++    fn tailer_alive(&self) -> bool {
++        match self {
++            Self::Follower { tailer, .. } => tailer.is_running(),
++            Self::Stateless { .. } => true,
++        }
++    }
++
++    fn ready(&self) -> bool {
++        match self {
++            Self::Follower { tailer, .. } => tailer.is_ready(),
++            Self::Stateless { .. } => true,
++        }
++    }
++}
++
 +pub struct InstanceState<RT: Runtime> {
 +    rt: RT,
 +    pub instance_name: String,
 +    pub key_broker: FunctionRunnerKeyBroker,
 +    reader: Arc<dyn PersistenceReader>,
 +    pub retention_validator: Arc<dyn RetentionValidator>,
-+    searcher: Arc<dyn search::Searcher>,
 +    pub core: FunctionRunnerCore<RT, DeploymentStorage>,
-+    database: Database<RT>,
-+    tailer: FollowerTailerClient,
++    source: SnapshotSource<RT>,
 +}
 +
 +impl<RT: Runtime> InstanceState<RT> {
 +    pub async fn load(
 +        rt: RT,
 +        config: &FunrunInstanceConfig,
++        mode: FunrunMode,
 +        require_ssl: bool,
-+        shared_isolate: SharedIsolateResources<RT>,
-+        searcher: Arc<dyn search::Searcher>,
++        isolate_client: IsolateClient<RT>,
 +    ) -> anyhow::Result<Self> {
 +        let reader = db_connection::connect_persistence_reader(
 +            clusters::DbDriverTag::Postgres(common::types::PersistenceVersion::V5),
@@ -1989,88 +2257,181 @@ index 000000000..7f1763c81
 +        .await?;
 +        let key_broker = keybroker::KeyBroker::new(&config.instance_name, config.instance_secret)?
 +            .function_runner_keybroker();
-+        let database = Database::load_follower(
-+            reader.clone(),
-+            rt.clone(),
-+            searcher.clone(),
-+            virtual_system_mapping().clone(),
-+        )
-+        .await?;
-+        let retention_validator = database.retention_validator();
-+        let storage_type = Self::read_storage_type(&database).await?;
++        let (source, retention_validator, storage_type) = match mode {
++            FunrunMode::Follower => Self::load_follower(&rt, &reader).await?,
++            FunrunMode::Stateless => Self::load_stateless(&rt, &reader).await?,
++        };
 +        let files_storage =
 +            create_storage(rt.clone(), &storage_type, storage::StorageUseCase::Files).await?;
 +        let modules_storage =
 +            create_storage(rt.clone(), &storage_type, storage::StorageUseCase::Modules).await?;
-+        let search_storage = create_storage(
-+            rt.clone(),
-+            &storage_type,
-+            storage::StorageUseCase::SearchIndexes,
-+        )
-+        .await?;
 +        let core = FunctionRunnerCore::new_with_isolate_client(
 +            rt.clone(),
 +            DeploymentStorage {
 +                files_storage,
 +                modules_storage,
 +            },
-+            shared_isolate,
++            isolate_client,
 +        );
-+        database.set_search_storage(search_storage);
 +        tracing::info!(
-+            "[convex-funrun] loaded instance {} ({:?} storage); warm follower snapshot at {}",
++            "[convex-funrun] loaded instance {} ({:?} storage, {} mode)",
 +            config.instance_name,
 +            storage_type,
-+            database.now_ts_for_reads(),
++            mode.as_str(),
 +        );
-+        let tailer = database.follower_tailer_client().await?;
 +        Ok(Self {
 +            rt,
 +            instance_name: config.instance_name.clone(),
 +            key_broker,
 +            reader,
 +            retention_validator,
-+            searcher,
 +            core,
-+            database,
-+            tailer,
++            source,
 +        })
 +    }
 +
-+    async fn read_storage_type(database: &Database<RT>) -> anyhow::Result<StorageType> {
-+        let mut tx = database.begin_system().await?;
-+        DatabaseGlobalsModel::new(&mut tx)
-+            .database_globals()
-+            .await?
-+            .into_value()
-+            .storage_type
-+            .context(
-+                "funrun cannot start: database storage tag is not initialized (the leader must \
-+                 initialize the database first)",
-+            )
++    async fn load_follower(
++        rt: &RT,
++        reader: &Arc<dyn PersistenceReader>,
++    ) -> anyhow::Result<(SnapshotSource<RT>, Arc<dyn RetentionValidator>, StorageType)> {
++        let searcher: Arc<dyn search::Searcher> = Arc::new(InProcessSearcher::new(rt.clone())?);
++        let database = Database::load_follower(
++            reader.clone(),
++            rt.clone(),
++            searcher,
++            virtual_system_mapping().clone(),
++            FollowerOptions::FUNRUN,
++        )
++        .await?;
++        let retention_validator = database.retention_validator();
++        let storage_type = read_storage_type(database.begin_system().await?).await?;
++        let search_storage = create_storage(
++            rt.clone(),
++            &storage_type,
++            storage::StorageUseCase::SearchIndexes,
++        )
++        .await?;
++        database.set_search_storage(search_storage);
++        tracing::info!(
++            "[convex-funrun] warm follower snapshot at {}",
++            database.now_ts_for_reads()
++        );
++        let tailer = database.follower_tailer_client().await?;
++        Ok((
++            SnapshotSource::Follower { database, tailer },
++            retention_validator,
++            storage_type,
++        ))
 +    }
 +
-+    pub async fn snapshot_inputs(&self, ts: RepeatableTimestamp) -> anyhow::Result<SnapshotInputs> {
-+        let prepare = self.prepare_snapshot_inputs(ts).fuse();
-+        let deadline = self.rt.wait(*FUNRUN_SNAPSHOT_WAIT_TIMEOUT).fuse();
-+        futures::pin_mut!(prepare, deadline);
-+        futures::select_biased! {
-+            result = prepare => result,
-+            _ = deadline => anyhow::bail!(ErrorMetadata::rejected_before_execution(
-+                "FunrunSnapshotTimeout", "funrun follower did not prepare the requested snapshot",
-+            )),
++    async fn load_stateless(
++        rt: &RT,
++        reader: &Arc<dyn PersistenceReader>,
++    ) -> anyhow::Result<(SnapshotSource<RT>, Arc<dyn RetentionValidator>, StorageType)> {
++        let retention_validator: Arc<dyn RetentionValidator> =
++            Arc::new(FollowerRetentionManager::new(rt.clone(), reader.clone()).await?);
++        let snapshot = DatabaseSnapshot::load(
++            rt.clone(),
++            reader.clone(),
++            new_static_repeatable_recent(reader.as_ref()).await?,
++            retention_validator.clone(),
++            virtual_system_mapping().clone(),
++        )
++        .await?;
++        let tx = snapshot.begin_tx(
++            Identity::system(),
++            Arc::new(SearchNotEnabled),
++            FunctionUsageTracker::new(),
++            virtual_system_mapping().clone(),
++        )?;
++        let storage_type = read_storage_type(tx).await?;
++        Ok((
++            SnapshotSource::Stateless {
++                bootstrap_metadata: snapshot.bootstrap_metadata,
++            },
++            retention_validator,
++            storage_type,
++        ))
++    }
++
++    pub async fn snapshot_inputs(
++        &self,
++        ts: RepeatableTimestamp,
++        udf_type: UdfType,
++        callbacks: &Arc<HttpActionCallbacks>,
++    ) -> anyhow::Result<SnapshotInputs> {
++        match (&self.source, udf_type) {
++            (source, UdfType::Action | UdfType::HttpAction) => self.action_inputs(source, ts),
++            (SnapshotSource::Stateless { bootstrap_metadata }, _) => {
++                let leader = Arc::new(LeaderSnapshot::new(callbacks.clone(), ts));
++                Ok(SnapshotInputs {
++                    index_reader: self.index_reader(ts, None)?,
++                    bootstrap_metadata: bootstrap_metadata.clone(),
++                    table_count_snapshot: leader.clone(),
++                    text_index_snapshot: leader,
++                })
++            },
++            (SnapshotSource::Follower { database, tailer }, _) => {
++                let prepare = self.prepare_follower_inputs(database, tailer, ts).fuse();
++                let deadline = self.rt.wait(SNAPSHOT_WAIT_TIMEOUT).fuse();
++                futures::pin_mut!(prepare, deadline);
++                futures::select_biased! {
++                    result = prepare => result,
++                    _ = deadline => anyhow::bail!(ErrorMetadata::rejected_before_execution(
++                        "FunrunSnapshotTimeout", "funrun follower did not prepare the requested snapshot",
++                    )),
++                }
++            },
 +        }
 +    }
 +
-+    async fn prepare_snapshot_inputs(
++    fn action_inputs(
 +        &self,
++        source: &SnapshotSource<RT>,
 +        ts: RepeatableTimestamp,
 +    ) -> anyhow::Result<SnapshotInputs> {
-+        if self.tailer.has_reached(ts) {
++        let (bootstrap_metadata, attribution) = match source {
++            SnapshotSource::Follower { database, .. } => (
++                database.bootstrap_metadata.clone(),
++                database.latest_snapshot().ok().map(|snapshot| {
++                    (
++                        snapshot.index_registry,
++                        snapshot.table_registry.table_mapping().clone(),
++                    )
++                }),
++            ),
++            SnapshotSource::Stateless { bootstrap_metadata } => (bootstrap_metadata.clone(), None),
++        };
++        Ok(SnapshotInputs {
++            index_reader: self.index_reader(ts, attribution)?,
++            bootstrap_metadata,
++            table_count_snapshot: Arc::new(None::<TableCounts>),
++            text_index_snapshot: Arc::new(NoActionTextSearch),
++        })
++    }
++
++    fn index_reader(
++        &self,
++        ts: RepeatableTimestamp,
++        attribution: Attribution,
++    ) -> anyhow::Result<Arc<dyn IndexReader>> {
++        let persistence_snapshot =
++            RepeatablePersistence::new(self.reader.clone(), ts, self.retention_validator.clone())
++                .read_snapshot(ts)?;
++        Ok(attributed(persistence_snapshot, attribution))
++    }
++
++    async fn prepare_follower_inputs(
++        &self,
++        database: &Database<RT>,
++        tailer: &FollowerTailerClient,
++        ts: RepeatableTimestamp,
++    ) -> anyhow::Result<SnapshotInputs> {
++        if tailer.has_reached(ts) {
 +            log_snapshot_warm_hit();
 +        } else {
 +            log_snapshot_cold();
-+            self.tailer.wait_for(ts).await.map_err(|error| {
++            tailer.wait_for(ts).await.map_err(|error| {
 +                error.context(ErrorMetadata::rejected_before_execution(
 +                    "FunrunTailerExited",
 +                    "funrun follower tailer exited",
@@ -2080,26 +2441,30 @@ index 000000000..7f1763c81
 +        let persistence =
 +            RepeatablePersistence::new(self.reader.clone(), ts, self.retention_validator.clone());
 +        let persistence_snapshot = persistence.read_snapshot(ts)?;
-+        match self.database.snapshot(ts) {
++        match database.snapshot(ts) {
 +            Ok(snapshot) => {
 +                let counts = snapshot
 +                    .table_counts
 +                    .context("follower snapshot has no table counts")?;
 +                Ok(SnapshotInputs {
-+                    index_reader: Arc::new(AttributedIndexReader::new(
++                    index_reader: attributed(
 +                        persistence_snapshot,
-+                        IndexScanCaller::FunctionRunner,
-+                        Some(snapshot.index_registry.clone()),
-+                        Some(snapshot.table_registry.table_mapping().clone()),
-+                    )),
-+                    bootstrap_metadata: self.database.bootstrap_metadata.clone(),
++                        Some((
++                            snapshot.index_registry.clone(),
++                            snapshot.table_registry.table_mapping().clone(),
++                        )),
++                    ),
++                    bootstrap_metadata: database.bootstrap_metadata.clone(),
 +                    table_count_snapshot: Arc::new(Some(counts)),
-+                    text_index_snapshot: self
-+                        .text_snapshot(snapshot.index_registry, snapshot.text_indexes),
++                    text_index_snapshot: text_snapshot(
++                        database,
++                        snapshot.index_registry,
++                        snapshot.text_indexes,
++                    ),
 +                })
 +            },
 +            Err(error) if error.is_out_of_retention() => {
-+                self.full_cold_snapshot_inputs(ts, persistence_snapshot)
++                self.full_cold_snapshot_inputs(database, ts, persistence_snapshot)
 +                    .await
 +            },
 +            Err(error) => Err(error),
@@ -2108,6 +2473,7 @@ index 000000000..7f1763c81
 +
 +    async fn full_cold_snapshot_inputs(
 +        &self,
++        database: &Database<RT>,
 +        ts: RepeatableTimestamp,
 +        persistence_snapshot: PersistenceSnapshot,
 +    ) -> anyhow::Result<SnapshotInputs> {
@@ -2121,40 +2487,85 @@ index 000000000..7f1763c81
 +        )
 +        .await?;
 +        snapshot.load_table_summaries().await?;
-+        snapshot.load_search_indexes().await?;
++        snapshot
++            .load_search_indexes(FollowerOptions::FUNRUN)
++            .await?;
 +        Ok(SnapshotInputs {
-+            index_reader: Arc::new(AttributedIndexReader::new(
++            index_reader: attributed(
 +                persistence_snapshot,
-+                IndexScanCaller::FunctionRunner,
-+                Some(snapshot.snapshot.index_registry.clone()),
-+                Some(snapshot.snapshot.table_registry.table_mapping().clone()),
-+            )),
++                Some((
++                    snapshot.snapshot.index_registry.clone(),
++                    snapshot.snapshot.table_registry.table_mapping().clone(),
++                )),
++            ),
 +            bootstrap_metadata: snapshot.bootstrap_metadata,
 +            table_count_snapshot: Arc::new(snapshot.snapshot.table_counts),
-+            text_index_snapshot: self.text_snapshot(
++            text_index_snapshot: text_snapshot(
++                database,
 +                snapshot.snapshot.index_registry,
 +                snapshot.snapshot.text_indexes,
 +            ),
 +        })
 +    }
++}
 +
-+    fn text_snapshot(
++async fn read_storage_type<RT: Runtime>(mut tx: Transaction<RT>) -> anyhow::Result<StorageType> {
++    DatabaseGlobalsModel::new(&mut tx)
++        .database_globals()
++        .await?
++        .into_value()
++        .storage_type
++        .context(
++            "funrun cannot start: database storage tag is not initialized (the leader must \
++             initialize the database first)",
++        )
++}
++
++fn attributed(
++    persistence_snapshot: PersistenceSnapshot,
++    attribution: Attribution,
++) -> Arc<dyn IndexReader> {
++    let (index_registry, table_mapping) = attribution.unzip();
++    Arc::new(AttributedIndexReader::new(
++        persistence_snapshot,
++        IndexScanCaller::FunctionRunner,
++        index_registry,
++        table_mapping,
++    ))
++}
++
++fn text_snapshot<RT: Runtime>(
++    database: &Database<RT>,
++    index_registry: IndexRegistry,
++    text_indexes: TextIndexManager,
++) -> Arc<dyn TransactionTextSnapshot> {
++    Arc::new(TextIndexManagerSnapshot::new(
++        index_registry,
++        text_indexes,
++        database.searcher.clone(),
++        database.search_storage.clone(),
++    ))
++}
++
++struct NoActionTextSearch;
++
++#[async_trait]
++impl TransactionTextSnapshot for NoActionTextSearch {
++    async fn search(
 +        &self,
-+        index_registry: IndexRegistry,
-+        text_indexes: TextIndexManager,
-+    ) -> Arc<dyn TransactionTextSnapshot> {
-+        Arc::new(TextIndexManagerSnapshot::new(
-+            index_registry,
-+            text_indexes,
-+            self.searcher.clone(),
-+            self.database.search_storage.clone(),
-+        ))
++        _index: &Index,
++        _search: &InternalSearch,
++        _version: SearchVersion,
++        _pending_updates: &Vec<DocumentUpdate>,
++    ) -> anyhow::Result<QueryResults> {
++        anyhow::bail!("text search is not available in an action's own transaction")
 +    }
 +}
 +
 +#[derive(serde::Serialize)]
 +pub struct HealthReport {
 +    pub healthy: bool,
++    pub mode: FunrunMode,
 +    pub instance: InstanceHealth,
 +}
 +
