@@ -4,7 +4,7 @@ type: application
 
 name: convex-deployment
 
-version: 0.21.1
+version: 0.21.2
 
 maintainers:
   - name: Vladimir Malinovskiy

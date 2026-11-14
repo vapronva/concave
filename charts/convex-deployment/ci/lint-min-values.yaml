@@ -19,12 +19,9 @@ hosts:
 
 ha:
   standbyReplicas: 0
-  requireNodeSpread: false
 
 funrun:
   enabled: false
-  hpa:
-    enabled: false
 
 dashboard:
   enabled: false

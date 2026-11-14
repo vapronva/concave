@@ -35,15 +35,14 @@ spec:
       {{- else }}
       affinity:
         podAntiAffinity:
-          {{- $prefix := "convex" }}
           {{- $spreadKey := .Values.ha.spreadTopologyKey | default "kubernetes.io/hostname" }}
           {{- if .Values.ha.requireNodeSpread }}
           requiredDuringSchedulingIgnoredDuringExecution:
             - topologyKey: {{ $spreadKey }}
               labelSelector:
                 matchLabels:
-                  {{ $prefix }}/component: backend
-                  {{ $prefix }}/instance: {{ required "instance.name is required" .Values.instance.name | quote }}
+                  convex/component: backend
+                  convex/instance: {{ required "instance.name is required" .Values.instance.name | quote }}
           {{- else }}
           preferredDuringSchedulingIgnoredDuringExecution:
             - weight: 100
@@ -51,8 +50,8 @@ spec:
                 topologyKey: {{ $spreadKey }}
                 labelSelector:
                   matchLabels:
-                    {{ $prefix }}/component: backend
-                    {{ $prefix }}/instance: {{ required "instance.name is required" .Values.instance.name | quote }}
+                    convex/component: backend
+                    convex/instance: {{ required "instance.name is required" .Values.instance.name | quote }}
           {{- end }}
       {{- end }}
       terminationGracePeriodSeconds: 40

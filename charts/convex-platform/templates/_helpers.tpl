@@ -118,7 +118,7 @@ strategy:
 {{- $spec := .spec -}}
 {{- $registry := $ctx.Values.image.registry -}}
 {{- $repo := $spec.repository -}}
-{{- $tag := required "image.tag is required" $spec.tag -}}
+{{- $tag := required "usher.image.tag and bigbrain.image.tag are required" $spec.tag -}}
 {{- $ref := $repo -}}
 {{- if $registry -}}
 {{- $ref = printf "%s/%s" $registry $repo -}}

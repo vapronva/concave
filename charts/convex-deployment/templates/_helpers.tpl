@@ -157,23 +157,17 @@ strategy:
 
 {{- define "convex.backendDiscoveryLabels" -}}
 {{- $ctx := .ctx -}}
-{{- $prefix := "convex" -}}
-{{ $prefix }}/component: backend
-{{ $prefix }}/instance: {{ required "instance.name is required" $ctx.Values.instance.name | quote }}
-{{ $prefix }}/role: {{ required "role is required for backend discovery labels" .role }}
+convex/component: backend
+convex/instance: {{ required "instance.name is required" $ctx.Values.instance.name | quote }}
+convex/role: {{ .role }}
 {{- end -}}
 
 {{- define "convex.componentDiscoveryLabel" -}}
-{{- $prefix := "convex" -}}
-{{ $prefix }}/component: {{ .component }}
+convex/component: {{ .component }}
 {{- end -}}
 
 {{- define "convex.storageMountPath" -}}
 {{- default "/convex/data" .Values.storage.nfs.mountPath -}}
-{{- end -}}
-
-{{- define "convex.storageDir" -}}
-{{- printf "%s/storage" (include "convex.storageMountPath" .) -}}
 {{- end -}}
 
 {{- define "convex.dataVolume" -}}

@@ -9,4 +9,4 @@ metadata:
 
 data:
   DISABLE_BEACON: "true"
-  STORAGE_DIR: {{ include "convex.storageDir" . | quote }}
+  DATA_DIR: {{ include "convex.storageMountPath" . | quote }}

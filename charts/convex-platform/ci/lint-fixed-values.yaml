@@ -1,0 +1,24 @@
+---
+deployments:
+  - name: convex-ci
+    namespace: convex-ci
+    host: api.convex.example.com
+    siteHost: convex.example.com
+    controlPlaneTokenSecretRef:
+      name: convex-ci-control-plane
+  - name: convex-ci-two
+    namespace: convex-ci-two
+    host: api.two.example.com
+    siteHost: two.example.com
+    controlPlaneTokenSecretRef:
+      name: convex-ci-two-control-plane
+
+usher:
+  image:
+    tag: ci
+
+bigbrain:
+  image:
+    tag: ci
+  metricsApiserver:
+    enabled: false

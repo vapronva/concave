@@ -128,8 +128,6 @@ spec:
               value: "true"
             - name: BIGBRAIN_METRICS_APISERVER_PORT
               value: {{ int64 $b.metricsApiserver.port | quote }}
-            - name: BIGBRAIN_METRICS_APISERVER_CERT_DIR
-              value: {{ $apiserverCertDir | quote }}
             {{- end }}
             {{- with $b.extraEnv }}
             {{- toYaml . | nindent 12 }}

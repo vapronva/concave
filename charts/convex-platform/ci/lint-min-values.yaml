@@ -14,5 +14,3 @@ usher:
 
 bigbrain:
   enabled: false
-  metricsApiserver:
-    enabled: false
