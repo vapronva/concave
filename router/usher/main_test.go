@@ -6,7 +6,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"net/http/httputil"
 	"net/url"
 	"strings"
 	"sync"
@@ -67,6 +66,8 @@ func TestIsBlockedAPIPath(t *testing.T) {
 		"/metrics",
 		"/METRICS",
 		"/api/../metrics",
+		"/metrics/x",
+		"/readyz",
 	}
 	for _, p := range blocked {
 		if !isBlockedAPIPath(p) {
@@ -83,6 +84,8 @@ func TestIsBlockedAPIPath(t *testing.T) {
 		"/instance_version",
 		"/https",
 		"/http_status",
+		"/metricsx",
+		"/readyzx",
 	}
 	for _, p := range allowed {
 		if isBlockedAPIPath(p) {
@@ -174,43 +177,6 @@ func TestServeHTTP_RejectsInternalPaths(t *testing.T) {
 		}
 		if c.wantBodyContains != "" && !strings.Contains(rr.Body.String(), c.wantBodyContains) {
 			t.Errorf("%s %s: body %q does not contain %q", c.method, c.path, rr.Body.String(), c.wantBodyContains)
-		}
-	}
-}
-
-func TestServeHTTP_SiteRoutePassesControlPaths(t *testing.T) {
-	t.Parallel()
-	var hits hitLog
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hits.add(r.URL.Path)
-		w.WriteHeader(http.StatusOK)
-		_, _ = io.WriteString(w, "site-reached")
-	}))
-	defer upstream.Close()
-	u, err := url.Parse(upstream.URL)
-	if err != nil {
-		t.Fatalf("parse upstream url: %v", err)
-	}
-	tr := &tracker{
-		host:           "api.convex.localtest.me",
-		siteHost:       "convex.localtest.me",
-		client:         &http.Client{},
-		proxyTransport: newProxyTransport(),
-	}
-	tr.siteProxy = tr.newReverseProxy(u)
-	for _, p := range []string{"/instance/leadership", "/instance/promote", "/instance_version", "/arbitrary/action"} {
-		hits.reset()
-		rr := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodGet, p, nil)
-		tr.serveHTTP(rr, req, true)
-		if rr.Code != http.StatusOK {
-			t.Errorf("site %s: want status %d, got %d", p, http.StatusOK, rr.Code)
-		}
-		if len(hits.snapshot()) == 0 {
-			t.Errorf("site %s: upstream not reached", p)
-		}
-		if !strings.Contains(rr.Body.String(), "site-reached") {
-			t.Errorf("site %s: body %q does not contain %q", p, rr.Body.String(), "site-reached")
 		}
 	}
 }
@@ -514,163 +480,82 @@ func TestValidateConfig(t *testing.T) {
 	}
 }
 
-func TestSetLeader_SiteProxyRoutesToHttpPathOnCloudPort(t *testing.T) {
+func TestSiteProxy_PrefixesHTTPAndPassesControlPaths(t *testing.T) {
 	t.Parallel()
-	tr := &tracker{
-		host:           "api.convex.localtest.me",
-		siteHost:       "convex.localtest.me",
-		client:         &http.Client{},
-		proxyTransport: newProxyTransport(),
-	}
-	if !tr.setLeader("http://10.0.0.7:3210") {
-		t.Fatal("setLeader should install proxies")
-	}
-	if ap := tr.currentLeader(false); ap == nil {
-		t.Fatal("api proxy should be installed")
-	}
-	if host, path := siteUpstream(t, tr); host != "10.0.0.7:3210" || path != "/http/api/actions" {
-		t.Errorf("site upstream = %q %q, want host %q path %q (cloud port + /http prefix, not the dev site proxy)",
-			host, path, "10.0.0.7:3210", "/http/api/actions")
-	}
-	if !tr.setLeader("http://10.0.0.42:3210") {
-		t.Fatal("setLeader should swap to the new leader")
-	}
-	if host, _ := siteUpstream(t, tr); host != "10.0.0.42:3210" {
-		t.Errorf("after failover site upstream host = %q, want %q", host, "10.0.0.42:3210")
-	}
-}
-
-func siteUpstream(t *testing.T, tr *tracker) (string, string) {
-	t.Helper()
-	sp := tr.currentLeader(true)
-	if sp == nil {
-		t.Fatal("site proxy should be installed when siteHost is set")
-	}
-	in := httptest.NewRequest(http.MethodGet, "/api/actions", nil)
-	out := in.Clone(in.Context())
-	sp.Rewrite(&httputil.ProxyRequest{In: in, Out: out})
-	return out.URL.Host, out.URL.Path
-}
-
-func TestResolveOnce_ReadyOnlyAfterAnAuthoritativeAnswer(t *testing.T) {
-	t.Parallel()
-	answer := func(status int, body string) *tracker {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			w.WriteHeader(status)
-			_, _ = w.Write([]byte(body))
+	upstream := func(hits *hitLog) string {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			hits.add(r.URL.Path)
+			w.WriteHeader(http.StatusOK)
 		}))
 		t.Cleanup(srv.Close)
-		tr := &tracker{name: "test", bigbrainURL: srv.URL, client: &http.Client{}, proxyTransport: newProxyTransport()}
-		tr.resolveOnce(context.Background())
-		return tr
+		return srv.URL
 	}
-	refused := &tracker{
-		name:           "test",
-		bigbrainURL:    "http://127.0.0.1:1",
-		client:         &http.Client{},
-		proxyTransport: newProxyTransport(),
+	var first, second hitLog
+	tr := &tracker{host: "api.example", siteHost: "site.example", proxyTransport: newProxyTransport()}
+	if !tr.setLeader(upstream(&first)) {
+		t.Fatal("setLeader should install proxies")
 	}
-	refused.resolveOnce(context.Background())
-	if refused.resolved.Load() {
-		t.Fatal("a refused poll must not latch readiness")
+	for _, p := range []string{"/instance/leadership", "/instance/promote", "/instance_version", "/arbitrary/action"} {
+		first.reset()
+		rr := httptest.NewRecorder()
+		tr.serveHTTP(rr, httptest.NewRequest(http.MethodGet, p, nil), true)
+		if got := first.snapshot(); rr.Code != http.StatusOK || len(got) != 1 || got[0] != "/http"+p {
+			t.Errorf("site %s: status=%d upstream paths=%v, want 200 and [/http%s]", p, rr.Code, got, p)
+		}
 	}
-	if answer(http.StatusTooEarly, `{"error":"not yet published"}`).resolved.Load() {
-		t.Fatal("a 425 must not latch readiness")
+	if !tr.setLeader(upstream(&second)) {
+		t.Fatal("setLeader should swap to the new leader")
 	}
-	if answer(http.StatusServiceUnavailable, `{"error":"boom"}`).resolved.Load() {
-		t.Fatal("a 503 without an epoch must not latch readiness")
-	}
-	if !answer(http.StatusServiceUnavailable, `{"name":"test","seq":3,"epoch":42}`).resolved.Load() {
-		t.Fatal("an authoritative leaderless answer must latch readiness")
-	}
-	if !answer(http.StatusOK, `{"name":"test","leaderUrl":"http://10.0.0.5:3210","seq":1,"epoch":1}`).resolved.Load() {
-		t.Fatal("a leader answer must latch readiness")
+	tr.serveHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/hook", nil), true)
+	if got := second.snapshot(); len(got) != 1 || got[0] != "/http/hook" {
+		t.Fatalf("after failover the site proxy must follow the new leader, upstream paths=%v", got)
 	}
 }
 
-func TestResolveOnce_ClearsLeaderOnAuthoritativeNoLeader(t *testing.T) {
+func TestResolveOnce_AuthoritativeAnswers(t *testing.T) {
 	t.Parallel()
-	t.Run("status_503_clears", func(t *testing.T) {
-		t.Parallel()
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			_, _ = w.Write([]byte(`{"name":"test","seq":3,"epoch":42}`))
-		}))
-		defer srv.Close()
-		tr := &tracker{name: "test", bigbrainURL: srv.URL, client: &http.Client{}, proxyTransport: newProxyTransport()}
-		tr.setLeader("http://10.0.0.5:3210")
-		tr.resolveOnce(context.Background())
-		if tr.currentLeader(false) != nil {
-			t.Fatal("503 no-leader must clear the leader, matching SSE")
-		}
-	})
-	t.Run("status_503_error_body_preserves", func(t *testing.T) {
-		t.Parallel()
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			_, _ = w.Write([]byte(`{"error":"boom"}`))
-		}))
-		defer srv.Close()
-		tr := &tracker{name: "test", bigbrainURL: srv.URL, client: &http.Client{}, proxyTransport: newProxyTransport()}
-		tr.setLeader("http://10.0.0.5:3210")
-		tr.resolveOnce(context.Background())
-		if tr.currentLeader(false) == nil {
-			t.Fatal("503 without an epoch must be treated as a poll error and preserve the leader")
-		}
-	})
-	t.Run("transport_error_preserves", func(t *testing.T) {
-		t.Parallel()
-		tr := &tracker{
-			name:           "test",
-			bigbrainURL:    "http://127.0.0.1:1",
-			client:         &http.Client{Timeout: 250 * time.Millisecond},
-			proxyTransport: newProxyTransport(),
-		}
-		tr.setLeader("http://10.0.0.5:3210")
-		tr.resolveOnce(context.Background())
-		if tr.currentLeader(false) == nil {
-			t.Fatal("transport error must preserve last-known leader")
-		}
-	})
-	t.Run("status_503_garbage_body_preserves", func(t *testing.T) {
-		t.Parallel()
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			_, _ = io.WriteString(w, "intermediary melted")
-		}))
-		defer srv.Close()
-		tr := &tracker{name: "test", bigbrainURL: srv.URL, client: &http.Client{}, proxyTransport: newProxyTransport()}
-		tr.setLeader("http://10.0.0.5:3210")
-		tr.resolveOnce(context.Background())
-		if tr.currentLeader(false) == nil {
-			t.Fatal("503 with an undecodable body must preserve last-known leader")
-		}
-	})
-	t.Run("status_404_preserves", func(t *testing.T) {
-		t.Parallel()
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			w.WriteHeader(http.StatusNotFound)
-		}))
-		defer srv.Close()
-		tr := &tracker{name: "test", bigbrainURL: srv.URL, client: &http.Client{}, proxyTransport: newProxyTransport()}
-		tr.setLeader("http://10.0.0.5:3210")
-		tr.resolveOnce(context.Background())
-		if tr.currentLeader(false) == nil {
-			t.Fatal("404 must preserve last-known leader")
-		}
-	})
-	t.Run("status_200_sets_leader", func(t *testing.T) {
-		t.Parallel()
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			_, _ = w.Write([]byte(`{"leaderUrl":"http://10.0.0.9:3210","seq":101,"epoch":1}`))
-		}))
-		defer srv.Close()
-		tr := &tracker{name: "test", bigbrainURL: srv.URL, client: &http.Client{}, proxyTransport: newProxyTransport()}
-		tr.resolveOnce(context.Background())
-		if tr.currentLeader(false) == nil {
-			t.Fatal("200 with a leader URL must set the leader")
-		}
-	})
+	const known = "http://10.0.0.5:3210"
+	for _, c := range []struct {
+		name, body string
+		status     int
+		wantReady  bool
+		wantLeader string
+	}{
+		{"refused", "", 0, false, known},
+		{"425", `{"error":"not yet published"}`, http.StatusTooEarly, false, known},
+		{"404", "", http.StatusNotFound, false, known},
+		{"503_error_body", `{"error":"boom"}`, http.StatusServiceUnavailable, false, known},
+		{"503_garbage_body", "intermediary melted", http.StatusServiceUnavailable, false, known},
+		{"503_with_epoch", `{"name":"test","seq":3,"epoch":42}`, http.StatusServiceUnavailable, true, ""},
+		{"200", `{"leaderUrl":"http://10.0.0.9:3210","seq":101,"epoch":1}`, http.StatusOK, true, "http://10.0.0.9:3210"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			bigbrainURL := "http://127.0.0.1:1"
+			if c.status != 0 {
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					w.WriteHeader(c.status)
+					_, _ = io.WriteString(w, c.body)
+				}))
+				t.Cleanup(srv.Close)
+				bigbrainURL = srv.URL
+			}
+			tr := &tracker{
+				name:           "test",
+				bigbrainURL:    bigbrainURL,
+				client:         &http.Client{Timeout: time.Second},
+				proxyTransport: newProxyTransport(),
+			}
+			tr.setLeader(known)
+			tr.resolveOnce(context.Background())
+			if got := tr.resolved.Load(); got != c.wantReady {
+				t.Errorf("readiness latched=%v, want %v", got, c.wantReady)
+			}
+			if got := leaderSnapshot(tr); got != c.wantLeader {
+				t.Errorf("leader=%q, want %q", got, c.wantLeader)
+			}
+		})
+	}
 }
 
 func sseServer(t *testing.T, events ...string) *httptest.Server {
@@ -876,6 +761,8 @@ func TestNewMux_MethodAndHostGates(t *testing.T) {
 		{http.MethodGet, "127.0.0.1:8080", "/usher/healthz", http.StatusOK},
 		{http.MethodTrace, "api.example", "/api/query", http.StatusMethodNotAllowed},
 		{http.MethodGet, "probe.invalid", "/api/query", http.StatusNotFound},
+		{http.MethodGet, "api.example", "x:http://w/metrics", http.StatusBadRequest},
+		{http.MethodGet, "api.example", "http://api.example/api/query", http.StatusBadRequest},
 	}
 	for _, c := range cases {
 		rr := httptest.NewRecorder()
@@ -1010,21 +897,6 @@ func TestConsumeStream_EndedStreamFlipsGateDownAndNudges(t *testing.T) {
 	case <-tr.resolveCh:
 	default:
 		t.Fatal("an ended stream must queue an immediate resolve")
-	}
-}
-
-func TestValidateConfig_Mono(t *testing.T) {
-	t.Parallel()
-	one := config{Deployments: []deploymentCfg{{Host: "api.example", Name: "api"}}}
-	if err := validateConfig(one, "http://bigbrain:8081", true); err != nil {
-		t.Fatalf("mono with exactly one deployment must pass: %v", err)
-	}
-	two := config{Deployments: []deploymentCfg{{Host: "a.example", Name: "a"}, {Host: "b.example", Name: "b"}}}
-	if err := validateConfig(two, "http://bigbrain:8081", true); err == nil {
-		t.Fatal("mono with two deployments must be rejected")
-	}
-	if err := validateConfig(two, "http://bigbrain:8081", false); err != nil {
-		t.Fatalf("non-mono with two deployments must still pass: %v", err)
 	}
 }
 

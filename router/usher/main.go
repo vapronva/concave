@@ -39,7 +39,8 @@ const (
 	nudgeCoalesceInterval   = 1 * time.Second
 	fastResolveInterval     = 5 * time.Second
 	readHeaderTimeout       = 10 * time.Second
-	idleTimeout             = 120 * time.Second
+	idleTimeout             = 150 * time.Second
+	controlPlaneIdleTimeout = 120 * time.Second
 	shutdownTimeout         = 10 * time.Second
 	streamBackoffInitial    = 1 * time.Second
 	streamBackoffCap        = 15 * time.Second
@@ -49,7 +50,6 @@ const (
 	maxClientVersionBytes   = 128
 	healthzPath             = "/usher/healthz"
 	readyzPath              = "/usher/readyz"
-	routesPerDeployment     = 2
 	maxHeaderBytes          = 64 * 1024
 	proxyBufferSize         = 32 * 1024
 )
@@ -95,7 +95,6 @@ type tracker struct {
 	nextResolve    time.Time
 	pollGate       stateGate
 	streamGate     stateGate
-	eventGate      stateGate
 	upstreamErrLog logThrottle
 	noLeaderLog    logThrottle
 	proxyBuffers   bufferPool
@@ -120,15 +119,8 @@ func (g *stateGate) ok() bool {
 	return g.down.CompareAndSwap(true, false)
 }
 
-func clonedDefaultTransport() *http.Transport {
-	if dt, ok := http.DefaultTransport.(*http.Transport); ok {
-		return dt.Clone()
-	}
-	return &http.Transport{}
-}
-
 func newProxyTransport() *http.Transport {
-	tr := clonedDefaultTransport()
+	tr := http.DefaultTransport.(*http.Transport).Clone() //nolint:errcheck // usher never replaces http.DefaultTransport
 	tr.Proxy = nil
 	tr.MaxIdleConns = 1024
 	tr.MaxIdleConnsPerHost = 512
@@ -186,7 +178,7 @@ func (t *tracker) newReverseProxy(u *url.URL) *httputil.ReverseProxy {
 		FlushInterval: -1,
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			if r.Context().Err() != nil {
-				return
+				panic(http.ErrAbortHandler)
 			}
 			if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 				http.Error(w, "request entity too large", http.StatusRequestEntityTooLarge)
@@ -373,7 +365,14 @@ func (t *tracker) consumeStream(ctx context.Context, u string) bool {
 		return false
 	}
 	t.streamGate.fail()
-	log.Printf("usher: %s leader-stream %s", t.host, streamEndReason(sctx, sc.Err(), idle))
+	switch {
+	case sctx.Err() != nil:
+		log.Printf("usher: %s leader-stream idle for %s, reconnecting", t.host, idle)
+	case sc.Err() != nil:
+		log.Printf("usher: %s leader-stream read error: %v", t.host, sc.Err())
+	default:
+		log.Printf("usher: %s leader-stream ended, reconnecting", t.host)
+	}
 	t.wakeResolve()
 	return time.Since(started) >= streamHealthyAfter
 }
@@ -402,30 +401,18 @@ func (t *tracker) handleStreamLine(line string) {
 	}
 	var ev leaderResponse
 	if err := json.Unmarshal([]byte(data), &ev); err != nil {
-		if t.eventGate.fail() {
-			log.Printf("usher: %s leader-stream bad event: %v", t.host, err)
-		}
+		log.Printf("usher: %s leader-stream bad event: %v", t.host, err)
 		return
 	}
-	t.eventGate.ok()
 	t.applyLeader(ev, false)
-}
-
-func streamEndReason(sctx context.Context, scanErr error, idle time.Duration) string {
-	if sctx.Err() != nil {
-		return fmt.Sprintf("idle for %s, reconnecting", idle)
-	}
-	if scanErr != nil {
-		return fmt.Sprintf("read error: %v", scanErr)
-	}
-	return "ended, reconnecting"
 }
 
 func isBlockedAPIPath(p string) bool {
 	for _, candidate := range []string{p, path.Clean("/" + p)} {
 		c := strings.ToLower(candidate)
 		if c == instancePrefix || strings.HasPrefix(c, instancePrefix+"/") || c == "/http" ||
-			strings.HasPrefix(c, "/http/") || c == "/metrics" {
+			strings.HasPrefix(c, "/http/") || c == "/metrics" || strings.HasPrefix(c, "/metrics/") ||
+			c == "/readyz" {
 			return true
 		}
 	}
@@ -557,17 +544,21 @@ func (t *tracker) wakeResolve() {
 }
 
 func newControlPlaneTransport() *http.Transport {
-	tr := clonedDefaultTransport()
+	tr := http.DefaultTransport.(*http.Transport).Clone() //nolint:errcheck // usher never replaces http.DefaultTransport
 	tr.Proxy = nil
 	tr.ResponseHeaderTimeout = resolveTimeout
 	tr.MaxIdleConns = 16
 	tr.MaxIdleConnsPerHost = 4
-	tr.IdleConnTimeout = idleTimeout
+	tr.IdleConnTimeout = controlPlaneIdleTimeout
 	return tr
 }
 
 func newMux(routes map[string]route, trackers []*tracker, monoHost string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.RequestURI, "/") {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
 		host := strings.TrimSuffix(strings.ToLower(stripPort(r.Host)), ".")
 		rt, ok := routes[host]
 		if !ok && monoHost != "" && !isProbePath(r.URL.Path) {
@@ -655,7 +646,7 @@ func run(cfg config, addr, bigbrainURL string, maxBody int64, mono bool, ln net.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	client := &http.Client{Transport: newControlPlaneTransport()}
-	routes := make(map[string]route, len(cfg.Deployments)*routesPerDeployment)
+	routes := make(map[string]route)
 	trackers := make([]*tracker, 0, len(cfg.Deployments))
 	var monoHost string
 	for _, d := range cfg.Deployments {
@@ -716,7 +707,7 @@ func validateConfig(cfg config, bigbrainURL string, mono bool) error {
 }
 
 func validateDeployments(deployments []deploymentCfg) error {
-	hosts := make(map[string]struct{}, len(deployments)*routesPerDeployment)
+	hosts := make(map[string]struct{})
 	names := make(map[string]string, len(deployments))
 	for _, d := range deployments {
 		if d.Host == "" {
@@ -734,8 +725,8 @@ func validateDeployments(deployments []deploymentCfg) error {
 			if host == "" {
 				continue
 			}
-			if err := validateHost(host); err != nil {
-				return err
+			if !hostnameRe.MatchString(strings.ToLower(host)) {
+				return fmt.Errorf("deployment host %q must be a bare hostname", host)
 			}
 			host = strings.ToLower(host)
 			if _, exists := hosts[host]; exists {
@@ -743,13 +734,6 @@ func validateDeployments(deployments []deploymentCfg) error {
 			}
 			hosts[host] = struct{}{}
 		}
-	}
-	return nil
-}
-
-func validateHost(host string) error {
-	if !hostnameRe.MatchString(strings.ToLower(host)) {
-		return fmt.Errorf("deployment host %q must be a bare hostname", host)
 	}
 	return nil
 }
